@@ -1,51 +1,53 @@
 """
-Proyección de carreras esperadas por equipo, usando SOLO datos que ya
-obtenemos de fuentes gratuitas reales (nada de xFIP/wRC+ inventado sin fuente).
-
-La idea: convertir OPS ofensivo + ERA del pitcheo rival + park factor en un
-número de carreras esperadas (mu), para después usar una distribución de
-Skellam y obtener una probabilidad de victoria estadísticamente fundamentada
-(en vez del promedio simple pitcher_score/hitter_score).
+Proyección de carreras esperadas por equipo.
 """
+from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION
 
-LEAGUE_AVG_RUNS_PER_GAME = 4.4  # aproximado, temporada moderna de MLB
+LEAGUE_AVG_RUNS_PER_GAME = 4.4
 LEAGUE_AVG_ERA = 4.30
-HOME_FIELD_RUNS_BONUS = 0.15  # carreras extra esperadas por jugar en casa
-
+HOME_FIELD_RUNS_BONUS = 0.15
 
 def project_team_runs(team_ops: float, opp_starter_era: float, opp_bullpen_era: float,
-                       league_ops: float = 0.750, league_era: float = LEAGUE_AVG_ERA,
-                       park_factor: float = 1.0, starter_weight: float = 0.65,
-                       is_home: bool = False) -> float:
+                      league_ops: float = 0.750, league_era: float = LEAGUE_AVG_ERA,
+                      park_factor: float = 1.0, starter_weight: float = 0.65,
+                      is_home: bool = False, temp_f: float = None) -> float:
     """
-    Carreras esperadas de UN equipo, dado:
-    - su propio OPS ofensivo
-    - el ERA del abridor Y bullpen RIVAL (entre más alto, más fácil anotarle)
-    - el park factor del estadio (afecta a ambas ofensivas por igual)
+    Carreras esperadas de UN equipo con ajuste de peso para el factor de parque.
     """
     offense_factor = team_ops / league_ops
     opp_pitching_era = starter_weight * opp_starter_era + (1 - starter_weight) * opp_bullpen_era
-    pitching_factor = opp_pitching_era / league_era  # rival débil (ERA alto) => anotamos más
+    pitching_factor = opp_pitching_era / league_era
 
-    runs = LEAGUE_AVG_RUNS_PER_GAME * offense_factor * pitching_factor * park_factor
+    # AJUSTE: Aplicamos el peso al factor de parque (PARK_FACTOR_WEIGHT)
+    # Si el estadio es 1.05 (5% más carreras), con peso 1.15 ahora será 5.75% más carreras.
+    weighted_park_factor = 1.0 + ((park_factor - 1.0) * PARK_FACTOR_WEIGHT)
+    
+    # AJUSTE: Corrección por clima extremo (>85°F)
+    weather_impact = 0.0
+    if temp_f and temp_f > 85:
+        weather_impact = WEATHER_CORRECTION
+
+    runs = LEAGUE_AVG_RUNS_PER_GAME * offense_factor * pitching_factor * weighted_park_factor
+    
+    # Sumar impacto del clima al total
+    runs += (runs * weather_impact)
+    
     if is_home:
         runs += HOME_FIELD_RUNS_BONUS
 
-    return max(runs, 0.3)  # piso para evitar mu=0 (rompe la distribución de Poisson/Skellam)
-def project_f5_runs(team_ops: float, opp_starter_era: float,
-                     league_ops: float = 0.750, league_era: float = LEAGUE_AVG_ERA,
-                     park_factor: float = 1.0, is_home: bool = False) -> float:
-    """
-    Carreras esperadas SOLO en las primeras 5 entradas (mercado F5).
+    return max(runs, 0.3)
 
-    A propósito usa SOLO el ERA del abridor, sin mezclar bullpen — en las
-    primeras 5 entradas normalmente sigue el abridor, el bullpen entra
-    después. Escala la proyección de 9 a 5 entradas (5/9).
-    """
+def project_f5_runs(team_ops: float, opp_starter_era: float,
+                    league_ops: float = 0.750, league_era: float = LEAGUE_AVG_ERA,
+                    park_factor: float = 1.0, is_home: bool = False) -> float:
+    # Nota: Aquí no aplicamos WEATHER_CORRECTION agresiva porque F5 suele ser más corta
+    # pero puedes aplicar el PARK_FACTOR_WEIGHT si deseas mayor sensibilidad.
     offense_factor = team_ops / league_ops
     pitching_factor = opp_starter_era / league_era
 
-    full_game_runs = LEAGUE_AVG_RUNS_PER_GAME * offense_factor * pitching_factor * park_factor
+    weighted_park_factor = 1.0 + ((park_factor - 1.0) * PARK_FACTOR_WEIGHT)
+
+    full_game_runs = LEAGUE_AVG_RUNS_PER_GAME * offense_factor * pitching_factor * weighted_park_factor
     f5_runs = full_game_runs * (5 / 9)
 
     if is_home:

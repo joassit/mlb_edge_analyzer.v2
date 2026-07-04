@@ -229,17 +229,22 @@ def get_pitcher_rest(pitcher_id: int, season: int = SEASON) -> dict:
         resp.raise_for_status()
         splits = resp.json()["stats"][0]["splits"]
         if splits:
-            # El gameLog normalmente viene ordenado del más reciente al más viejo;
-            # por seguridad, ordenamos explícito por fecha.
-            splits_sorted = sorted(splits, key=lambda s: s.get("date", ""), reverse=True)
-            last_game = splits_sorted[0]
-            last_date_str = last_game.get("date")
-            pitches = last_game.get("stat", {}).get("numberOfPitches") or last_game.get("stat", {}).get("pitchesThrown")
+            # El gameLog puede incluir el juego de HOY (todavía no jugado) como
+            # un registro placeholder — hay que excluirlo, si no, el "descanso"
+            # sale en 0 días para pitchers que ni siquiera han salido a lanzar.
+            today_str = _date.today().isoformat()
+            played_splits = [s for s in splits if s.get("date", "") < today_str]
 
-            if last_date_str:
-                last_date = _date.fromisoformat(last_date_str)
-                result["days_rest"] = (_date.today() - last_date).days
-            result["last_outing_pitches"] = pitches
+            if played_splits:
+                splits_sorted = sorted(played_splits, key=lambda s: s.get("date", ""), reverse=True)
+                last_game = splits_sorted[0]
+                last_date_str = last_game.get("date")
+                pitches = last_game.get("stat", {}).get("numberOfPitches") or last_game.get("stat", {}).get("pitchesThrown")
+
+                if last_date_str:
+                    last_date = _date.fromisoformat(last_date_str)
+                    result["days_rest"] = (_date.today() - last_date).days
+                result["last_outing_pitches"] = pitches
     except (requests.RequestException, KeyError, IndexError, ValueError) as e:
         logger.warning(f"No se pudo obtener descanso del pitcher {pitcher_id}: {e}")
 

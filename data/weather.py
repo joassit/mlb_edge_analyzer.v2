@@ -7,16 +7,24 @@ no aplica.
 """
 
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import requests
-from functools import lru_cache
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1/forecast"
 
+# Sesión con reintentos automáticos — antes cada timeout mataba esa consulta
+# de una vez; ahora reintenta con backoff antes de rendirse.
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504]
+)))
 
-@lru_cache(maxsize=32)
+
 def get_game_weather(lat: float, lon: float, game_datetime_iso: str) -> dict:
     """
     Devuelve temperatura (°F), velocidad de viento (mph) y dirección de
@@ -25,9 +33,7 @@ def get_game_weather(lat: float, lon: float, game_datetime_iso: str) -> dict:
     game_datetime_iso: string ISO 8601, ej. '2026-07-02T23:05:00Z'
     (el campo 'game_time' que ya devuelve data/mlb_api.py get_schedule).
     """
-    # Si la API falla, devolvemos 72°F (clima de domo) en vez de None 
-    # para que las fórmulas matemáticas del modelo no exploten más adelante.
-    result = {"temp_f": 72.0, "wind_mph": 0.0, "wind_direction_deg": 0.0}
+    result = {"temp_f": None, "wind_mph": None, "wind_direction_deg": None}
 
     if lat is None or lon is None or not game_datetime_iso:
         return result
@@ -49,8 +55,7 @@ def get_game_weather(lat: float, lon: float, game_datetime_iso: str) -> dict:
     }
 
     try:
-        # AQUI ESTÁ LA MAGIA: timeout de 3 segundos en lugar de 15
-        resp = requests.get(OPEN_METEO_BASE, params=params, timeout=3)
+        resp = _session.get(OPEN_METEO_BASE, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
@@ -66,17 +71,48 @@ def get_game_weather(lat: float, lon: float, game_datetime_iso: str) -> dict:
         else:
             idx = 0  # fallback: primera hora del día si no hay match exacto
 
-        # Actualizamos con los datos reales si todo salió bien
-        if temps[idx] is not None:
-            result["temp_f"] = temps[idx]
-            result["wind_mph"] = winds[idx]
-            result["wind_direction_deg"] = wind_dirs[idx]
+        result["temp_f"] = temps[idx]
+        result["wind_mph"] = winds[idx]
+        result["wind_direction_deg"] = wind_dirs[idx]
 
-    except requests.exceptions.Timeout:
-        # Cambiamos warning por debug para no ensuciar la consola
-        logger.debug(f"Timeout del clima en ({lat},{lon}). Usando datos por defecto (72°F).")
-        
     except (requests.RequestException, KeyError, IndexError, ValueError) as e:
-        logger.debug(f"No se pudo obtener clima ({lat},{lon}): {e}")
+        logger.warning(f"No se pudo obtener clima ({lat},{lon}): {e}")
 
     return result
+
+
+def preload_weather(games: list[dict], park_lookup) -> dict[int, dict]:
+    """
+    Trae el clima de todos los estadios de la jornada EN PARALELO, una sola
+    vez por equipo local (varios juegos comparten fecha/ciudad, no hace
+    falta pedirlo dos veces). Esto reemplaza N llamadas secuenciales (donde
+    un timeout de 15s en una bloqueaba a las siguientes) por llamadas
+    concurrentes con reintento automático.
+
+    park_lookup: función tipo data.park_factors.get_park_info
+
+    Devuelve: {home_team_id: {"temp_f":..., "wind_mph":..., "wind_direction_deg":...}}
+    """
+    unique_by_team: dict[int, tuple] = {}
+    for g in games:
+        team_id = g["home_team_id"]
+        if team_id not in unique_by_team:
+            park = park_lookup(team_id)
+            unique_by_team[team_id] = (park["lat"], park["lon"], g["game_time"])
+
+    results: dict[int, dict] = {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_team = {
+            executor.submit(get_game_weather, lat, lon, game_time): team_id
+            for team_id, (lat, lon, game_time) in unique_by_team.items()
+        }
+        for future in future_to_team:
+            team_id = future_to_team[future]
+            try:
+                results[team_id] = future.result()
+            except Exception as e:
+                logger.warning(f"Clima falló para team_id={team_id}: {e}")
+                results[team_id] = {"temp_f": None, "wind_mph": None, "wind_direction_deg": None}
+
+    return results
