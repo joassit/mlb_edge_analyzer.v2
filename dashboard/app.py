@@ -63,8 +63,19 @@ else:
                 else:
                     st.info("Sin cuotas cargadas")
 
+            picks = r.get("_picks", [])
+            if picks:
+                st.markdown("**Picks recomendados:**")
+                for p in picks:
+                    line_txt = f" {p['line']:+.1f}" if p.get("line") is not None else ""
+                    label = f"{p['market']} → {p['selection']}{line_txt}"
+                    if p.get("forced"):
+                        st.caption(f"⚠️ {label} — forzado, sin edge real (EV {p['ev']:+.2f})")
+                    else:
+                        st.success(f"{label}  (edge {p['edge']:+.1%}, EV {p['ev']:+.2f})")
+
             st.text_area("Tu decisión final", key=f"decision_{r['game_pk']}", placeholder="Notas / decisión...")
 
-    df = pd.DataFrame(rows).drop(columns=["_feature_snapshot"], errors="ignore")
+    df = pd.DataFrame(rows).drop(columns=["_feature_snapshot", "_picks"], errors="ignore")
     st.divider()
     st.dataframe(df, use_container_width=True)

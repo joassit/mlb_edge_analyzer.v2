@@ -63,3 +63,13 @@ ODDS_CACHE_DIR = os.getenv("ODDS_CACHE_DIR", ".cache/odds")
 # (heurístico y Skellam) coinciden en el favorito. Es una preselección
 # para que decidas tú, nunca una apuesta automática.
 REVIEW_EDGE_THRESHOLD = float(os.getenv("REVIEW_EDGE_THRESHOLD", "0.03"))
+
+# --- Picks recomendados (moneyline / run_line / totals) ---
+# Un candidato es "viable" si su EV o su edge superan estos umbrales
+# (criterio OR, no AND). Si ningún mercado es viable y FORCE_AT_LEAST_ONE_PICK
+# está activo, se genera igual el menos malo, marcado forced=True — nunca se
+# mezcla con los picks reales en las métricas de desempeño.
+MIN_PICK_EV = float(os.getenv("MIN_PICK_EV", "0.05"))
+MIN_PICK_EDGE = float(os.getenv("MIN_PICK_EDGE", "0.04"))
+FORCE_AT_LEAST_ONE_PICK = os.getenv("FORCE_AT_LEAST_ONE_PICK", "true").lower() == "true"
+MAX_PICKS_PER_GAME = int(os.getenv("MAX_PICKS_PER_GAME", "3"))

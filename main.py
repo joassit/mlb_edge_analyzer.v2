@@ -14,13 +14,17 @@ from data.park_factors import get_park_info
 from data.weather import preload_weather
 from model.runs_projection import LEAGUE_AVG_ERA
 from model.predictor import predict_from_raw_inputs
-from model.edge import implied_prob, edge, expected_value, market_favorite
+from model.edge import implied_prob, edge, expected_value, market_favorite, no_vig_probs
+from model.picks import generate_pick_candidates, select_picks_for_game
 from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
-from db.database import init_db, save_analysis, save_feature_snapshot
-from reports.generate_report import print_report, export_csv
+from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
+from reports.generate_report import print_report, export_csv, export_picks_csv
 from audit_live import audit_live
 from tracking.results_tracker import update_results, print_performance_report
-from config import STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD
+from config import (
+    STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
+    MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
+)
 from version_info import get_git_commit
 
 # Cuotas de mercado cargadas a mano — se usan solo si no hay match en vivo
@@ -29,6 +33,17 @@ from version_info import get_git_commit
 # `python data/mlb_api.py`) y las cuotas moneyline reales.
 MARKET_ODDS = {
     # 717468: {"away": -135, "home": +115},
+}
+
+# Run Line y Totales arrancan solo con cuotas manuales — The Odds API cobra
+# presupuesto por mercado × región, así que pedir spreads/totals en vivo
+# triplicaría el consumo de ODDS_API_MONTHLY_BUDGET por llamada. Se conecta
+# en vivo más adelante si el presupuesto lo permite.
+MARKET_SPREADS = {
+    # 717468: {"line": 1.5, "home": -120, "away": +100},
+}
+MARKET_TOTALS = {
+    # 717468: {"line": 8.5, "over": -110, "under": -110},
 }
 
 
@@ -70,10 +85,28 @@ def analyze_today() -> list[dict]:
         no_vig = consensus_no_vig_prob(odds_event) if odds_event else None
         price = live_price or MARKET_ODDS.get(g["game_pk"])
 
+        # Run Line y Totales: solo cuotas manuales por ahora (ver
+        # MARKET_SPREADS/MARKET_TOTALS arriba) — se calcula su no-vig igual
+        # que en moneyline, cuando ambos lados están cargados.
+        manual_rl = MARKET_SPREADS.get(g["game_pk"])
+        if manual_rl and manual_rl.get("home") is not None and manual_rl.get("away") is not None:
+            rl_home_novig, rl_away_novig = no_vig_probs(manual_rl["home"], manual_rl["away"])
+        else:
+            rl_home_novig = rl_away_novig = None
+
+        manual_totals = MARKET_TOTALS.get(g["game_pk"])
+        if manual_totals and manual_totals.get("over") is not None and manual_totals.get("under") is not None:
+            totals_over_novig, totals_under_novig = no_vig_probs(manual_totals["over"], manual_totals["under"])
+        else:
+            totals_over_novig = totals_under_novig = None
+
         # Insumos crudos, congelados en el Feature Snapshot Store — el
         # mismo dict alimenta model.predictor.predict_from_raw_inputs()
         # hoy en vivo, y a cualquier recálculo histórico futuro que lea
-        # este snapshot en vez de volver a golpear ninguna API.
+        # este snapshot en vez de volver a golpear ninguna API. Las cuotas
+        # de RL/Totales también se congelan aquí: los odds APIs gratuitos
+        # no dan cuotas históricas, así que este es el único momento en
+        # que se pueden capturar para un backtest futuro de picks.
         raw_inputs = {
             "away_era": away_era, "home_era": home_era,
             "away_ops": away_ops, "home_ops": home_ops, "league_ops": league_ops,
@@ -87,6 +120,7 @@ def analyze_today() -> list[dict]:
             "temp_f": weather.get("temp_f"), "wind_mph": weather.get("wind_mph"),
             "wind_direction_deg": weather.get("wind_direction_deg"),
             "market_price": price, "market_no_vig": no_vig,
+            "market_run_line": manual_rl, "market_totals": manual_totals,
             "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
         }
 
@@ -138,6 +172,35 @@ def analyze_today() -> list[dict]:
             and max(abs(away_edge), abs(home_edge)) >= REVIEW_EDGE_THRESHOLD
         )
 
+        # Picks recomendados — hasta 1 por mercado (moneyline/run_line/
+        # totals), como máximo MAX_PICKS_PER_GAME por partido. Un mercado
+        # sin cuotas cargadas simplemente no compite (no hay obligación de
+        # que el pick de moneyline exista). Si ninguno tiene edge real,
+        # FORCE_AT_LEAST_ONE_PICK genera el menos malo marcado forced=True.
+        market_lines = {}
+        if price:
+            market_lines["moneyline"] = {
+                "home_odds": price["home"], "away_odds": price["away"],
+                "home_novig": home_market_no_vig_prob, "away_novig": away_market_no_vig_prob,
+            }
+        if manual_rl:
+            market_lines["run_line"] = {
+                "line": manual_rl.get("line", 1.5),
+                "home_odds": manual_rl.get("home"), "away_odds": manual_rl.get("away"),
+                "home_novig": rl_home_novig, "away_novig": rl_away_novig,
+            }
+        if manual_totals:
+            market_lines["totals"] = {
+                "line": manual_totals.get("line"),
+                "over_odds": manual_totals.get("over"), "under_odds": manual_totals.get("under"),
+                "over_novig": totals_over_novig, "under_novig": totals_under_novig,
+            }
+
+        candidates = generate_pick_candidates(prediction, market_lines,
+                                               min_ev=MIN_PICK_EV, min_edge=MIN_PICK_EDGE)
+        picks = select_picks_for_game(candidates, force_at_least_one=FORCE_AT_LEAST_ONE_PICK,
+                                       max_picks=MAX_PICKS_PER_GAME)
+
         row = {
             "game_pk": g["game_pk"],
             "game_date": date.today().strftime("%Y-%m-%d"),
@@ -178,10 +241,13 @@ def analyze_today() -> list[dict]:
             "flag_review": flag_review,
             "model_version": MODEL_VERSION,
             "git_commit": get_git_commit(),
-            # Clave interna — run_pipeline() la extrae antes de reportar/
-            # exportar (no es un dato de reporte, es el punto-en-el-tiempo
-            # para recálculos futuros vía model.predictor).
+            # Claves internas — run_pipeline() las extrae antes de guardar
+            # en GameAnalysis (no son columnas de esa tabla): _feature_snapshot
+            # es el punto-en-el-tiempo para recálculos futuros vía
+            # model.predictor; _picks son los picks recomendados, que se
+            # persisten en su propia tabla (Pick) vía save_picks().
             "_feature_snapshot": raw_inputs,
+            "_picks": picks,
         }
 
         results.append(row)
@@ -205,14 +271,33 @@ def run_pipeline():
     results = analyze_today()
 
     if results:
+        picks_by_game = {}
+        all_picks_rows = []
+
         for r in results:
             snapshot = r.pop("_feature_snapshot", None)
+            picks = r.pop("_picks", [])
+
             save_analysis(r)
             if snapshot is not None:
                 save_feature_snapshot(r["game_pk"], r["game_date"], snapshot)
-        print_report(results)
+            if picks:
+                save_picks(r["game_pk"], r["game_date"], picks, MODEL_VERSION)
+                picks_by_game[r["game_pk"]] = picks
+                for p in picks:
+                    all_picks_rows.append({
+                        "game_pk": r["game_pk"], "game_date": r["game_date"],
+                        "away_team": r["away_team"], "home_team": r["home_team"],
+                        **p,
+                    })
+
+        print_report(results, picks_by_game=picks_by_game)
         path = export_csv(results)
         print(f"\nReporte de hoy exportado a: {path}")
+
+        if all_picks_rows:
+            picks_path = export_picks_csv(all_picks_rows)
+            print(f"Picks exportados a: {picks_path}")
     else:
         print("No hay juegos para analizar hoy.")
 

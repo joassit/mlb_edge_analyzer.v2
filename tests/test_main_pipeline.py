@@ -172,3 +172,75 @@ def test_analyze_today_does_not_flag_review_without_market_odds(monkeypatch):
     row = results[0]
 
     assert row["flag_review"] is False
+
+
+def _clear_manual_markets(monkeypatch):
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "MARKET_SPREADS", {})
+    monkeypatch.setattr(main, "MARKET_TOTALS", {})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+
+
+def test_analyze_today_generates_up_to_three_picks_with_all_markets_loaded(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": 200, "home": -250}})
+    monkeypatch.setattr(main, "MARKET_SPREADS", {999999: {"line": 1.5, "home": 180, "away": -220}})
+    monkeypatch.setattr(main, "MARKET_TOTALS", {999999: {"line": 8.5, "over": 150, "under": -180}})
+
+    results = main.analyze_today()
+    picks = results[0]["_picks"]
+
+    markets = {p["market"] for p in picks}
+    assert markets.issubset({"moneyline", "run_line", "totals"})
+    assert len(picks) <= 3
+    assert len(picks) >= 1
+
+
+def test_analyze_today_no_moneyline_required_only_totals_loaded(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_TOTALS", {999999: {"line": 8.5, "over": 150, "under": -180}})
+
+    results = main.analyze_today()
+    picks = results[0]["_picks"]
+
+    assert len(picks) == 1
+    assert picks[0]["market"] == "totals"
+
+
+def test_analyze_today_forces_a_pick_when_no_market_has_edge(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+    # Cuota casi exactamente igual a la que implica la probabilidad real del
+    # modelo con este fixture (~0.53/0.47) -> ni home ni away superan los
+    # umbrales de edge/EV.
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": -113, "home": 105}})
+
+    results = main.analyze_today()
+    picks = results[0]["_picks"]
+
+    assert len(picks) == 1
+    assert picks[0]["forced"] is True
+
+
+def test_analyze_today_generates_no_picks_without_any_market_data(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+
+    results = main.analyze_today()
+
+    assert results[0]["_picks"] == []
+
+
+def test_analyze_today_feature_snapshot_captures_manual_run_line_and_totals(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_SPREADS", {999999: {"line": 1.5, "home": 180, "away": -220}})
+    monkeypatch.setattr(main, "MARKET_TOTALS", {999999: {"line": 8.5, "over": 150, "under": -180}})
+
+    results = main.analyze_today()
+    snapshot = results[0]["_feature_snapshot"]
+
+    assert snapshot["market_run_line"] == {"line": 1.5, "home": 180, "away": -220}
+    assert snapshot["market_totals"] == {"line": 8.5, "over": 150, "under": -180}

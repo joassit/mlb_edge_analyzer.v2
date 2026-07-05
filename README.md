@@ -17,6 +17,9 @@ de apuestas de MLB. Construido por etapas, empezando 100% gratis.
 - ✅ Candidatos a revisión marcados automáticamente (edge por encima de un
       umbral + los dos modelos de acuerdo en el favorito) — nunca una apuesta
       automática, solo una preselección
+- ✅ Picks recomendados por partido en Moneyline/Run Line/Totales (0 a 3,
+      uno por mercado), con picks forzados marcados y separados en las
+      métricas cuando ningún mercado tiene edge real
 - ✅ Guardar histórico en base de datos (SQLite por defecto), con upsert
       idempotente — re-correr el pipeline el mismo día no duplica filas
 - ✅ Feature Snapshot Store — insumos crudos congelados por predicción, y un
@@ -190,6 +193,58 @@ MARKET_ODDS = {
 }
 ```
 
+### Run Line y Totales (solo manual por ahora)
+
+Mismo patrón, en `MARKET_SPREADS` y `MARKET_TOTALS` dentro de `main.py`.
+Arrancan en manual (no vía The Odds API en vivo) a propósito: pedir los
+mercados `spreads`/`totals` además de `h2h` **triplicaría el consumo de
+presupuesto de The Odds API por llamada** (cobra por mercado × región, no
+por request). Conectarlos en vivo queda para cuando el flujo de picks esté
+validado y el presupuesto lo permita.
+
+```python
+MARKET_SPREADS = {
+    717468: {"line": 1.5, "home": -120, "away": +100},
+}
+MARKET_TOTALS = {
+    717468: {"line": 8.5, "over": -110, "under": -110},
+}
+```
+
+## Picks recomendados
+
+Cada partido genera **entre 0 y 3 picks** (uno por mercado: moneyline, run
+line, totales) según las cuotas que tengas cargadas — no hay obligación de
+que exista un pick de moneyline específicamente, se evalúa el mejor mercado
+disponible con datos.
+
+Un candidato es viable si su EV supera `MIN_PICK_EV` (0.05 por defecto) **o**
+su edge supera `MIN_PICK_EDGE` (0.04 por defecto). Si ningún mercado es
+viable y `FORCE_AT_LEAST_ONE_PICK` está activo (por defecto sí), se genera
+igual el menos malo, marcado `forced=True` — para que el reporte nunca deje
+un partido sin recomendación, sin mentirte sobre cuáles picks tienen edge
+real. Las métricas de desempeño (`tracking.results_tracker.compute_pick_performance`)
+siempre separan picks reales de forzados — mezclarlos haría que un relleno
+sin edge se vea como una falla del modelo real.
+
+Los picks viven en su propia tabla (`Pick`, en `db/database.py`), separada
+de `Bet`: un Pick es la recomendación del sistema en unidades **nocionales**
+(1u pareja); un Bet es el dinero real que decidiste apostar. No todo Pick se
+convierte en Bet, y liquidar Picks nunca toca el ROI real de Bet.
+
+Se muestran en consola, en el dashboard, y en un CSV separado
+(`reports/picks_YYYYMMDD.csv`, una fila por pick — no encajan en el CSV de
+un partido por fila).
+
+Ajustables por variable de entorno:
+
+```bash
+export MIN_PICK_EV=0.05
+export MIN_PICK_EDGE=0.04
+export FORCE_AT_LEAST_ONE_PICK=true
+export MAX_PICKS_PER_GAME=3
+```
+
 ## Favorito del mercado y candidatos a revisión
 
 Cada partido con cuotas cargadas (en vivo o manuales) muestra explícitamente
@@ -315,12 +370,17 @@ Ya implementado (Fase 0 + 1 + 2 de la auditoría técnica):
 - [x] Tracking automático de resultados reales vs. predicción del modelo
 - [x] Idempotencia (upsert), contrato de validación de esquema, CI
 - [x] Feature Snapshot Store (recálculo histórico sin fuga de información)
+- [x] Picks recomendados multi-mercado (Moneyline/Run Line/Totales), con
+      picks forzados separados de los reales en las métricas de desempeño
 
 Pendiente (deliberadamente fuera de alcance por ahora — mono-MLB primero):
 
 - [ ] Risk Engine (límites de exposición agregada/correlación de portafolio)
 - [ ] Model Registry versionado (más allá de `model_version` + `git_commit`)
-- [ ] Backtesting Engine sobre los snapshots ya congelados
+- [ ] Backtesting Engine sobre picks históricos (hoy el backtest walk-forward
+      solo recalcula probabilidades, no picks — ver tracking/backtest.py)
+- [ ] Conectar Run Line/Totales en vivo vía The Odds API (spreads/totals),
+      cuando el presupuesto mensual lo permita (hoy solo manual)
 - [ ] Orchestration Engine (scheduler con reintentos/checkpoints, necesario
       para capturar la cuota de cierre real para CLV automáticamente)
 - [ ] Regresión logística / shrinkage bayesiano reemplazando las constantes

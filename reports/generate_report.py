@@ -7,10 +7,15 @@ import csv
 import os
 
 
-def print_report(rows: list[dict]) -> None:
+_PICK_MARKET_LABELS = {"moneyline": "Moneyline", "run_line": "Run Line", "totals": "Totales"}
+
+
+def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
     if not rows:
         print("No hay juegos analizados hoy.")
         return
+
+    picks_by_game = picks_by_game or {}
 
     print("\n" + "=" * 70)
     print(f"  MLB EDGE ANALYZER — Reporte del {date.today().strftime('%Y-%m-%d')}")
@@ -64,13 +69,22 @@ def print_report(rows: list[dict]) -> None:
                 print(f"  🔎 candidato a revisión: edge >= umbral y los dos modelos coinciden en el favorito")
         else:
             print("  Mercado  -> (sin cuotas cargadas todavía)")
+
+        picks = picks_by_game.get(r["game_pk"], [])
+        if picks:
+            print("  Picks recomendados:")
+            for p in picks:
+                label = _PICK_MARKET_LABELS.get(p["market"], p["market"])
+                selection = p["selection"]
+                line_txt = f" {p['line']:+.1f}" if p.get("line") is not None else ""
+                tag = "  ⚠️ forzado (sin edge real)" if p.get("forced") else ""
+                print(f"    • {label:<9} -> {selection}{line_txt}  "
+                      f"(edge {p['edge']:+.1%}, EV {p['ev']:+.2f}){tag}")
+
         print("-" * 70)
 
 
-def export_csv(rows: list[dict], path: str = None) -> str:
-    if path is None:
-        path = f"reports/reporte_{date.today().strftime('%Y%m%d')}.csv"
-
+def _write_csv(rows: list[dict], path: str) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
 
     if not rows:
@@ -82,3 +96,17 @@ def export_csv(rows: list[dict], path: str = None) -> str:
         writer.writerows(rows)
 
     return path
+
+
+def export_csv(rows: list[dict], path: str = None) -> str:
+    if path is None:
+        path = f"reports/reporte_{date.today().strftime('%Y%m%d')}.csv"
+    return _write_csv(rows, path)
+
+
+def export_picks_csv(rows: list[dict], path: str = None) -> str:
+    """Una fila por pick (0 a 3 por partido) — no encaja en export_csv,
+    que es una fila por partido, así que vive en su propio archivo."""
+    if path is None:
+        path = f"reports/picks_{date.today().strftime('%Y%m%d')}.csv"
+    return _write_csv(rows, path)

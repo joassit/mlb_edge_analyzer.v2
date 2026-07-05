@@ -121,6 +121,43 @@ class Bet(Base):
     clv = Column(Float, nullable=True)  # closing line value, en probabilidad (ver record_closing_odds)
 
 
+class Pick(Base):
+    """
+    Recomendación generada POR EL SISTEMA — separada de Bet a propósito,
+    igual que Bet está separada de GameAnalysis: un Pick es lo que el
+    modelo recomienda (unidades nocionales, 1u pareja por pick); Bet es el
+    dinero real que decidiste apostar. No todo Pick se convierte en Bet, y
+    liquidar Picks no debe tocar el ROI real de Bet.
+
+    Hasta 3 por partido (uno por mercado: moneyline, run_line, totals).
+    `forced=True` marca los picks generados sin edge real, solo para
+    cumplir la regla de "siempre al menos 1 pick por partido" — las
+    métricas de desempeño los mantienen separados de los picks reales.
+    """
+    __tablename__ = "picks"
+    __table_args__ = (
+        UniqueConstraint("game_pk", "game_date", "market", "selection",
+                         name="uq_pick_game_market_selection"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    game_pk = Column(Integer, nullable=False)
+    game_date = Column(String, nullable=False)
+    market = Column(String, nullable=False)      # "moneyline" | "run_line" | "totals"
+    selection = Column(String, nullable=False)   # "home"/"away" (ML, RL) o "over"/"under" (totales)
+    line = Column(Float, nullable=True)          # null en ML; -1.5/+1.5 en RL; ej. 8.5 en totales
+    model_prob = Column(Float, nullable=False)
+    market_prob = Column(Float, nullable=True)
+    edge = Column(Float, nullable=True)
+    ev = Column(Float, nullable=True)
+    odds_used = Column(Float, nullable=True)
+    forced = Column(Boolean, nullable=False, default=False)
+    result = Column(String, default="pending")   # pending / win / loss / push
+    profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)
+    model_version = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class FeatureSnapshot(Base):
     """
     Insumos crudos (ERA, OPS, bullpen, parque, clima, cuotas) usados para
@@ -249,6 +286,94 @@ def save_analysis(row: dict) -> None:
         else:
             session.add(GameAnalysis(**row))
         session.commit()
+    finally:
+        session.close()
+
+
+def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: str) -> None:
+    """
+    Upsert por (game_pk, game_date, market, selection): re-ejecutar el
+    pipeline el mismo día actualiza los picks existentes en vez de
+    duplicarlos — mismo principio de idempotencia que save_analysis().
+    """
+    session = SessionLocal()
+    try:
+        for p in picks:
+            existing = (
+                session.query(Pick)
+                .filter_by(game_pk=game_pk, game_date=game_date,
+                           market=p["market"], selection=p["selection"])
+                .one_or_none()
+            )
+            fields = {
+                "line": p.get("line"),
+                "model_prob": p["model_prob"],
+                "market_prob": p.get("market_prob"),
+                "edge": p.get("edge"),
+                "ev": p.get("ev"),
+                "odds_used": p.get("odds_used"),
+                "forced": p.get("forced", False),
+                "model_version": model_version,
+            }
+            if existing:
+                for key, value in fields.items():
+                    setattr(existing, key, value)
+            else:
+                session.add(Pick(game_pk=game_pk, game_date=game_date,
+                                  market=p["market"], selection=p["selection"], **fields))
+        session.commit()
+    finally:
+        session.close()
+
+
+def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
+    """Determina win/loss/push de un Pick contra el resultado real del
+    juego. `result` es el mismo dict que usa save_result / settle_bets_for_game
+    (home_score, away_score, winner, total_runs)."""
+    if pick.market == "moneyline":
+        return "win" if pick.selection == result["winner"] else "loss"
+
+    if pick.market == "run_line":
+        diff = result["home_score"] - result["away_score"]
+        if pick.selection == "home":
+            return "win" if diff >= 2 else "loss"
+        return "win" if diff <= 1 else "loss"  # visitante cubre +1.5: pierde por 1 o gana
+
+    if pick.market == "totals":
+        if result["total_runs"] == pick.line:
+            return "push"
+        over_hit = result["total_runs"] > pick.line
+        if pick.selection == "over":
+            return "win" if over_hit else "loss"
+        return "win" if not over_hit else "loss"
+
+    raise ValueError(f"Mercado desconocido en Pick: {pick.market}")
+
+
+def settle_picks_for_game(game_pk: int, result: dict) -> int:
+    """
+    Liquida TODOS los picks pendientes de un juego ya terminado (moneyline,
+    run_line, totals), calculando profit_unit en unidades nocionales (1u
+    pareja por pick) — separado del profit/stake real de Bet.
+    """
+    session = SessionLocal()
+    try:
+        picks = (
+            session.query(Pick)
+            .filter(Pick.game_pk == game_pk, Pick.result == "pending")
+            .all()
+        )
+        for p in picks:
+            outcome = _resolve_pick_outcome(p, result)
+            p.result = outcome
+            if outcome == "push":
+                p.profit_unit = 0.0
+            elif outcome == "win":
+                p.profit_unit = (100 / abs(p.odds_used)) if p.odds_used < 0 else (p.odds_used / 100)
+            else:
+                p.profit_unit = -1.0
+        session.commit()
+        return len(picks)
     finally:
         session.close()
 

@@ -17,8 +17,8 @@ import math
 
 from data.mlb_api import get_game_result
 from db.database import (
-    SessionLocal, GameAnalysis, ActualResult, Bet,
-    save_result, get_predictions_without_result, settle_bets_for_game,
+    SessionLocal, GameAnalysis, ActualResult, Bet, Pick,
+    save_result, get_predictions_without_result, settle_bets_for_game, settle_picks_for_game,
 )
 
 logger = logging.getLogger("mlb_edge_analyzer")
@@ -55,6 +55,10 @@ def update_results(days_back: int = 5) -> int:
         settled = settle_bets_for_game(pred["game_pk"], result["winner"])
         if settled:
             logger.info(f"{settled} apuesta(s) liquidada(s) para game_pk={pred['game_pk']}")
+
+        settled_picks = settle_picks_for_game(pred["game_pk"], result)
+        if settled_picks:
+            logger.info(f"{settled_picks} pick(s) liquidado(s) para game_pk={pred['game_pk']}")
 
         logger.info(
             f"Resultado guardado: {pred['away_team']} @ {pred['home_team']} "
@@ -163,6 +167,56 @@ def compute_bet_performance(days: int = 30) -> dict:
     }
 
 
+def compute_pick_performance(days: int = 30) -> dict:
+    """
+    Desempeño de los Picks generados por el sistema — en unidades
+    NOCIONALES (1u pareja por pick), NO dinero real (eso vive en
+    compute_bet_performance). Separa picks reales (forced=False) de picks
+    forzados (forced=True) para no diluir la señal real con el relleno de
+    la regla "siempre al menos 1 pick por partido" — mezclarlos haría que
+    un mal pick forzado (sin edge) se vea como una falla del modelo real.
+    """
+    from datetime import date, timedelta
+
+    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    session = SessionLocal()
+    try:
+        picks = (
+            session.query(Pick)
+            .filter(Pick.game_date >= cutoff, Pick.result.in_(["win", "loss", "push"]))
+            .all()
+        )
+    finally:
+        session.close()
+
+    def _summarize(subset: list) -> dict:
+        if not subset:
+            return {"n_picks": 0, "win_rate": None, "roi": None}
+        decided = [p for p in subset if p.result != "push"]
+        wins = sum(1 for p in decided if p.result == "win")
+        total_profit = sum(p.profit_unit for p in subset if p.profit_unit is not None)
+        return {
+            "n_picks": len(subset),
+            "win_rate": (wins / len(decided)) if decided else None,
+            "roi": (total_profit / len(subset)) if subset else None,
+        }
+
+    by_market = {}
+    for market in ("moneyline", "run_line", "totals"):
+        market_picks = [p for p in picks if p.market == market]
+        by_market[market] = {
+            "real": _summarize([p for p in market_picks if not p.forced]),
+            "forced": _summarize([p for p in market_picks if p.forced]),
+        }
+
+    return {
+        "overall_real": _summarize([p for p in picks if not p.forced]),
+        "overall_forced": _summarize([p for p in picks if p.forced]),
+        "by_market": by_market,
+    }
+
+
 def compute_clv_performance(days: int = 30) -> dict:
     """
     Closing Line Value promedio de las apuestas que ya tienen cuota de
@@ -223,6 +277,31 @@ def print_performance_report(days: int = 30) -> None:
         veredicto = "tu modelo le gana al mercado" if diff > 0 else "el mercado le gana a tu modelo"
         print(f"Brier del mercado: {metrics['market_brier_score']:.4f}  "
               f"(consenso sin vig, {metrics['market_n_games']} juegos con cuota) — {veredicto}")
+
+    pick_perf = compute_pick_performance(days=days)
+    print()
+    if pick_perf["overall_real"]["n_picks"] == 0 and pick_perf["overall_forced"]["n_picks"] == 0:
+        print("Todavía no hay picks liquidados.")
+    else:
+        print("--- Picks del sistema (unidades nocionales, no dinero real) ---")
+        real, forced = pick_perf["overall_real"], pick_perf["overall_forced"]
+        if real["n_picks"]:
+            print(f"Reales (con edge):   {real['n_picks']} picks, "
+                  f"{real['win_rate']:.1%} win rate, ROI {real['roi']:+.1%}")
+        if forced["n_picks"]:
+            print(f"Forzados (sin edge): {forced['n_picks']} picks, "
+                  f"{forced['win_rate']:.1%} win rate, ROI {forced['roi']:+.1%}  "
+                  f"(relleno, no mezclar con el desempeño real)")
+        for market, perf in pick_perf["by_market"].items():
+            n_real, n_forced = perf["real"]["n_picks"], perf["forced"]["n_picks"]
+            if not n_real and not n_forced:
+                continue
+            parts = []
+            if n_real:
+                parts.append(f"reales={n_real} (ROI {perf['real']['roi']:+.1%})")
+            if n_forced:
+                parts.append(f"forzados={n_forced} (ROI {perf['forced']['roi']:+.1%})")
+            print(f"  {market}: " + "  |  ".join(parts))
 
     bet_perf = compute_bet_performance(days=days)
     print()

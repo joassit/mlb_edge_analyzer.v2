@@ -146,3 +146,69 @@ def test_compute_metrics_market_brier_is_none_without_market_data(tmp_path, monk
 
     assert metrics["market_n_games"] == 0
     assert metrics["market_brier_score"] is None
+
+
+def test_compute_pick_performance_separates_real_from_forced_picks(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_perf_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    # Pick real, ganador
+    session.add(database.Pick(
+        game_pk=1, game_date=today, market="moneyline", selection="away",
+        model_prob=0.65, forced=False, result="win", profit_unit=0.8,
+    ))
+    # Pick forzado, perdedor -- no debe contaminar el desempeño "real"
+    session.add(database.Pick(
+        game_pk=2, game_date=today, market="totals", selection="over",
+        model_prob=0.50, forced=True, result="loss", profit_unit=-1.0,
+    ))
+    session.commit()
+    session.close()
+
+    perf = results_tracker.compute_pick_performance(days=30)
+
+    assert perf["overall_real"]["n_picks"] == 1
+    assert perf["overall_real"]["win_rate"] == 1.0
+    assert perf["overall_forced"]["n_picks"] == 1
+    assert perf["overall_forced"]["win_rate"] == 0.0
+    assert perf["by_market"]["moneyline"]["real"]["n_picks"] == 1
+    assert perf["by_market"]["totals"]["forced"]["n_picks"] == 1
+    assert perf["by_market"]["run_line"]["real"]["n_picks"] == 0
+
+
+def test_compute_pick_performance_treats_push_as_no_stake_loss_neutral(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_push_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    session.add(database.Pick(
+        game_pk=3, game_date=today, market="totals", selection="over",
+        model_prob=0.55, forced=False, result="push", profit_unit=0.0,
+    ))
+    session.commit()
+    session.close()
+
+    perf = results_tracker.compute_pick_performance(days=30)
+
+    assert perf["overall_real"]["n_picks"] == 1
+    assert perf["overall_real"]["win_rate"] is None  # sin decididos (push no cuenta como ganado/perdido)
+    assert perf["overall_real"]["roi"] == 0.0
+
+
+def test_compute_pick_performance_empty_when_no_picks_settled(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_empty_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    perf = results_tracker.compute_pick_performance(days=30)
+
+    assert perf["overall_real"]["n_picks"] == 0
+    assert perf["overall_forced"]["n_picks"] == 0
