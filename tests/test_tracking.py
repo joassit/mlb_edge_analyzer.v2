@@ -96,3 +96,53 @@ def test_compute_clv_performance_empty_when_no_bets_have_closing_line(tmp_path, 
 
     assert perf["n_bets"] == 0
     assert perf["avg_clv"] is None
+
+
+def test_compute_metrics_includes_market_brier_benchmark(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/metrics_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    # El modelo acertó con alta confianza (0.9); el mercado estaba casi en
+    # pick'em (0.5) -> el modelo debe ganarle en Brier Score al mercado.
+    session.add(database.GameAnalysis(
+        game_pk=1, game_date=today, away_team="A", home_team="B",
+        home_model_prob=0.9, home_market_no_vig_prob=0.5,
+    ))
+    session.add(database.ActualResult(
+        game_pk=1, game_date=today, home_score=5, away_score=2, winner="home", total_runs=7,
+    ))
+    session.commit()
+    session.close()
+
+    metrics = results_tracker.compute_metrics(days=30)
+
+    assert metrics["market_n_games"] == 1
+    assert metrics["market_brier_score"] is not None
+    assert metrics["brier_score"] < metrics["market_brier_score"]
+
+
+def test_compute_metrics_market_brier_is_none_without_market_data(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/metrics_no_market_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    session.add(database.GameAnalysis(
+        game_pk=1, game_date=today, away_team="A", home_team="B", home_model_prob=0.7,
+    ))
+    session.add(database.ActualResult(
+        game_pk=1, game_date=today, home_score=5, away_score=2, winner="home", total_runs=7,
+    ))
+    session.commit()
+    session.close()
+
+    metrics = results_tracker.compute_metrics(days=30)
+
+    assert metrics["market_n_games"] == 0
+    assert metrics["market_brier_score"] is None

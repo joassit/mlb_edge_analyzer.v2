@@ -118,3 +118,57 @@ def test_analyze_today_builds_feature_snapshot_with_raw_inputs(monkeypatch):
     assert snapshot["away_ops"] == 0.780
     assert snapshot["park_factor"] == 1.0
     assert snapshot["market_price"] is None
+
+
+def test_analyze_today_reports_market_favorite_and_edge_vs_favorite(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": -150, "home": 130}})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    # Con una sola cuota manual (no hay no-vig), el favorito se calcula
+    # sobre la probabilidad implícita con vig -- away_market_prob=0.6 > home.
+    assert row["market_favorite_team"] == "Away Team"
+    assert row["market_favorite_side"] == "away"
+    assert abs(row["market_favorite_prob"] - 0.6) < 1e-9
+    assert row["model_edge_vs_market_favorite"] == row["away_edge"]
+
+
+def test_analyze_today_favorite_uses_no_vig_consensus_when_available(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    live_event = {
+        "away_team": "Away Team", "home_team": "Home Team", "commence_time": None,
+        "prices": [{"book": "fakebook", "away_price": -140, "home_price": 120, "last_update": None}],
+    }
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [live_event])
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["market_favorite_team"] == "Away Team"
+    assert row["market_favorite_side"] == "away"
+    assert abs(row["market_favorite_prob"] - row["away_market_no_vig_prob"]) < 1e-9
+
+
+def test_analyze_today_flags_review_when_edge_and_models_agree(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    # Cuota generosa para el visitante -> genera edge grande a su favor,
+    # y el visitante ya es favorito en ambos modelos (heurístico y Skellam).
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": 200, "home": -250}})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["flag_review"] is True
+
+
+def test_analyze_today_does_not_flag_review_without_market_odds(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["flag_review"] is False

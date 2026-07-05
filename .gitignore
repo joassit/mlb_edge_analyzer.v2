@@ -6,3 +6,4 @@ logs/
 .pytest_cache/
 .streamlit/
 .env
+.cache/

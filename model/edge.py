@@ -64,6 +64,26 @@ def no_vig_probs(odds_a: float, odds_b: float) -> tuple[float, float]:
     return p_a / total, p_b / total
 
 
+def market_favorite(away_team: str, home_team: str, away_prob: float, home_prob: float,
+                     pickem_threshold: float = 0.02) -> dict:
+    """
+    Determina cuál equipo favorece el mercado, dadas las dos probabilidades
+    de un mismo lado del mercado (con o sin vig — el orden entre las dos no
+    cambia según cuál uses, solo la magnitud; se recomienda pasar la
+    probabilidad SIN vig para que la magnitud reportada sea la honesta).
+
+    Devuelve {"team": None, ...} cuando la diferencia es menor a
+    `pickem_threshold` — un "pick'em" no tiene un favorito real, forzar
+    uno sería inventar una señal que el mercado no está dando.
+    """
+    diff = abs(away_prob - home_prob)
+    if diff < pickem_threshold:
+        return {"team": None, "side": None, "prob": max(away_prob, home_prob), "pickem": True}
+    if away_prob > home_prob:
+        return {"team": away_team, "side": "away", "prob": away_prob, "pickem": False}
+    return {"team": home_team, "side": "home", "prob": home_prob, "pickem": False}
+
+
 def kelly_fraction(model_p: float, odds: float, fraction: float = 0.25) -> float:
     """
     Tamaño de apuesta sugerido como fracción del bankroll, usando Kelly

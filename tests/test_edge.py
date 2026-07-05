@@ -1,6 +1,8 @@
 import pytest
 
-from model.edge import implied_prob, fair_odds, edge, kelly_fraction, expected_value, no_vig_probs
+from model.edge import (
+    implied_prob, fair_odds, edge, kelly_fraction, expected_value, no_vig_probs, market_favorite,
+)
 
 
 def test_implied_prob_favorite():
@@ -72,3 +74,26 @@ def test_no_vig_probs_symmetric_regardless_of_order():
     home_p2, away_p2 = no_vig_probs(130, -150)
     assert abs(away_p - away_p2) < 1e-9
     assert abs(home_p - home_p2) < 1e-9
+
+
+def test_market_favorite_picks_the_higher_probability_side():
+    fav = market_favorite("Away Team", "Home Team", away_prob=0.62, home_prob=0.38)
+    assert fav == {"team": "Away Team", "side": "away", "prob": 0.62, "pickem": False}
+
+
+def test_market_favorite_picks_home_when_home_is_favored():
+    fav = market_favorite("Away Team", "Home Team", away_prob=0.40, home_prob=0.60)
+    assert fav["team"] == "Home Team"
+    assert fav["side"] == "home"
+
+
+def test_market_favorite_flags_pickem_when_probabilities_are_close():
+    fav = market_favorite("Away Team", "Home Team", away_prob=0.505, home_prob=0.495)
+    assert fav["pickem"] is True
+    assert fav["team"] is None
+    assert fav["side"] is None
+
+
+def test_market_favorite_respects_custom_pickem_threshold():
+    fav = market_favorite("Away Team", "Home Team", away_prob=0.53, home_prob=0.47, pickem_threshold=0.10)
+    assert fav["pickem"] is True

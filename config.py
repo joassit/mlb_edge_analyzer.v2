@@ -48,3 +48,18 @@ PARK_FACTOR_WEIGHT = 1.15
 # Factor de corrección por clima (temp_f > 85°F).
 # Ayuda a mitigar errores en días de calor extremo donde la bola viaja más.
 WEATHER_CORRECTION = 0.05
+
+# --- The Odds API: protección de presupuesto ---
+# El free tier de The Odds API es ~500 requests/mes — el más limitado de
+# todas las APIs que usa este proyecto (MLB Stats API y Open-Meteo no
+# tienen ese techo). Estos límites evitan quemar la cuota por refrescos
+# repetidos del dashboard o corridas manuales del pipeline el mismo día.
+ODDS_API_CACHE_TTL_SECONDS = int(os.getenv("ODDS_API_CACHE_TTL_SECONDS", "900"))  # 15 min
+ODDS_API_MONTHLY_BUDGET = int(os.getenv("ODDS_API_MONTHLY_BUDGET", "500"))
+ODDS_CACHE_DIR = os.getenv("ODDS_CACHE_DIR", ".cache/odds")
+
+# Umbral de edge (en probabilidad) a partir del cual un juego se marca como
+# "candidato a revisión" en el reporte — solo si además los dos modelos
+# (heurístico y Skellam) coinciden en el favorito. Es una preselección
+# para que decidas tú, nunca una apuesta automática.
+REVIEW_EDGE_THRESHOLD = float(os.getenv("REVIEW_EDGE_THRESHOLD", "0.03"))

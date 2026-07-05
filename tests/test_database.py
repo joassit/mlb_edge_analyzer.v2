@@ -99,3 +99,30 @@ def test_record_closing_odds_negative_when_line_moves_against_your_side(isolated
         assert bet.clv < 0
     finally:
         session.close()
+
+
+def test_get_pending_moneyline_bets_excludes_bets_with_closing_odds_already_set(isolated_db):
+    isolated_db.record_bet({
+        "game_pk": 1, "game_date": "2026-07-05", "market": "moneyline",
+        "side": "away", "odds": -135, "model_prob": 0.6, "stake": 1.0,
+    })
+    settled_id = isolated_db.record_bet({
+        "game_pk": 2, "game_date": "2026-07-05", "market": "moneyline",
+        "side": "home", "odds": 120, "model_prob": 0.5, "stake": 1.0,
+    })
+    isolated_db.record_closing_odds(game_pk=2, side="home", closing_odds=110)
+
+    pending = isolated_db.get_pending_moneyline_bets("2026-07-05")
+
+    assert len(pending) == 1
+    assert pending[0]["game_pk"] == 1
+    assert pending[0]["side"] == "away"
+
+
+def test_get_pending_moneyline_bets_filters_by_date(isolated_db):
+    isolated_db.record_bet({
+        "game_pk": 3, "game_date": "2026-07-04", "market": "moneyline",
+        "side": "away", "odds": -135, "model_prob": 0.6, "stake": 1.0,
+    })
+
+    assert isolated_db.get_pending_moneyline_bets("2026-07-05") == []

@@ -46,9 +46,22 @@ def print_report(rows: list[dict]) -> None:
             print(f"  Total    -> línea justa del modelo: {r['fair_total_runs']:.1f} carreras "
                   f"(compárala contra la línea real de tu casa de apuestas)")
         if r.get("away_market_prob") is not None:
-            print(f"  Mercado  -> visitante: {r['away_market_prob']:.3f}   local: {r['home_market_prob']:.3f}")
+            print(f"  Mercado  -> visitante: {r['away_market_prob']:.3f}   local: {r['home_market_prob']:.3f}"
+                  f"  (implícita, con vig)")
+            if r.get("away_market_no_vig_prob") is not None:
+                print(f"  Sin vig  -> visitante: {r['away_market_no_vig_prob']:.3f}   "
+                      f"local: {r['home_market_no_vig_prob']:.3f}  (consenso, sin margen de casa)")
+
+            if r.get("market_favorite_team"):
+                print(f"  Favorito del mercado -> {r['market_favorite_team']} ({r['market_favorite_prob']:.1%})")
+            elif r.get("market_favorite_prob") is not None:
+                print(f"  Favorito del mercado -> pick'em, sin favorito claro (~{r['market_favorite_prob']:.1%})")
+
             print(f"  Edge     -> visitante: {r['away_edge']:+.3f}   local: {r['home_edge']:+.3f}")
             print(f"  EV       -> visitante: {r['away_ev']:+.3f}   local: {r['home_ev']:+.3f}  (por unidad apostada)")
+
+            if r.get("flag_review"):
+                print(f"  🔎 candidato a revisión: edge >= umbral y los dos modelos coinciden en el favorito")
         else:
             print("  Mercado  -> (sin cuotas cargadas todavía)")
         print("-" * 70)

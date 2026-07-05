@@ -9,12 +9,22 @@ de apuestas de MLB. Construido por etapas, empezando 100% gratis.
 - ✅ Obtener pitchers probables/confirmados
 - ✅ Obtener ERA de pitchers y OPS de equipos (MLB Stats API)
 - ✅ Calcular probabilidad del modelo (heurístico + Skellam), no placeholders
-- ✅ Cuotas en vivo (The Odds API) con fallback a `MARKET_ODDS` manual
+- ✅ Cuotas en vivo (The Odds API) con fallback a `MARKET_ODDS` manual, con
+      caché + presupuesto mensual para no agotar el free tier
 - ✅ Edge, EV y consenso sin vig (no-vig) contra el mercado
+- ✅ Favorito del mercado explícito (equipo + probabilidad) en consola,
+      CSV y dashboard, con edge del modelo específicamente contra ese favorito
+- ✅ Candidatos a revisión marcados automáticamente (edge por encima de un
+      umbral + los dos modelos de acuerdo en el favorito) — nunca una apuesta
+      automática, solo una preselección
 - ✅ Guardar histórico en base de datos (SQLite por defecto), con upsert
       idempotente — re-correr el pipeline el mismo día no duplica filas
-- ✅ Feature Snapshot Store — insumos crudos congelados por predicción,
-      para poder recalcular juegos históricos sin fuga de información
+- ✅ Feature Snapshot Store — insumos crudos congelados por predicción, y un
+      punto único de cálculo (`model/predictor.py`) que recalcula predicciones
+      históricas desde esos snapshots sin fuga de información
+- ✅ Backtest walk-forward básico sobre los snapshots congelados
+      (`tracking/backtest.py`)
+- ✅ Brier Score del consenso de mercado como benchmark del modelo
 - ✅ Generar reporte en consola + CSV
 - ✅ Dashboard en Streamlit
 - ✅ Segundo modelo en paralelo (Skellam sobre carreras proyectadas) — si
@@ -150,6 +160,24 @@ Si la key no está configurada, o la API falla, o un partido no aparece en
 la respuesta: el pipeline no se rompe, simplemente no calcula edge para
 ese partido (a menos que también tengas `MARKET_ODDS` cargado — ver abajo).
 
+**Protección de presupuesto.** The Odds API es la API más limitada del
+proyecto (free tier ~500 requests/mes, contra MLB Stats API y Open-Meteo
+que no tienen ese techo). Por eso `data/odds_api.py`:
+- Cachea la respuesta cruda por `ODDS_API_CACHE_TTL_SECONDS` (15 min por
+  defecto) — refrescar el dashboard o correr `main.py` varias veces el
+  mismo día no cuenta como llamadas nuevas mientras el caché siga vigente.
+- Lleva la cuenta de llamadas reales del mes en `.cache/odds/` y deja de
+  golpear la API si se alcanza `ODDS_API_MONTHLY_BUDGET` (500 por defecto),
+  degradándose al último caché conocido (aunque esté vencido) antes que
+  quedarse sin nada.
+
+Ajustables por variable de entorno si tu plan es distinto:
+
+```bash
+export ODDS_API_CACHE_TTL_SECONDS=900
+export ODDS_API_MONTHLY_BUDGET=500
+```
+
 ### Opción 2: cuotas manuales (fallback, o si no tienes key todavía)
 
 Edita `MARKET_ODDS` en `main.py` con el `game_pk` de cada partido (lo
@@ -161,6 +189,40 @@ MARKET_ODDS = {
     717468: {"away": -135, "home": +115},
 }
 ```
+
+## Favorito del mercado y candidatos a revisión
+
+Cada partido con cuotas cargadas (en vivo o manuales) muestra explícitamente
+quién favorece el mercado — usando el consenso **sin vig** cuando hay cuotas
+en vivo de varios bookmakers (magnitud honesta, sin el margen de la casa), o
+la probabilidad implícita de la cuota manual si es lo único disponible. Si
+la diferencia entre los dos lados es menor a `pickem_threshold` (2 puntos
+porcentuales por defecto), se marca como "pick'em" en vez de inventar un
+favorito que el mercado no está dando.
+
+Esto aparece en consola, CSV (`market_favorite_team`, `market_favorite_side`,
+`market_favorite_prob`) y dashboard, junto con `model_edge_vs_market_favorite`
+— el edge de tu modelo específicamente contra el lado que el mercado ya
+favorece (distinto de `away_edge`/`home_edge`, que es el edge por lado).
+
+Los partidos donde el edge supera `REVIEW_EDGE_THRESHOLD` (3 puntos
+porcentuales por defecto) **y** los dos modelos independientes (heurístico y
+Skellam) coinciden en el favorito se marcan con 🔎 como candidatos a
+revisión — una preselección para que decidas tú, nunca una apuesta
+automática. Ajustable con `REVIEW_EDGE_THRESHOLD`.
+
+## Backtest walk-forward
+
+```bash
+python -m tracking.backtest
+```
+
+Recalcula predicciones desde los snapshots congelados en `feature_snapshots`
+(nunca vuelve a golpear ninguna API) y mide Brier Score juego por juego,
+ordenado por fecha — usa exactamente la misma lógica de `model/predictor.py`
+que corre en vivo, así que no hay forma de que el backtest y el pipeline se
+desincronicen. Con poca data acumulada se degrada explícitamente en vez de
+aparentar una validación que no existe todavía.
 
 ## Feature Snapshot Store (recálculo histórico sin fuga de información)
 
@@ -192,6 +254,25 @@ de un futuro Orchestration Engine, fuera del alcance actual. Por ahora,
 `record_closing_odds` es una función que puedes llamar manualmente (o
 disparar tú mismo cerca del inicio del juego) — el cálculo de CLV que hace
 es correcto, la automatización de *cuándo* llamarla es lo pendiente.
+
+### Script de captura
+
+```bash
+python scripts/capture_closing_lines.py
+```
+
+Busca las apuestas moneyline pendientes de hoy, las empareja contra las
+cuotas en vivo, y llama `record_closing_odds` por ti. Córrelo cerca del
+inicio de los juegos del día — a mano, o agendado en tu propio cron/Task
+Scheduler apuntando al mismo `DATABASE_URL` que usa `main.py`.
+
+**Deliberadamente no tiene un workflow de GitHub Actions asociado**: un
+runner de Actions parte de un checkout limpio del repo en cada corrida y no
+comparte tu `mlb_edge.db` local (SQLite está en `.gitignore`) — un cron ahí
+encontraría 0 apuestas pendientes siempre, una automatización que aparenta
+funcionar sin hacer nada. Si en algún momento el pipeline corre contra una
+base de datos compartida (Postgres), ahí sí conviene moverlo a un Action
+programado.
 
 ## Usar PostgreSQL en vez de SQLite
 

@@ -1,5 +1,5 @@
 """
-MLB EDGE ANALYZER — Versión 0.5.0
+MLB EDGE ANALYZER — Versión 0.6.0
 Orquestador: Realiza auditoría del día anterior y proyecciones del día actual.
 """
 
@@ -12,17 +12,15 @@ from data.stats import (
 )
 from data.park_factors import get_park_info
 from data.weather import preload_weather
-from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA
-from model.probability import model_prob, normalize_matchup
-from model.skellam_model import skellam_win_prob
-from model.markets import run_line_prob, fair_total_line
-from model.edge import implied_prob, edge, expected_value
+from model.runs_projection import LEAGUE_AVG_ERA
+from model.predictor import predict_from_raw_inputs
+from model.edge import implied_prob, edge, expected_value, market_favorite
 from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
 from db.database import init_db, save_analysis, save_feature_snapshot
 from reports.generate_report import print_report, export_csv
 from audit_live import audit_live
 from tracking.results_tracker import update_results, print_performance_report
-from config import STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION
+from config import STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD
 from version_info import get_git_commit
 
 # Cuotas de mercado cargadas a mano — se usan solo si no hay match en vivo
@@ -65,39 +63,39 @@ def analyze_today() -> list[dict]:
         park = get_park_info(g["home_team_id"])
         weather = weather_by_team.get(g["home_team_id"], {"temp_f": None})
 
-        # Carreras proyectadas (Skellam) — insumo de ambos modelos de probabilidad
-        away_mu = project_team_runs(away_ops, home_era, away_bullpen, league_ops, LEAGUE_AVG_ERA, park["park_factor"], STARTER_WEIGHT, is_home=False, temp_f=weather.get("temp_f"))
-        home_mu = project_team_runs(home_ops, away_era, home_bullpen, league_ops, LEAGUE_AVG_ERA, park["park_factor"], STARTER_WEIGHT, is_home=True, temp_f=weather.get("temp_f"))
-
-        # Modelo heurístico (ERA/OPS + ajustes) normalizado para que sume 1
-        away_p_raw = model_prob(
-            away_era, away_ops, league_ops, bullpen_era=away_bullpen, starter_weight=STARTER_WEIGHT,
-            k_pct=away_cmd["k_pct"], bb_pct=away_cmd["bb_pct"],
-            days_rest=away_rest["days_rest"], last_outing_pitches=away_rest["last_outing_pitches"],
-            park_factor=park["park_factor"], temp_f=weather.get("temp_f"),
-        )
-        home_p_raw = model_prob(
-            home_era, home_ops, league_ops, bullpen_era=home_bullpen, starter_weight=STARTER_WEIGHT,
-            k_pct=home_cmd["k_pct"], bb_pct=home_cmd["bb_pct"],
-            days_rest=home_rest["days_rest"], last_outing_pitches=home_rest["last_outing_pitches"],
-            park_factor=park["park_factor"], temp_f=weather.get("temp_f"),
-        )
-        away_model_prob, home_model_prob = normalize_matchup(away_p_raw, home_p_raw, HOME_FIELD_ADVANTAGE)
-
-        # Segundo modelo independiente: Skellam sobre las carreras proyectadas
-        home_skellam_prob = skellam_win_prob(home_mu, away_mu)
-        away_skellam_prob = 1.0 - home_skellam_prob
-
-        # Mercados adicionales, misma proyección de carreras
-        home_covers_rl_prob, away_covers_rl_prob = run_line_prob(home_mu, away_mu)
-        fair_total_runs = fair_total_line(home_mu, away_mu)
-
         # Cuotas: primero se intenta la mejor disponible en vivo (The Odds
         # API); si no hay match para este juego, cae a MARKET_ODDS manual.
         odds_event = match_odds_to_game(odds_events, g["away_team"], g["home_team"])
         live_price = best_available_price(odds_event) if odds_event else None
         no_vig = consensus_no_vig_prob(odds_event) if odds_event else None
         price = live_price or MARKET_ODDS.get(g["game_pk"])
+
+        # Insumos crudos, congelados en el Feature Snapshot Store — el
+        # mismo dict alimenta model.predictor.predict_from_raw_inputs()
+        # hoy en vivo, y a cualquier recálculo histórico futuro que lea
+        # este snapshot en vez de volver a golpear ninguna API.
+        raw_inputs = {
+            "away_era": away_era, "home_era": home_era,
+            "away_ops": away_ops, "home_ops": home_ops, "league_ops": league_ops,
+            "league_era": LEAGUE_AVG_ERA,
+            "away_bullpen_era": away_bullpen, "home_bullpen_era": home_bullpen,
+            "away_k_pct": away_cmd["k_pct"], "away_bb_pct": away_cmd["bb_pct"],
+            "home_k_pct": home_cmd["k_pct"], "home_bb_pct": home_cmd["bb_pct"],
+            "away_days_rest": away_rest["days_rest"], "away_last_outing_pitches": away_rest["last_outing_pitches"],
+            "home_days_rest": home_rest["days_rest"], "home_last_outing_pitches": home_rest["last_outing_pitches"],
+            "park_factor": park["park_factor"], "park_name": park["name"],
+            "temp_f": weather.get("temp_f"), "wind_mph": weather.get("wind_mph"),
+            "wind_direction_deg": weather.get("wind_direction_deg"),
+            "market_price": price, "market_no_vig": no_vig,
+            "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
+        }
+
+        prediction = predict_from_raw_inputs(raw_inputs)
+        away_mu, home_mu = prediction["away_proj_runs"], prediction["home_proj_runs"]
+        away_model_prob, home_model_prob = prediction["away_model_prob"], prediction["home_model_prob"]
+        away_skellam_prob, home_skellam_prob = prediction["away_skellam_prob"], prediction["home_skellam_prob"]
+        home_covers_rl_prob, away_covers_rl_prob = prediction["home_covers_rl_prob"], prediction["away_covers_rl_prob"]
+        fair_total_runs = prediction["fair_total_runs"]
 
         if price:
             away_market_prob = implied_prob(price["away"])
@@ -115,6 +113,30 @@ def analyze_today() -> list[dict]:
             away_market_no_vig_prob, home_market_no_vig_prob = no_vig
         else:
             away_market_no_vig_prob = home_market_no_vig_prob = None
+
+        # Favorito del mercado — se calcula sobre el consenso sin vig
+        # cuando existe (magnitud honesta); si solo hay una cuota manual
+        # (con vig incluido) se usa esa, es lo único disponible.
+        fav = None
+        if away_market_no_vig_prob is not None:
+            fav = market_favorite(g["away_team"], g["home_team"], away_market_no_vig_prob, home_market_no_vig_prob)
+        elif away_market_prob is not None:
+            fav = market_favorite(g["away_team"], g["home_team"], away_market_prob, home_market_prob)
+
+        model_edge_vs_market_favorite = None
+        if fav is not None and fav["side"] is not None and away_edge is not None:
+            model_edge_vs_market_favorite = home_edge if fav["side"] == "home" else away_edge
+
+        # Candidato a revisión: edge por encima del umbral Y los dos
+        # modelos independientes (heurístico + Skellam) de acuerdo en el
+        # favorito. Es una preselección para que decidas tú — nunca una
+        # apuesta automática.
+        models_agree = (away_model_prob > 0.5) == (away_skellam_prob > 0.5)
+        flag_review = bool(
+            models_agree
+            and away_edge is not None
+            and max(abs(away_edge), abs(home_edge)) >= REVIEW_EDGE_THRESHOLD
+        )
 
         row = {
             "game_pk": g["game_pk"],
@@ -145,29 +167,21 @@ def analyze_today() -> list[dict]:
             "home_market_prob": home_market_prob,
             "away_market_no_vig_prob": away_market_no_vig_prob,
             "home_market_no_vig_prob": home_market_no_vig_prob,
+            "market_favorite_team": fav["team"] if fav else None,
+            "market_favorite_side": fav["side"] if fav else None,
+            "market_favorite_prob": fav["prob"] if fav else None,
+            "model_edge_vs_market_favorite": model_edge_vs_market_favorite,
             "away_edge": away_edge,
             "home_edge": home_edge,
             "away_ev": away_ev,
             "home_ev": home_ev,
+            "flag_review": flag_review,
             "model_version": MODEL_VERSION,
             "git_commit": get_git_commit(),
-            # Insumos crudos para el Feature Snapshot Store — clave interna,
-            # run_pipeline() la extrae antes de reportar/exportar (no es un
-            # dato de reporte, es el punto-en-el-tiempo para recálculos futuros).
-            "_feature_snapshot": {
-                "away_era": away_era, "home_era": home_era,
-                "away_ops": away_ops, "home_ops": home_ops, "league_ops": league_ops,
-                "away_bullpen_era": away_bullpen, "home_bullpen_era": home_bullpen,
-                "away_k_pct": away_cmd["k_pct"], "away_bb_pct": away_cmd["bb_pct"],
-                "home_k_pct": home_cmd["k_pct"], "home_bb_pct": home_cmd["bb_pct"],
-                "away_days_rest": away_rest["days_rest"], "away_last_outing_pitches": away_rest["last_outing_pitches"],
-                "home_days_rest": home_rest["days_rest"], "home_last_outing_pitches": home_rest["last_outing_pitches"],
-                "park_factor": park["park_factor"], "park_name": park["name"],
-                "temp_f": weather.get("temp_f"), "wind_mph": weather.get("wind_mph"),
-                "wind_direction_deg": weather.get("wind_direction_deg"),
-                "market_price": price, "market_no_vig": no_vig,
-                "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
-            },
+            # Clave interna — run_pipeline() la extrae antes de reportar/
+            # exportar (no es un dato de reporte, es el punto-en-el-tiempo
+            # para recálculos futuros vía model.predictor).
+            "_feature_snapshot": raw_inputs,
         }
 
         results.append(row)

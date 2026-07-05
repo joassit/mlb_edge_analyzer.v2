@@ -39,11 +39,18 @@ if not rows:
 else:
     for r in rows:
         with st.container(border=True):
+            title = f"{r['away_team']} @ {r['home_team']}"
+            if r.get("flag_review"):
+                title += "  🔎"
             col1, col2, col3 = st.columns([3, 2, 2])
 
             with col1:
-                st.subheader(f"{r['away_team']} @ {r['home_team']}")
+                st.subheader(title)
                 st.text(f"{r['away_pitcher'] or 'TBD'}  vs  {r['home_pitcher'] or 'TBD'}")
+                if r.get("market_favorite_team"):
+                    st.caption(f"Favorito del mercado: **{r['market_favorite_team']}** ({r['market_favorite_prob']:.1%})")
+                elif r.get("market_favorite_prob") is not None:
+                    st.caption(f"Mercado en pick'em (~{r['market_favorite_prob']:.1%})")
 
             with col2:
                 st.metric(f"Prob. modelo — {r['away_team']}", f"{r['away_model_prob']:.1%}")

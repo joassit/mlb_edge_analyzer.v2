@@ -3,7 +3,17 @@ Pruebas de data/odds_api.py — mockean requests.get, nunca tocan la red real
 (igual que el resto de la suite: pruebas puras, sin depender de internet).
 """
 
+import pytest
+
 import data.odds_api as odds_api
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache_dir(tmp_path, monkeypatch):
+    """Cada test usa su propio directorio de caché/presupuesto — sin esto,
+    el caché en disco de un test contamina el siguiente (y ensuciaría el
+    .cache/odds real del repo al correr la suite localmente)."""
+    monkeypatch.setattr(odds_api, "ODDS_CACHE_DIR", str(tmp_path))
 
 
 FAKE_PAYLOAD = [
@@ -121,3 +131,52 @@ def test_consensus_no_vig_prob_averages_across_books():
 
 def test_consensus_no_vig_prob_none_without_prices():
     assert odds_api.consensus_no_vig_prob({"prices": []}) is None
+
+
+def test_fetch_moneyline_odds_uses_cache_instead_of_a_second_call(monkeypatch):
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _FakeResponse(FAKE_PAYLOAD)
+
+    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+
+    odds_api.fetch_moneyline_odds()
+    odds_api.fetch_moneyline_odds()  # debe venir del caché, no de una segunda llamada real
+
+    assert calls["n"] == 1
+
+
+def test_fetch_moneyline_odds_returns_empty_when_budget_exhausted_and_no_prior_cache(monkeypatch):
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
+    monkeypatch.setattr(odds_api, "ODDS_API_MONTHLY_BUDGET", 0)  # ya sin presupuesto desde el inicio
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("no debería intentar una llamada real sin presupuesto")
+
+    monkeypatch.setattr(odds_api.requests, "get", fail_if_called)
+
+    assert odds_api.fetch_moneyline_odds() == []
+
+
+def test_budget_guard_falls_back_to_stale_cache_when_exhausted(monkeypatch, tmp_path):
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
+    monkeypatch.setattr(odds_api, "ODDS_API_MONTHLY_BUDGET", 1)
+    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+
+    odds_api.fetch_moneyline_odds()  # consume el único request del presupuesto y escribe caché
+
+    # Fuerza que el caché se lea como vencido (TTL=0) para simular que pasó
+    # el tiempo, pero el presupuesto sigue agotado este mes.
+    monkeypatch.setattr(odds_api, "ODDS_API_CACHE_TTL_SECONDS", 0)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("no debería intentar una llamada real sin presupuesto")
+
+    monkeypatch.setattr(odds_api.requests, "get", fail_if_called)
+
+    events = odds_api.fetch_moneyline_odds()
+    # Se degrada al caché vencido en vez de quedarse sin nada.
+    assert len(events) == 1

@@ -90,6 +90,8 @@ def compute_metrics(days: int = 30) -> dict:
     correct = 0
     brier_sum = 0.0
     log_loss_sum = 0.0
+    market_brier_sum = 0.0
+    market_n = 0
 
     for pred, result in rows:
         actual_home_win = 1 if result.winner == "home" else 0
@@ -107,12 +109,21 @@ def compute_metrics(days: int = 30) -> dict:
             (1 - actual_home_win) * math.log(1 - p_clipped)
         )
 
+        # Benchmark: Brier Score del consenso de mercado sin vig, cuando
+        # hubo cuotas ese día. Si el modelo no le gana esto, probablemente
+        # no tiene edge real — es ruido, no señal.
+        if pred.home_market_no_vig_prob is not None:
+            market_brier_sum += (pred.home_market_no_vig_prob - actual_home_win) ** 2
+            market_n += 1
+
     n = len(rows)
     return {
         "n_games": n,
         "accuracy": correct / n,
         "brier_score": brier_sum / n,
         "log_loss": log_loss_sum / n,
+        "market_brier_score": (market_brier_sum / market_n) if market_n else None,
+        "market_n_games": market_n,
     }
 
 
@@ -206,6 +217,12 @@ def print_performance_report(days: int = 30) -> None:
           f"(0.0=perfecto, 0.25=equivalente a adivinar 50%, >0.25=peor que adivinar)")
     print(f"Log Loss:          {metrics['log_loss']:.4f}  "
           f"(penaliza más fuerte estar muy seguro y equivocado)")
+
+    if metrics.get("market_brier_score") is not None:
+        diff = metrics["market_brier_score"] - metrics["brier_score"]
+        veredicto = "tu modelo le gana al mercado" if diff > 0 else "el mercado le gana a tu modelo"
+        print(f"Brier del mercado: {metrics['market_brier_score']:.4f}  "
+              f"(consenso sin vig, {metrics['market_n_games']} juegos con cuota) — {veredicto}")
 
     bet_perf = compute_bet_performance(days=days)
     print()

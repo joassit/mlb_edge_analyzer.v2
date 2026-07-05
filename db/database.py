@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     create_engine, event, inspect, text,
-    Column, Integer, String, Float, DateTime, Text, UniqueConstraint
+    Column, Integer, String, Float, Boolean, DateTime, Text, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -69,10 +69,15 @@ class GameAnalysis(Base):
     home_market_prob = Column(Float, nullable=True)
     away_market_no_vig_prob = Column(Float, nullable=True)
     home_market_no_vig_prob = Column(Float, nullable=True)
+    market_favorite_team = Column(String, nullable=True)
+    market_favorite_side = Column(String, nullable=True)  # "home" / "away" / None si pick'em
+    market_favorite_prob = Column(Float, nullable=True)
+    model_edge_vs_market_favorite = Column(Float, nullable=True)
     away_edge = Column(Float, nullable=True)
     home_edge = Column(Float, nullable=True)
     away_ev = Column(Float, nullable=True)
     home_ev = Column(Float, nullable=True)
+    flag_review = Column(Boolean, nullable=True, default=False)
     decision = Column(String, nullable=True)  # tu decisión final, texto libre
     model_version = Column(String, default=MODEL_VERSION)
     git_commit = Column(String, nullable=True)
@@ -332,6 +337,22 @@ def record_closing_odds(game_pk: int, side: str, closing_odds: float) -> int:
             bet.clv = implied_prob(closing_odds) - implied_prob(bet.odds)
         session.commit()
         return len(bets)
+    finally:
+        session.close()
+
+
+def get_pending_moneyline_bets(game_date: str) -> list[dict]:
+    """Apuestas moneyline de una fecha dada que todavía no tienen cuota de
+    cierre registrada — para que scripts/capture_closing_lines.py sepa
+    cuáles buscar sin tener que consultar la tabla completa cada vez."""
+    session = SessionLocal()
+    try:
+        bets = (
+            session.query(Bet)
+            .filter(Bet.game_date == game_date, Bet.market == "moneyline", Bet.closing_odds.is_(None))
+            .all()
+        )
+        return [{"game_pk": b.game_pk, "side": b.side} for b in bets]
     finally:
         session.close()
 

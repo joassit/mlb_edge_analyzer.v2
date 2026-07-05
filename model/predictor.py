@@ -1,0 +1,67 @@
+"""
+Punto único de cálculo de probabilidades a partir de insumos crudos.
+
+`main.py::analyze_today()` lo usa en vivo, y cualquier recálculo histórico
+que lea de `FeatureSnapshot` (ver tracking/backtest.py) lo usa exactamente
+igual — así el pipeline en vivo y cualquier backtest futuro nunca pueden
+desincronizarse en CÓMO se calcula una probabilidad a partir de los mismos
+insumos. `raw_inputs` es el mismo dict que `db.database.save_feature_snapshot`
+congela, así que un snapshot de hace meses se puede recalcular con esto sin
+volver a golpear ninguna API.
+"""
+
+from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA
+from model.probability import model_prob, normalize_matchup
+from model.skellam_model import skellam_win_prob
+from model.markets import run_line_prob, fair_total_line
+
+
+def predict_from_raw_inputs(raw: dict) -> dict:
+    league_era = raw.get("league_era", LEAGUE_AVG_ERA)
+
+    away_mu = project_team_runs(
+        raw["away_ops"], raw["home_era"], raw["away_bullpen_era"],
+        raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
+        is_home=False, temp_f=raw.get("temp_f"),
+    )
+    home_mu = project_team_runs(
+        raw["home_ops"], raw["away_era"], raw["home_bullpen_era"],
+        raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
+        is_home=True, temp_f=raw.get("temp_f"),
+    )
+
+    away_p_raw = model_prob(
+        raw["away_era"], raw["away_ops"], raw["league_ops"],
+        bullpen_era=raw["away_bullpen_era"], starter_weight=raw["starter_weight"],
+        k_pct=raw.get("away_k_pct"), bb_pct=raw.get("away_bb_pct"),
+        days_rest=raw.get("away_days_rest"), last_outing_pitches=raw.get("away_last_outing_pitches"),
+        park_factor=raw["park_factor"], temp_f=raw.get("temp_f"),
+    )
+    home_p_raw = model_prob(
+        raw["home_era"], raw["home_ops"], raw["league_ops"],
+        bullpen_era=raw["home_bullpen_era"], starter_weight=raw["starter_weight"],
+        k_pct=raw.get("home_k_pct"), bb_pct=raw.get("home_bb_pct"),
+        days_rest=raw.get("home_days_rest"), last_outing_pitches=raw.get("home_last_outing_pitches"),
+        park_factor=raw["park_factor"], temp_f=raw.get("temp_f"),
+    )
+    away_model_prob, home_model_prob = normalize_matchup(
+        away_p_raw, home_p_raw, raw.get("home_field_advantage", 0.0)
+    )
+
+    home_skellam_prob = skellam_win_prob(home_mu, away_mu)
+    away_skellam_prob = 1.0 - home_skellam_prob
+
+    home_covers_rl_prob, away_covers_rl_prob = run_line_prob(home_mu, away_mu)
+    fair_total_runs = fair_total_line(home_mu, away_mu)
+
+    return {
+        "away_proj_runs": away_mu,
+        "home_proj_runs": home_mu,
+        "away_model_prob": away_model_prob,
+        "home_model_prob": home_model_prob,
+        "away_skellam_prob": away_skellam_prob,
+        "home_skellam_prob": home_skellam_prob,
+        "home_covers_rl_prob": home_covers_rl_prob,
+        "away_covers_rl_prob": away_covers_rl_prob,
+        "fair_total_runs": fair_total_runs,
+    }
