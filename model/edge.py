@@ -94,3 +94,9 @@ def kelly_fraction(model_p: float, odds: float, fraction: float = 0.25) -> float
     q = 1 - model_p
     full_kelly = (b * model_p - q) / b
     return max(0.0, full_kelly * fraction)
+
+
+# Alias -- "devig_two_way" y "no_vig_probs" son la misma operación (remover
+# el vig de dos cuotas del mismo mercado). Se expone el nombre alternativo
+# para el trabajo futuro de calibración/CLV sin duplicar la lógica.
+devig_two_way = no_vig_probs

@@ -6,10 +6,10 @@ sin bloqueos por rate limit, sin depender de que pybaseball siga funcionando).
 """
 
 import logging
-import statistics
 import requests
 
 from config import MLB_API_BASE, SEASON, MIN_PA_FOR_LEAGUE_OPS, FALLBACK_BULLPEN_ERA
+from data.http import session
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -37,7 +37,7 @@ def get_pitcher_era(pitcher_id: int, season: int = SEASON) -> float | None:
         return _pitcher_stats_cache[pitcher_id].get("era")
 
     params = {"stats": "season", "group": "pitching", "season": season}
-    resp = requests.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
+    resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -53,10 +53,43 @@ def get_pitcher_era(pitcher_id: int, season: int = SEASON) -> float | None:
         return None
 
 
+def get_pitcher_era_ip(pitcher_id: int, season: int = SEASON) -> tuple[float, float] | None:
+    """
+    ERA e innings pitched (ya parseados a decimal real, no el formato
+    '63.1'/'63.2' de la API) de un pitcher. Usado para aplicar shrinkage
+    hacia el promedio de liga en muestras chicas -- ver model/adjustments.py.
+    None si no hay datos (mismo criterio que get_pitcher_era).
+    """
+    cache_key = f"era-ip-{pitcher_id}-{season}"
+    if cache_key in _pitcher_stats_cache:
+        cached = _pitcher_stats_cache[cache_key]
+        return (cached["era"], cached["ip"]) if cached else None
+
+    params = {"stats": "season", "group": "pitching", "season": season}
+    resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    try:
+        splits = payload["stats"][0]["splits"]
+        if not splits:
+            _pitcher_stats_cache[cache_key] = None
+            return None
+        stat = splits[0]["stat"]
+        era = float(stat["era"])
+        ip = _parse_innings(stat["inningsPitched"])
+        _pitcher_stats_cache[cache_key] = {"era": era, "ip": ip}
+        return era, ip
+    except (KeyError, IndexError, ValueError) as e:
+        logger.warning(f"No se pudo obtener ERA/IP del pitcher {pitcher_id}: {e}")
+        _pitcher_stats_cache[cache_key] = None
+        return None
+
+
 def get_team_ops(team_id: int, season: int = SEASON) -> float | None:
     """OPS de equipo de temporada regular (ofensiva del rival)."""
     params = {"stats": "season", "group": "hitting", "season": season}
-    resp = requests.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
+    resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -72,9 +105,11 @@ def get_team_ops(team_id: int, season: int = SEASON) -> float | None:
 
 def get_league_ops(season: int = SEASON) -> float:
     """
-    Promedio de OPS de liga entre bateadores calificados (con un mínimo de
-    turnos al bate), para usar como referencia neutral cuando no queremos
-    comparar contra un equipo rival específico.
+    OPS promedio de liga entre bateadores calificados (con un mínimo de
+    turnos al bate), ponderado por plate appearances -- no un promedio
+    simple entre jugadores. Sin ponderar, un bateador con 105 PA pesa igual
+    que uno con 600, distorsionando el promedio hacia los jugadores de
+    muestra chica que apenas califican.
     """
     global _league_ops_cache
     if _league_ops_cache is not None:
@@ -87,19 +122,21 @@ def get_league_ops(season: int = SEASON) -> float:
         "sportId": 1,
         "limit": 300,
     }
-    resp = requests.get(f"{MLB_API_BASE}/stats", params=params, timeout=15)
+    resp = session.get(f"{MLB_API_BASE}/stats", params=params, timeout=15)
     resp.raise_for_status()
     payload = resp.json()
 
-    ops_values = []
+    weighted_ops_sum = 0.0
+    total_pa = 0
     for split in payload["stats"][0]["splits"]:
         stat = split["stat"]
         pa = int(stat.get("plateAppearances", 0))
         ops = stat.get("ops")
         if pa >= MIN_PA_FOR_LEAGUE_OPS and ops is not None:
-            ops_values.append(float(ops))
+            weighted_ops_sum += float(ops) * pa
+            total_pa += pa
 
-    _league_ops_cache = statistics.mean(ops_values) if ops_values else 0.750
+    _league_ops_cache = (weighted_ops_sum / total_pa) if total_pa > 0 else 0.750
     return _league_ops_cache
 
 
@@ -117,7 +154,7 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
         return _bullpen_cache[cache_key]
 
     try:
-        roster_resp = requests.get(
+        roster_resp = session.get(
             f"{MLB_API_BASE}/teams/{team_id}/roster",
             params={"rosterType": "active", "season": season},
             timeout=15,
@@ -139,7 +176,7 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
 
     for pid in pitcher_ids:
         try:
-            resp = requests.get(
+            resp = session.get(
                 f"{MLB_API_BASE}/people/{pid}/stats",
                 params={"stats": "season", "group": "pitching", "season": season},
                 timeout=15,
@@ -190,7 +227,7 @@ def get_pitcher_command(pitcher_id: int, season: int = SEASON) -> dict:
     result = {"k_pct": None, "bb_pct": None, "whip": None}
     try:
         params = {"stats": "season", "group": "pitching", "season": season}
-        resp = requests.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
+        resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
         resp.raise_for_status()
         splits = resp.json()["stats"][0]["splits"]
         if splits:
@@ -225,7 +262,7 @@ def get_pitcher_rest(pitcher_id: int, season: int = SEASON) -> dict:
     result = {"days_rest": None, "last_outing_pitches": None}
     try:
         params = {"stats": "gameLog", "group": "pitching", "season": season}
-        resp = requests.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
+        resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
         resp.raise_for_status()
         splits = resp.json()["stats"][0]["splits"]
         if splits:
@@ -257,7 +294,7 @@ def get_team_batting_advanced(team_id: int, season: int = SEASON) -> dict:
     result = {"babip": None, "iso": None}
     try:
         params = {"stats": "season", "group": "hitting", "season": season}
-        resp = requests.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
+        resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
         resp.raise_for_status()
         splits = resp.json()["stats"][0]["splits"]
         if not splits:

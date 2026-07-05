@@ -37,7 +37,14 @@ if DATABASE_URL.startswith("sqlite"):
 class GameAnalysis(Base):
     __tablename__ = "game_analysis"
     __table_args__ = (
-        UniqueConstraint("game_pk", "game_date", name="uq_game_analysis_game_pk_date"),
+        # Incluye model_version a propósito: si se sube MODEL_VERSION y se
+        # recalcula el mismo día, queda una fila por versión (para comparar
+        # rendimiento entre versiones, el objetivo declarado del proyecto),
+        # en vez de que la versión nueva sobreescriba a la vieja. El upsert
+        # de save_analysis() sigue siendo idempotente dentro de la MISMA
+        # versión — correr el pipeline dos veces con el mismo código no
+        # duplica filas.
+        UniqueConstraint("game_pk", "game_date", "model_version", name="uq_pred"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -269,15 +276,26 @@ def get_feature_snapshot(game_pk: int, game_date: str) -> dict | None:
 
 
 def save_analysis(row: dict) -> None:
-    """Upsert por (game_pk, game_date): si el análisis de ese juego ya existe
-    (re-ejecución del pipeline el mismo día), lo actualiza en vez de duplicarlo.
-    Sin esto, correr main.py dos veces el mismo día contamina el historial que
-    alimenta el Brier Score."""
+    """Upsert por (game_pk, game_date, model_version): re-ejecutar el
+    pipeline el mismo día CON LA MISMA VERSIÓN DE MODELO actualiza la fila
+    en vez de duplicarla. Si cambia model_version, se guarda como fila
+    nueva a propósito (permite comparar versiones del modelo entre sí) —
+    ver el comentario del UniqueConstraint en GameAnalysis.
+
+    Resuelve model_version explícitamente a MODEL_VERSION si el caller no
+    lo pasó: la columna tiene default=MODEL_VERSION a nivel de SQLAlchemy,
+    pero ese default solo se aplica al insertar — si la búsqueda del upsert
+    comparara contra None en vez del valor que realmente va a quedar
+    grabado, nunca encontraría la fila existente y duplicaría el insert."""
+    model_version = row.get("model_version") or MODEL_VERSION
+    row = {**row, "model_version": model_version}
+
     session = SessionLocal()
     try:
         existing = (
             session.query(GameAnalysis)
-            .filter_by(game_pk=row["game_pk"], game_date=row["game_date"])
+            .filter_by(game_pk=row["game_pk"], game_date=row["game_date"],
+                       model_version=model_version)
             .one_or_none()
         )
         if existing:
@@ -483,7 +501,12 @@ def get_pending_moneyline_bets(game_date: str) -> list[dict]:
 
 
 def get_predictions_without_result(days_back: int = 5) -> list[dict]:
-    """Predicciones de los últimos N días que todavía no tienen resultado guardado."""
+    """Predicciones de los últimos N días que todavía no tienen resultado
+    guardado. Deduplicado por game_pk: como GameAnalysis ahora puede tener
+    más de una fila por juego (una por model_version, ver UniqueConstraint
+    uq_pred), sin este dedup un mismo juego se procesaría dos veces en
+    update_results() -- llamadas duplicadas a la API de resultados y un
+    contador de "actualizados" inflado."""
     from datetime import date, timedelta
 
     cutoff = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
@@ -495,13 +518,18 @@ def get_predictions_without_result(days_back: int = 5) -> list[dict]:
         predictions = (
             session.query(GameAnalysis)
             .filter(GameAnalysis.game_date >= cutoff, GameAnalysis.game_date <= yesterday)
+            .order_by(GameAnalysis.id.desc())
             .all()
         )
-        return [
-            {"game_pk": p.game_pk, "game_date": p.game_date,
-             "away_team": p.away_team, "home_team": p.home_team}
-            for p in predictions if p.game_pk not in existing_pks
-        ]
+        seen_pks = set()
+        result = []
+        for p in predictions:
+            if p.game_pk in existing_pks or p.game_pk in seen_pks:
+                continue
+            seen_pks.add(p.game_pk)
+            result.append({"game_pk": p.game_pk, "game_date": p.game_date,
+                            "away_team": p.away_team, "home_team": p.home_team})
+        return result
     finally:
         session.close()
 

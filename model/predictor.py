@@ -14,31 +14,43 @@ from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA
 from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
 from model.markets import run_line_prob, fair_total_line
+from model.adjustments import shrunk_era
 
 
 def predict_from_raw_inputs(raw: dict) -> dict:
     league_era = raw.get("league_era", LEAGUE_AVG_ERA)
 
+    # Shrinkage del ERA del abridor hacia el promedio de liga, en proporción
+    # a las entradas lanzadas -- sin esto, un abridor con 15 IP de muestra
+    # (ERA muy ruidoso) pesa igual que uno con 150 IP. Si el snapshot no
+    # trae innings pitched (congelado antes de esta corrección), no se
+    # aplica shrinkage y se usa el ERA crudo tal cual -- nunca debe romper
+    # el recálculo de un snapshot viejo.
+    away_ip = raw.get("away_innings_pitched")
+    home_ip = raw.get("home_innings_pitched")
+    away_era = shrunk_era(raw["away_era"], away_ip, league_era) if away_ip is not None else raw["away_era"]
+    home_era = shrunk_era(raw["home_era"], home_ip, league_era) if home_ip is not None else raw["home_era"]
+
     away_mu = project_team_runs(
-        raw["away_ops"], raw["home_era"], raw["away_bullpen_era"],
+        raw["away_ops"], home_era, raw["away_bullpen_era"],
         raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
         is_home=False, temp_f=raw.get("temp_f"),
     )
     home_mu = project_team_runs(
-        raw["home_ops"], raw["away_era"], raw["home_bullpen_era"],
+        raw["home_ops"], away_era, raw["home_bullpen_era"],
         raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
         is_home=True, temp_f=raw.get("temp_f"),
     )
 
     away_p_raw = model_prob(
-        raw["away_era"], raw["away_ops"], raw["league_ops"],
+        away_era, raw["away_ops"], raw["league_ops"],
         bullpen_era=raw["away_bullpen_era"], starter_weight=raw["starter_weight"],
         k_pct=raw.get("away_k_pct"), bb_pct=raw.get("away_bb_pct"),
         days_rest=raw.get("away_days_rest"), last_outing_pitches=raw.get("away_last_outing_pitches"),
         park_factor=raw["park_factor"], temp_f=raw.get("temp_f"),
     )
     home_p_raw = model_prob(
-        raw["home_era"], raw["home_ops"], raw["league_ops"],
+        home_era, raw["home_ops"], raw["league_ops"],
         bullpen_era=raw["home_bullpen_era"], starter_weight=raw["starter_weight"],
         k_pct=raw.get("home_k_pct"), bb_pct=raw.get("home_bb_pct"),
         days_rest=raw.get("home_days_rest"), last_outing_pitches=raw.get("home_last_outing_pitches"),

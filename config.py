@@ -29,7 +29,7 @@ HOME_FIELD_ADVANTAGE = 0.02
 
 # Versión del modelo actual — se guarda con cada predicción para poder
 # comparar rendimiento entre versiones más adelante (Fase 4 del roadmap).
-MODEL_VERSION = "0.5.0-fase0-modelo-reconectado"
+MODEL_VERSION = "0.5.0-reconectado"
 
 # ERA de bullpen a usar si no se puede calcular el real (equipo sin datos
 # suficientes, roster incompleto, etc.) — aproximado al promedio de liga.
@@ -40,14 +40,17 @@ FALLBACK_BULLPEN_ERA = 4.30
 MIN_PA_FOR_LEAGUE_OPS = 100
 # --- AJUSTES DE PRECISIÓN DE MODELO ---
 
-# Multiplicador para el factor de parque.
-# 1.0 es el valor neutral que viene de la API.
-# > 1.0 amplifica el efecto (ej. 1.15 = 15% más impacto del estadio en el score).
-PARK_FACTOR_WEIGHT = 1.15
+# Multiplicador para el factor de parque. 1.0 es neutral (el park factor de
+# la API se aplica tal cual, sin amplificar). Antes era 1.15 (15% más
+# impacto del estadio) -- un valor elegido a mano, sin backtest que lo
+# respalde. Se neutraliza a 1.0 hasta que haya suficiente historial en
+# feature_snapshots para justificar amplificarlo con evidencia real.
+PARK_FACTOR_WEIGHT = 1.0
 
-# Factor de corrección por clima (temp_f > 85°F).
-# Ayuda a mitigar errores en días de calor extremo donde la bola viaja más.
-WEATHER_CORRECTION = 0.05
+# Factor de corrección por clima (temp_f > 85°F). Antes era 0.05 (+5% de
+# carreras en días de calor extremo) -- mismo caso que PARK_FACTOR_WEIGHT:
+# un valor plausible pero sin validar. Neutralizado a 0.0 hasta backtest.
+WEATHER_CORRECTION = 0.0
 
 # --- The Odds API: protección de presupuesto ---
 # El free tier de The Odds API es ~500 requests/mes — el más limitado de

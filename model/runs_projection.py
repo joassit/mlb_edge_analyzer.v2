@@ -2,6 +2,7 @@
 Proyección de carreras esperadas por equipo.
 """
 from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION
+from model.adjustments import offense_factor as _offense_factor
 
 LEAGUE_AVG_RUNS_PER_GAME = 4.4
 LEAGUE_AVG_ERA = 4.30
@@ -14,7 +15,7 @@ def project_team_runs(team_ops: float, opp_starter_era: float, opp_bullpen_era: 
     """
     Carreras esperadas de UN equipo con ajuste de peso para el factor de parque.
     """
-    offense_factor = team_ops / league_ops
+    offense_factor = _offense_factor(team_ops, league_ops)
     opp_pitching_era = starter_weight * opp_starter_era + (1 - starter_weight) * opp_bullpen_era
     pitching_factor = opp_pitching_era / league_era
 
@@ -42,7 +43,7 @@ def project_f5_runs(team_ops: float, opp_starter_era: float,
                     park_factor: float = 1.0, is_home: bool = False) -> float:
     # Nota: Aquí no aplicamos WEATHER_CORRECTION agresiva porque F5 suele ser más corta
     # pero puedes aplicar el PARK_FACTOR_WEIGHT si deseas mayor sensibilidad.
-    offense_factor = team_ops / league_ops
+    offense_factor = _offense_factor(team_ops, league_ops)
     pitching_factor = opp_starter_era / league_era
 
     weighted_park_factor = 1.0 + ((park_factor - 1.0) * PARK_FACTOR_WEIGHT)

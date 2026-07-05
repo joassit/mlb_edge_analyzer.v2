@@ -7,7 +7,7 @@ from datetime import date
 from logging_config import setup_logging
 from data.mlb_api import get_schedule
 from data.stats import (
-    get_pitcher_era, get_team_ops, get_league_ops, get_bullpen_era,
+    get_pitcher_era_ip, get_team_ops, get_league_ops, get_bullpen_era,
     get_pitcher_command, get_pitcher_rest,
 )
 from data.park_factors import get_park_info
@@ -19,8 +19,7 @@ from model.picks import generate_pick_candidates, select_picks_for_game
 from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
 from reports.generate_report import print_report, export_csv, export_picks_csv
-from audit_live import audit_live
-from tracking.results_tracker import update_results, print_performance_report
+from tracking.results_tracker import update_results, print_performance_report, audit_totals
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
@@ -61,13 +60,16 @@ def analyze_today() -> list[dict]:
         if not g.get("away_pitcher_id") or not g.get("home_pitcher_id"):
             continue
 
-        away_era = get_pitcher_era(g["away_pitcher_id"])
-        home_era = get_pitcher_era(g["home_pitcher_id"])
+        away_era_ip = get_pitcher_era_ip(g["away_pitcher_id"])
+        home_era_ip = get_pitcher_era_ip(g["home_pitcher_id"])
         away_ops = get_team_ops(g["away_team_id"])
         home_ops = get_team_ops(g["home_team_id"])
 
-        if None in (away_era, home_era, away_ops, home_ops):
+        if None in (away_era_ip, home_era_ip, away_ops, home_ops):
             continue
+
+        away_era, away_innings_pitched = away_era_ip
+        home_era, home_innings_pitched = home_era_ip
 
         away_bullpen = get_bullpen_era(g["away_team_id"])
         home_bullpen = get_bullpen_era(g["home_team_id"])
@@ -109,6 +111,7 @@ def analyze_today() -> list[dict]:
         # que se pueden capturar para un backtest futuro de picks.
         raw_inputs = {
             "away_era": away_era, "home_era": home_era,
+            "away_innings_pitched": away_innings_pitched, "home_innings_pitched": home_innings_pitched,
             "away_ops": away_ops, "home_ops": home_ops, "league_ops": league_ops,
             "league_era": LEAGUE_AVG_ERA,
             "away_bullpen_era": away_bullpen, "home_bullpen_era": home_bullpen,
@@ -201,9 +204,16 @@ def analyze_today() -> list[dict]:
         picks = select_picks_for_game(candidates, force_at_least_one=FORCE_AT_LEAST_ONE_PICK,
                                        max_picks=MAX_PICKS_PER_GAME)
 
+        # Fecha oficial del juego según la MLB Stats API (officialDate, en
+        # hora ET), no la fecha local de la máquina que corre el pipeline.
+        # Un juego que empieza cerca de medianoche UTC puede caer en un
+        # "día" distinto según de dónde se corra main.py -- game_date debe
+        # reflejar el día del juego, no el día de quien lo ejecuta.
+        game_date = g.get("game_date_official") or date.today().strftime("%Y-%m-%d")
+
         row = {
             "game_pk": g["game_pk"],
-            "game_date": date.today().strftime("%Y-%m-%d"),
+            "game_date": game_date,
             "away_team": g["away_team"],
             "home_team": g["home_team"],
             "away_pitcher": g.get("away_pitcher_name"),
@@ -264,7 +274,7 @@ def run_pipeline():
     updated = update_results()
     print(f"Resultados actualizados: {updated}")
     print_performance_report()
-    audit_live()
+    audit_totals()
 
     # 2. Análisis
     print("\n--- ⚾ GENERANDO PREDICCIONES PARA HOY ---")

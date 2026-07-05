@@ -83,10 +83,25 @@ def compute_metrics(days: int = 30) -> dict:
             session.query(GameAnalysis, ActualResult)
             .join(ActualResult, GameAnalysis.game_pk == ActualResult.game_pk)
             .filter(GameAnalysis.game_date >= cutoff)
+            .order_by(GameAnalysis.id.desc())
             .all()
         )
     finally:
         session.close()
+
+    # Dedup por game_pk: desde que GameAnalysis permite una fila por
+    # model_version (UniqueConstraint uq_pred), un juego recalculado con
+    # una versión nueva del modelo el mismo día tendría dos filas contra
+    # el mismo ActualResult -- contaría doble en Brier Score/accuracy si no
+    # se filtra. Nos quedamos con la fila más reciente (mayor id) por juego.
+    seen_pks = set()
+    deduped_rows = []
+    for pred, result in rows:
+        if pred.game_pk in seen_pks:
+            continue
+        seen_pks.add(pred.game_pk)
+        deduped_rows.append((pred, result))
+    rows = deduped_rows
 
     if not rows:
         return {"n_games": 0, "accuracy": None, "brier_score": None}
@@ -325,3 +340,51 @@ def print_performance_report(days: int = 30) -> None:
               f"(positivo = bateaste la línea de cierre)")
         print(f"% con CLV positivo:  {clv_perf['positive_clv_rate']:.1%}")
     print()
+
+
+def audit_totals() -> dict:
+    """
+    MAE (error absoluto medio) de carreras totales proyectadas vs. reales,
+    para los juegos que ya tienen resultado. Reemplaza al antiguo
+    audit_live.py: mismo reporte, pero vía SessionLocal (respeta
+    DATABASE_URL) en vez de sqlite3.connect('mlb_edge.db') hardcodeado —
+    ese hardcodeo hacía que el reporte auditara una base de datos SQLite
+    fija incluso si el proyecto corría contra PostgreSQL.
+    """
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(GameAnalysis, ActualResult)
+            .outerjoin(ActualResult, GameAnalysis.game_pk == ActualResult.game_pk)
+            .all()
+        )
+    finally:
+        session.close()
+
+    print(f"\n{'=' * 95}")
+    print(f"{'AUDITORÍA DE PRECISIÓN (TOTALES)':^95}")
+    print(f"{'=' * 95}")
+    print(f"{'Juego':<30} | {'Pred':<6} | {'Real':<6} | {'Dif (Error)'}")
+    print("-" * 95)
+
+    total_mae = 0.0
+    count = 0
+
+    for pred, result in rows:
+        matchup = f"{pred.away_team} @ {pred.home_team}"
+        if result is not None and result.total_runs is not None and pred.away_proj_runs is not None and pred.home_proj_runs is not None:
+            proj_total = pred.away_proj_runs + pred.home_proj_runs
+            diff = abs(proj_total - result.total_runs)
+            total_mae += diff
+            count += 1
+            print(f"{matchup:<30} | {proj_total:<6.2f} | {result.total_runs:<6} | {diff:<10.2f}")
+        else:
+            print(f"{matchup:<30} | {'PENDIENTE':<6} | {'-':<6} | {'-'}")
+
+    mae = (total_mae / count) if count else None
+    if count:
+        print("-" * 95)
+        print(f"ERROR PROMEDIO (MAE): {mae:.2f} carreras")
+    print()
+
+    return {"n_games": count, "mae": mae}

@@ -29,11 +29,13 @@ def _fake_get_schedule(target_date=None):
 
 
 def _patch_pipeline(monkeypatch):
-    era_by_pitcher = {10: 3.00, 20: 4.50}   # away pitcher mucho mejor que el home
+    # (era, innings_pitched) -- IP alta a propósito para que el shrinkage
+    # hacia el promedio de liga no borre la diferencia real entre pitchers.
+    era_ip_by_pitcher = {10: (3.00, 100.0), 20: (4.50, 90.0)}   # away pitcher mucho mejor que el home
     ops_by_team = {1: 0.780, 2: 0.740}       # away ofensiva mejor que la liga, home peor
 
     monkeypatch.setattr(main, "get_schedule", _fake_get_schedule)
-    monkeypatch.setattr(main, "get_pitcher_era", lambda pid, season=None: era_by_pitcher[pid])
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: era_ip_by_pitcher[pid])
     monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: ops_by_team[tid])
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
     monkeypatch.setattr(main, "get_bullpen_era", lambda tid, season=None: 4.30)
@@ -244,3 +246,33 @@ def test_analyze_today_feature_snapshot_captures_manual_run_line_and_totals(monk
 
     assert snapshot["market_run_line"] == {"line": 1.5, "home": 180, "away": -220}
     assert snapshot["market_totals"] == {"line": 8.5, "over": 150, "under": -180}
+
+
+def test_analyze_today_uses_official_game_date_from_schedule(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+
+    def fake_schedule_with_official_date(target_date=None):
+        games = _fake_get_schedule(target_date)
+        games[0]["game_date_official"] = "2026-07-04"
+        return games
+
+    monkeypatch.setattr(main, "get_schedule", fake_schedule_with_official_date)
+
+    results = main.analyze_today()
+
+    # game_date debe ser la fecha oficial ET del juego (de la API), no la
+    # fecha local de la máquina que corre el pipeline.
+    assert results[0]["game_date"] == "2026-07-04"
+
+
+def test_analyze_today_falls_back_to_today_without_official_game_date(monkeypatch):
+    from datetime import date as _date
+
+    _patch_pipeline(monkeypatch)
+    _clear_manual_markets(monkeypatch)
+    # _fake_get_schedule() no incluye game_date_official -- debe caer a hoy.
+
+    results = main.analyze_today()
+
+    assert results[0]["game_date"] == _date.today().strftime("%Y-%m-%d")

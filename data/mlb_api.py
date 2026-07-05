@@ -1,8 +1,8 @@
 import logging
 from datetime import date
-import requests
 from config import MLB_API_BASE
 from data.contracts import require, SchemaError
+from data.http import session
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -16,7 +16,7 @@ def get_schedule(target_date: date = None) -> list[dict]:
         "hydrate": "probablePitcher,team,linescore",
     }
 
-    resp = requests.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+    resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -73,13 +73,14 @@ def _parse_game(g: dict) -> dict | SchemaError:
         "home_pitcher_id": home_pitcher["id"] if home_pitcher else None,
         "home_pitcher_name": home_pitcher["fullName"] if home_pitcher else None,
         "game_time": g.get("gameDate"),
+        "game_date_official": g.get("officialDate"),
         "status": detailed_state,
         "abstract_state": abstract_state,
     }
 
 def get_game_result(game_pk: int) -> dict | None:
     params = {"sportId": 1, "gamePk": game_pk, "hydrate": "linescore"}
-    resp = requests.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+    resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
     resp.raise_for_status()
     payload = resp.json()
     
