@@ -1,0 +1,34 @@
+name: daily-pipeline
+
+on:
+  schedule:
+    # 09:00 hora de Ciudad de México (UTC-6 todo el año -- México eliminó
+    # el horario de verano en 2022, así que este cron no necesita ajustarse
+    # dos veces al año) = 15:00 UTC.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python main.py
