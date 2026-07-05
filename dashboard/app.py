@@ -50,7 +50,7 @@ else:
                 st.metric(f"Prob. modelo — {r['home_team']}", f"{r['home_model_prob']:.1%}")
 
             with col3:
-                if r["away_edge"] is not None:
+                if r.get("away_edge") is not None:
                     st.metric(f"Edge — {r['away_team']}", f"{r['away_edge']:+.1%}")
                     st.metric(f"Edge — {r['home_team']}", f"{r['home_edge']:+.1%}")
                 else:

@@ -29,7 +29,7 @@ HOME_FIELD_ADVANTAGE = 0.02
 
 # Versión del modelo actual — se guarda con cada predicción para poder
 # comparar rendimiento entre versiones más adelante (Fase 4 del roadmap).
-MODEL_VERSION = "0.3.0-fase2a-skellam"
+MODEL_VERSION = "0.5.0-fase0-modelo-reconectado"
 
 # ERA de bullpen a usar si no se puede calcular el real (equipo sin datos
 # suficientes, roster incompleto, etc.) — aproximado al promedio de liga.

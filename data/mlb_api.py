@@ -1,6 +1,10 @@
+import logging
 from datetime import date
 import requests
 from config import MLB_API_BASE
+from data.contracts import require, SchemaError
+
+logger = logging.getLogger("mlb_edge_analyzer")
 
 def get_schedule(target_date: date = None) -> list[dict]:
     if target_date is None:
@@ -19,26 +23,59 @@ def get_schedule(target_date: date = None) -> list[dict]:
     games = []
     for date_block in payload.get("dates", []):
         for g in date_block.get("games", []):
-            away = g["teams"]["away"]
-            home = g["teams"]["home"]
-            away_pitcher = away.get("probablePitcher")
-            home_pitcher = home.get("probablePitcher")
-
-            games.append({
-                "game_pk": g["gamePk"],
-                "away_team": away["team"]["name"],
-                "home_team": home["team"]["name"],
-                "away_team_id": away["team"]["id"],
-                "home_team_id": home["team"]["id"],
-                "away_pitcher_id": away_pitcher["id"] if away_pitcher else None,
-                "away_pitcher_name": away_pitcher["fullName"] if away_pitcher else None,
-                "home_pitcher_id": home_pitcher["id"] if home_pitcher else None,
-                "home_pitcher_name": home_pitcher["fullName"] if home_pitcher else None,
-                "game_time": g.get("gameDate"),
-                "status": g["status"]["detailedState"],
-                "abstract_state": g["status"]["abstractGameState"],
-            })
+            parsed = _parse_game(g)
+            if isinstance(parsed, SchemaError):
+                # Un solo juego con esquema roto no debe tumbar el resto del
+                # día — se salta ese juego y se sigue con los demás.
+                logger.error(f"Juego omitido por cambio de esquema: {parsed}")
+                continue
+            games.append(parsed)
     return games
+
+
+def _parse_game(g: dict) -> dict | SchemaError:
+    game_pk = require(g, ["gamePk"], "schedule.game")
+    if isinstance(game_pk, SchemaError):
+        return game_pk
+
+    away = require(g, ["teams", "away"], "schedule.game")
+    if isinstance(away, SchemaError):
+        return away
+    home = require(g, ["teams", "home"], "schedule.game")
+    if isinstance(home, SchemaError):
+        return home
+
+    away_team_id = require(away, ["team", "id"], "schedule.game.teams.away")
+    if isinstance(away_team_id, SchemaError):
+        return away_team_id
+    home_team_id = require(home, ["team", "id"], "schedule.game.teams.home")
+    if isinstance(home_team_id, SchemaError):
+        return home_team_id
+
+    detailed_state = require(g, ["status", "detailedState"], "schedule.game")
+    if isinstance(detailed_state, SchemaError):
+        return detailed_state
+    abstract_state = require(g, ["status", "abstractGameState"], "schedule.game")
+    if isinstance(abstract_state, SchemaError):
+        return abstract_state
+
+    away_pitcher = away.get("probablePitcher")
+    home_pitcher = home.get("probablePitcher")
+
+    return {
+        "game_pk": game_pk,
+        "away_team": away.get("team", {}).get("name"),
+        "home_team": home.get("team", {}).get("name"),
+        "away_team_id": away_team_id,
+        "home_team_id": home_team_id,
+        "away_pitcher_id": away_pitcher["id"] if away_pitcher else None,
+        "away_pitcher_name": away_pitcher["fullName"] if away_pitcher else None,
+        "home_pitcher_id": home_pitcher["id"] if home_pitcher else None,
+        "home_pitcher_name": home_pitcher["fullName"] if home_pitcher else None,
+        "game_time": g.get("gameDate"),
+        "status": detailed_state,
+        "abstract_state": abstract_state,
+    }
 
 def get_game_result(game_pk: int) -> dict | None:
     params = {"sportId": 1, "gamePk": game_pk, "hydrate": "linescore"}

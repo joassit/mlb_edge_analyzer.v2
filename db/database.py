@@ -12,7 +12,7 @@ realmente hubiera tenido edge real (tracking de resultados).
 from datetime import datetime
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime
+    create_engine, event, Column, Integer, String, Float, DateTime, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -22,9 +22,21 @@ Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
+if DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_wal(dbapi_connection, connection_record):
+        """WAL permite que el dashboard lea mientras el cron escribe, sin
+        bloquear ninguno de los dos lados."""
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.close()
+
 
 class GameAnalysis(Base):
     __tablename__ = "game_analysis"
+    __table_args__ = (
+        UniqueConstraint("game_pk", "game_date", name="uq_game_analysis_game_pk_date"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     game_pk = Column(Integer, nullable=False)
@@ -104,9 +116,22 @@ def init_db():
 
 
 def save_analysis(row: dict) -> None:
+    """Upsert por (game_pk, game_date): si el análisis de ese juego ya existe
+    (re-ejecución del pipeline el mismo día), lo actualiza en vez de duplicarlo.
+    Sin esto, correr main.py dos veces el mismo día contamina el historial que
+    alimenta el Brier Score."""
     session = SessionLocal()
     try:
-        session.add(GameAnalysis(**row))
+        existing = (
+            session.query(GameAnalysis)
+            .filter_by(game_pk=row["game_pk"], game_date=row["game_date"])
+            .one_or_none()
+        )
+        if existing:
+            for key, value in row.items():
+                setattr(existing, key, value)
+        else:
+            session.add(GameAnalysis(**row))
         session.commit()
     finally:
         session.close()

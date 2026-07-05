@@ -90,7 +90,10 @@ python main.py
 ```
 
 Esto imprime el reporte del día, lo guarda en `mlb_edge.db` (SQLite local)
-y lo exporta a `reports/reporte_YYYYMMDD.csv`.
+y lo exporta a `reports/reporte_YYYYMMDD.csv`. Correrlo dos veces el mismo
+día para el mismo juego actualiza el registro existente en vez de duplicarlo
+(upsert por `game_pk` + `game_date`) — necesario para que el historial que
+alimenta el Brier Score no se contamine si el proceso se reintenta.
 
 ### 2. Abrir el dashboard
 
@@ -109,6 +112,11 @@ pytest
 Prueba la lógica del modelo (probabilidad, edge, Skellam, proyección de
 carreras) sin necesidad de red — son pruebas puras de matemáticas/lógica,
 no dependen de la MLB Stats API.
+
+`tests/test_main_pipeline.py` es distinto de los demás: es un test de
+*integración* que mockea la capa de red y verifica que `main.analyze_today()`
+efectivamente invoque el modelo real (no placeholders hardcodeados). Corre
+automáticamente en cada push vía GitHub Actions (`.github/workflows/tests.yml`).
 
 ### 4. Revisar los logs
 
