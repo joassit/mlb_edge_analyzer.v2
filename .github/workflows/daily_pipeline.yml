@@ -14,6 +14,11 @@ permissions:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # Techo defensivo: cada llamada de red individual ya tiene timeout=15s,
+    # pero sin esto un día de red muy inestable (reintentos en cascada sobre
+    # ~15 juegos) podría consumir minutos de Actions hasta el límite default
+    # de GitHub (360 min) antes de cortarse solo.
+    timeout-minutes: 20
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -28,7 +33,68 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Persistencia best-effort de mlb_edge.db entre corridas. Sin esto,
+      # cada run parte de una base vacía: update_results()/compute_metrics()
+      # nunca encuentran predicciones de días anteriores y el tracking de
+      # Brier Score/ROI jamás acumula histórico real -- el job reporta ✅
+      # todos los días sin que el objetivo de negocio del pipeline (medir
+      # desempeño en el tiempo) se cumpla nunca.
+      #
+      # La key incluye github.run_id (siempre única) a propósito: así el
+      # paso de guardado de abajo NUNCA choca con una key ya existente
+      # (actions/cache no permite sobreescribir una key), y este paso de
+      # restauración recupera el snapshot más reciente vía el prefijo en
+      # restore-keys. Esto crea una caché nueva por corrida -- inofensivo
+      # para un archivo SQLite de este tamaño: GitHub libera solas las
+      # cachés no tocadas en 7+ días o si se excede el límite de 10GB por
+      # repo, y aquí se toca (lee o escribe) una caché nueva cada día.
+      #
+      # Se salta por completo si configuras el secret DATABASE_URL (ej.
+      # Postgres administrado) -- en ese caso el pipeline usa esa base
+      # persistente real en vez de SQLite, y esta caché ya no hace falta.
+      - name: Restore previous mlb_edge.db (best-effort, solo sin DATABASE_URL externo)
+        if: ${{ secrets.DATABASE_URL == '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: mlb_edge.db
+          key: mlb-edge-db-${{ github.run_id }}
+          restore-keys: |
+            mlb-edge-db-
+
       - name: Run pipeline
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python main.py
+          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+        run: |
+          # No se asigna DATABASE_URL directo desde secrets.DATABASE_URL en
+          # el bloque `env:` de arriba a propósito: si el secret no existe,
+          # GitHub lo resuelve a cadena vacía y la EXPORTARÍA igual (la
+          # variable existiría con valor ""), rompiendo el fallback a
+          # sqlite de config.py (os.getenv solo aplica el default cuando la
+          # variable está AUSENTE, no cuando está vacía). Por eso se decide
+          # aquí, en shell, si realmente hay que exportarla.
+          if [ -n "$DATABASE_URL_SECRET" ]; then
+            export DATABASE_URL="$DATABASE_URL_SECRET"
+          fi
+          python main.py
+
+      - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
+        if: ${{ always() && secrets.DATABASE_URL == '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: mlb_edge.db
+          key: mlb-edge-db-${{ github.run_id }}
+
+      # Sin esto, el único rastro de lo que produjo una corrida es el log
+      # de texto plano en la pestaña Actions -- los CSV/logs generados
+      # viven dentro del runner efímero y se destruyen con él.
+      - name: Upload today's reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb-edge-daily-output-${{ github.run_id }}
+          path: |
+            reports/*.csv
+            logs/*.log
+          if-no-files-found: ignore
+          retention-days: 30

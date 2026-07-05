@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Mantiene actualizadas las acciones de terceros usadas en los workflows
+  # (actions/checkout, actions/setup-python, actions/cache, actions/upload-
+  # artifact) -- mitigación parcial de que estén ancladas a un tag flotante
+  # (@v4/@v5) y no a un SHA de commit: Dependabot abre un PR cada vez que
+  # el tag mayor se mueve a una versión nueva, en vez de que el proyecto
+  # quede corriendo una versión vieja sin que nadie se entere. No sustituye
+  # el pin a SHA completo (el hardening ideal), pero sí da visibilidad y un
+  # mecanismo de actualización que hoy no existe.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
