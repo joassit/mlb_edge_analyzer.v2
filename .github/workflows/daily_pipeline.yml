@@ -19,6 +19,14 @@ jobs:
     # ~15 juegos) podría consumir minutos de Actions hasta el límite default
     # de GitHub (360 min) antes de cortarse solo.
     timeout-minutes: 20
+    # El contexto `secrets` NO está disponible dentro de `if:` a nivel de
+    # step -- GitHub Actions lo rechaza en tiempo de parseo (confirmado:
+    # "Unrecognized named-value: 'secrets'" al intentar despachar el
+    # workflow). `env:` sí es un contexto válido en `if:`, así que la
+    # decisión se resuelve UNA vez aquí y los steps de abajo solo leen
+    # env.HAS_EXTERNAL_DB.
+    env:
+      HAS_EXTERNAL_DB: ${{ secrets.DATABASE_URL != '' }}
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -56,7 +64,7 @@ jobs:
       # Postgres administrado) -- en ese caso el pipeline usa esa base
       # persistente real en vez de SQLite, y esta caché ya no hace falta.
       - name: Restore previous mlb_edge.db (best-effort, solo sin DATABASE_URL externo)
-        if: ${{ secrets.DATABASE_URL == '' }}
+        if: ${{ env.HAS_EXTERNAL_DB != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: mlb_edge.db
@@ -83,7 +91,7 @@ jobs:
           python main.py
 
       - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
-        if: ${{ always() && secrets.DATABASE_URL == '' }}
+        if: ${{ always() && env.HAS_EXTERNAL_DB != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: mlb_edge.db
