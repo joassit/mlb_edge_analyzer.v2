@@ -6,12 +6,21 @@ sin bloqueos por rate limit, sin depender de que pybaseball siga funcionando).
 """
 
 import logging
+import threading
 import requests
 
 from config import MLB_API_BASE, SEASON, MIN_PA_FOR_LEAGUE_OPS, FALLBACK_BULLPEN_ERA
 from data.http import session
 
 logger = logging.getLogger("mlb_edge_analyzer")
+
+# Protege las tres cachés de abajo (todas comparten este único lock): sin
+# esto, dos threads que llaman get_league_ops()/get_pitcher_era_ip()/etc. al
+# mismo tiempo pueden leer "cache vacía" ambos, disparar dos llamadas a la
+# API en paralelo y pisarse la escritura -- inofensivo en la práctica porque
+# el GIL evita un crash, pero el resultado queda no-determinístico según
+# quién escriba último.
+_cache_lock = threading.Lock()
 
 _pitcher_stats_cache: dict[int, dict] = {}
 _league_ops_cache: float | None = None
@@ -32,23 +41,26 @@ def _parse_innings(ip_str: str) -> float:
 
 
 def get_pitcher_era(pitcher_id: int, season: int = SEASON) -> float | None:
-    """ERA de temporada regular de un pitcher específico, por su MLB ID."""
-    if pitcher_id in _pitcher_stats_cache:
-        return _pitcher_stats_cache[pitcher_id].get("era")
-
-    params = {"stats": "season", "group": "pitching", "season": season}
-    resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
+    """ERA de temporada regular de un pitcher específico, por su MLB ID.
+    Devuelve None si la API falla (red, timeout, esquema) -- nunca propaga
+    la excepción hacia el pipeline."""
+    with _cache_lock:
+        if pitcher_id in _pitcher_stats_cache:
+            return _pitcher_stats_cache[pitcher_id].get("era")
 
     try:
+        params = {"stats": "season", "group": "pitching", "season": season}
+        resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
         splits = payload["stats"][0]["splits"]
         if not splits:
             return None
         era = float(splits[0]["stat"]["era"])
-        _pitcher_stats_cache[pitcher_id] = {"era": era}
+        with _cache_lock:
+            _pitcher_stats_cache[pitcher_id] = {"era": era}
         return era
-    except (KeyError, IndexError, ValueError) as e:
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
         logger.warning(f"No se pudo obtener ERA del pitcher {pitcher_id}: {e}")
         return None
 
@@ -61,44 +73,47 @@ def get_pitcher_era_ip(pitcher_id: int, season: int = SEASON) -> tuple[float, fl
     None si no hay datos (mismo criterio que get_pitcher_era).
     """
     cache_key = f"era-ip-{pitcher_id}-{season}"
-    if cache_key in _pitcher_stats_cache:
-        cached = _pitcher_stats_cache[cache_key]
-        return (cached["era"], cached["ip"]) if cached else None
-
-    params = {"stats": "season", "group": "pitching", "season": season}
-    resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
+    with _cache_lock:
+        if cache_key in _pitcher_stats_cache:
+            cached = _pitcher_stats_cache[cache_key]
+            return (cached["era"], cached["ip"]) if cached else None
 
     try:
+        params = {"stats": "season", "group": "pitching", "season": season}
+        resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
         splits = payload["stats"][0]["splits"]
         if not splits:
-            _pitcher_stats_cache[cache_key] = None
+            with _cache_lock:
+                _pitcher_stats_cache[cache_key] = None
             return None
         stat = splits[0]["stat"]
         era = float(stat["era"])
         ip = _parse_innings(stat["inningsPitched"])
-        _pitcher_stats_cache[cache_key] = {"era": era, "ip": ip}
+        with _cache_lock:
+            _pitcher_stats_cache[cache_key] = {"era": era, "ip": ip}
         return era, ip
-    except (KeyError, IndexError, ValueError) as e:
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
         logger.warning(f"No se pudo obtener ERA/IP del pitcher {pitcher_id}: {e}")
-        _pitcher_stats_cache[cache_key] = None
+        with _cache_lock:
+            _pitcher_stats_cache[cache_key] = None
         return None
 
 
 def get_team_ops(team_id: int, season: int = SEASON) -> float | None:
-    """OPS de equipo de temporada regular (ofensiva del rival)."""
-    params = {"stats": "season", "group": "hitting", "season": season}
-    resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
-
+    """OPS de equipo de temporada regular (ofensiva del rival). None si la
+    API falla -- nunca propaga la excepción."""
     try:
+        params = {"stats": "season", "group": "hitting", "season": season}
+        resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
         splits = payload["stats"][0]["splits"]
         if not splits:
             return None
         return float(splits[0]["stat"]["ops"])
-    except (KeyError, IndexError, ValueError) as e:
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
         logger.warning(f"No se pudo obtener OPS del equipo {team_id}: {e}")
         return None
 
@@ -112,31 +127,39 @@ def get_league_ops(season: int = SEASON) -> float:
     muestra chica que apenas califican.
     """
     global _league_ops_cache
-    if _league_ops_cache is not None:
-        return _league_ops_cache
+    with _cache_lock:
+        if _league_ops_cache is not None:
+            return _league_ops_cache
 
-    params = {
-        "stats": "season",
-        "group": "hitting",
-        "season": season,
-        "sportId": 1,
-        "limit": 300,
-    }
-    resp = session.get(f"{MLB_API_BASE}/stats", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        params = {
+            "stats": "season",
+            "group": "hitting",
+            "season": season,
+            "sportId": 1,
+            "limit": 300,
+        }
+        resp = session.get(f"{MLB_API_BASE}/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
 
-    weighted_ops_sum = 0.0
-    total_pa = 0
-    for split in payload["stats"][0]["splits"]:
-        stat = split["stat"]
-        pa = int(stat.get("plateAppearances", 0))
-        ops = stat.get("ops")
-        if pa >= MIN_PA_FOR_LEAGUE_OPS and ops is not None:
-            weighted_ops_sum += float(ops) * pa
-            total_pa += pa
+        weighted_ops_sum = 0.0
+        total_pa = 0
+        for split in payload["stats"][0]["splits"]:
+            stat = split["stat"]
+            pa = int(stat.get("plateAppearances", 0))
+            ops = stat.get("ops")
+            if pa >= MIN_PA_FOR_LEAGUE_OPS and ops is not None:
+                weighted_ops_sum += float(ops) * pa
+                total_pa += pa
 
-    _league_ops_cache = (weighted_ops_sum / total_pa) if total_pa > 0 else 0.750
+        result = (weighted_ops_sum / total_pa) if total_pa > 0 else 0.750
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+        logger.warning(f"No se pudo obtener OPS de liga, usando fallback 0.750: {e}")
+        result = 0.750
+
+    with _cache_lock:
+        _league_ops_cache = result
     return _league_ops_cache
 
 
@@ -150,8 +173,9 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
     que a veces abren).
     """
     cache_key = f"{team_id}-{season}"
-    if cache_key in _bullpen_cache:
-        return _bullpen_cache[cache_key]
+    with _cache_lock:
+        if cache_key in _bullpen_cache:
+            return _bullpen_cache[cache_key]
 
     try:
         roster_resp = session.get(
@@ -163,7 +187,8 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
         roster = roster_resp.json().get("roster", [])
     except requests.RequestException as e:
         logger.warning(f"No se pudo obtener roster del equipo {team_id}, usando fallback: {e}")
-        _bullpen_cache[cache_key] = FALLBACK_BULLPEN_ERA
+        with _cache_lock:
+            _bullpen_cache[cache_key] = FALLBACK_BULLPEN_ERA
         return FALLBACK_BULLPEN_ERA
 
     pitcher_ids = [
@@ -211,7 +236,8 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
             continue
 
     bullpen_era = (weighted_era_sum / total_ip) if total_ip > 0 else FALLBACK_BULLPEN_ERA
-    _bullpen_cache[cache_key] = bullpen_era
+    with _cache_lock:
+        _bullpen_cache[cache_key] = bullpen_era
     return bullpen_era
 
 
@@ -221,8 +247,9 @@ def get_pitcher_command(pitcher_id: int, season: int = SEASON) -> dict:
     baseOnBalls / bateadores enfrentados). Devuelve también whip por si acaso.
     """
     cache_key = f"cmd-{pitcher_id}-{season}"
-    if cache_key in _pitcher_stats_cache:
-        return _pitcher_stats_cache[cache_key]
+    with _cache_lock:
+        if cache_key in _pitcher_stats_cache:
+            return _pitcher_stats_cache[cache_key]
 
     result = {"k_pct": None, "bb_pct": None, "whip": None}
     try:
@@ -244,7 +271,8 @@ def get_pitcher_command(pitcher_id: int, season: int = SEASON) -> dict:
     except (requests.RequestException, KeyError, IndexError, ValueError, ZeroDivisionError) as e:
         logger.warning(f"No se pudo obtener K%/BB% del pitcher {pitcher_id}: {e}")
 
-    _pitcher_stats_cache[cache_key] = result
+    with _cache_lock:
+        _pitcher_stats_cache[cache_key] = result
     return result
 
 
@@ -256,8 +284,9 @@ def get_pitcher_rest(pitcher_id: int, season: int = SEASON) -> dict:
     from datetime import date as _date
 
     cache_key = f"rest-{pitcher_id}-{season}"
-    if cache_key in _pitcher_stats_cache:
-        return _pitcher_stats_cache[cache_key]
+    with _cache_lock:
+        if cache_key in _pitcher_stats_cache:
+            return _pitcher_stats_cache[cache_key]
 
     result = {"days_rest": None, "last_outing_pitches": None}
     try:
@@ -285,7 +314,8 @@ def get_pitcher_rest(pitcher_id: int, season: int = SEASON) -> dict:
     except (requests.RequestException, KeyError, IndexError, ValueError) as e:
         logger.warning(f"No se pudo obtener descanso del pitcher {pitcher_id}: {e}")
 
-    _pitcher_stats_cache[cache_key] = result
+    with _cache_lock:
+        _pitcher_stats_cache[cache_key] = result
     return result
 
 

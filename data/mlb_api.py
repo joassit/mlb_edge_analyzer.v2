@@ -1,4 +1,5 @@
 import logging
+import requests
 from datetime import date
 from config import MLB_API_BASE
 from data.contracts import require, SchemaError
@@ -7,6 +8,8 @@ from data.http import session
 logger = logging.getLogger("mlb_edge_analyzer")
 
 def get_schedule(target_date: date = None) -> list[dict]:
+    """Lista de juegos de la fecha dada. Devuelve [] si la API falla (red,
+    timeout, esquema) -- nunca propaga la excepción hacia el pipeline."""
     if target_date is None:
         target_date = date.today()
 
@@ -16,9 +19,13 @@ def get_schedule(target_date: date = None) -> list[dict]:
         "hydrate": "probablePitcher,team,linescore",
     }
 
-    resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"No se pudo obtener el schedule de {target_date}: {e}")
+        return []
 
     games = []
     for date_block in payload.get("dates", []):
@@ -79,11 +86,19 @@ def _parse_game(g: dict) -> dict | SchemaError:
     }
 
 def get_game_result(game_pk: int) -> dict | None:
+    """Resultado final del juego, o None si todavía no termina, se pospuso,
+    o la API falla (red, timeout, esquema) -- las tres situaciones son
+    indistinguibles para el caller, que de cualquier forma reintenta al
+    día siguiente vía get_predictions_without_result()."""
     params = {"sportId": 1, "gamePk": game_pk, "hydrate": "linescore"}
-    resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
-    
+    try:
+        resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"No se pudo obtener el resultado de game_pk={game_pk}: {e}")
+        return None
+
     dates = payload.get("dates", [])
     if not dates or not dates[0].get("games"):
         return None

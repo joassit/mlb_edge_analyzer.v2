@@ -1,0 +1,71 @@
+"""
+V4 — las funciones de ingesta (data/stats.py, data/mlb_api.py) deben
+degradar con gracia (None/[]/fallback) ante fallos de red, no propagar la
+excepción y tumbar el pipeline completo. Antes de esta corrección, solo
+get_bullpen_era() y get_pitcher_command()/get_pitcher_rest() lo hacían --
+get_pitcher_era_ip(), get_team_ops(), get_league_ops(), get_schedule() y
+get_game_result() dejaban que requests.RequestException/HTTPError se
+propagara sin capturar.
+"""
+
+import requests
+
+import data.mlb_api as mlb_api_mod
+import data.stats as stats_mod
+from data.mlb_api import get_game_result, get_schedule
+from data.stats import get_league_ops, get_pitcher_era, get_pitcher_era_ip, get_team_ops
+
+
+def _raise(exc):
+    def _fn(*args, **kwargs):
+        raise exc
+    return _fn
+
+
+def test_get_pitcher_era_returns_none_on_timeout(monkeypatch):
+    monkeypatch.setattr(stats_mod, "_pitcher_stats_cache", {})
+    monkeypatch.setattr(stats_mod.session, "get", _raise(requests.Timeout()))
+    assert get_pitcher_era(999001) is None
+
+
+def test_get_pitcher_era_ip_returns_none_on_connection_error(monkeypatch):
+    monkeypatch.setattr(stats_mod, "_pitcher_stats_cache", {})
+    monkeypatch.setattr(stats_mod.session, "get", _raise(requests.ConnectionError()))
+    assert get_pitcher_era_ip(999002) is None
+
+
+def test_get_team_ops_returns_none_on_http_error(monkeypatch):
+    class _FakeResp:
+        def raise_for_status(self):
+            raise requests.HTTPError("500 Server Error")
+
+    monkeypatch.setattr(stats_mod.session, "get", lambda *a, **k: _FakeResp())
+    assert get_team_ops(999003) is None
+
+
+def test_get_league_ops_falls_back_to_default_on_network_error(monkeypatch):
+    monkeypatch.setattr(stats_mod, "_league_ops_cache", None)
+    monkeypatch.setattr(stats_mod.session, "get", _raise(requests.ConnectionError()))
+    assert get_league_ops() == 0.750
+
+
+def test_get_schedule_returns_empty_list_on_timeout(monkeypatch):
+    monkeypatch.setattr(mlb_api_mod.session, "get", _raise(requests.Timeout()))
+    assert get_schedule() == []
+
+
+def test_get_game_result_returns_none_on_connection_error(monkeypatch):
+    monkeypatch.setattr(mlb_api_mod.session, "get", _raise(requests.ConnectionError()))
+    assert get_game_result(717468) is None
+
+
+def test_get_schedule_returns_empty_list_on_malformed_json(monkeypatch):
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr(mlb_api_mod.session, "get", lambda *a, **k: _FakeResp())
+    assert get_schedule() == []

@@ -66,6 +66,37 @@ def test_get_feature_snapshot_returns_none_when_missing(isolated_db):
     assert isolated_db.get_feature_snapshot(game_pk=999, game_date="2026-07-05") is None
 
 
+def test_feature_snapshot_stores_frozen_config_columns(isolated_db):
+    raw_inputs = {
+        "away_era": 3.5, "home_era": 4.1, "park_factor": 1.02,
+        "park_factor_weight": 1.0, "weather_correction": 0.0,
+        "starter_weight": 0.65, "home_field_advantage": 0.02,
+    }
+    isolated_db.save_feature_snapshot(game_pk=42, game_date="2026-07-05", raw_inputs=raw_inputs)
+
+    session = isolated_db.SessionLocal()
+    try:
+        snap = (
+            session.query(isolated_db.FeatureSnapshot)
+            .filter_by(game_pk=42, game_date="2026-07-05")
+            .one()
+        )
+    finally:
+        session.close()
+
+    assert snap.park_factor_weight == 1.0
+    assert snap.weather_correction == 0.0
+    assert snap.starter_weight == 0.65
+    assert snap.home_field_advantage == 0.02
+
+
+def test_game_analysis_has_game_date_leftmost_index(isolated_db):
+    from sqlalchemy import inspect
+    inspector = inspect(isolated_db.engine)
+    indexes = [ix["name"] for ix in inspector.get_indexes("game_analysis")]
+    assert any("game_date" in ix for ix in indexes)
+
+
 def test_record_closing_odds_computes_positive_clv_when_line_moves_toward_your_side(isolated_db):
     bet_id = isolated_db.record_bet({
         "game_pk": 7, "game_date": "2026-07-05", "market": "moneyline",

@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     create_engine, event, inspect, text,
-    Column, Integer, String, Float, Boolean, DateTime, Text, UniqueConstraint
+    Column, Integer, String, Float, Boolean, DateTime, Text, UniqueConstraint, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -45,6 +45,12 @@ class GameAnalysis(Base):
         # versión — correr el pipeline dos veces con el mismo código no
         # duplica filas.
         UniqueConstraint("game_pk", "game_date", "model_version", name="uq_pred"),
+        # uq_pred es un índice único, pero su columna izquierda es game_pk,
+        # no game_date -- no sirve para acelerar queries que filtran SOLO
+        # por game_date (compute_metrics, get_predictions_without_result),
+        # que sin esto hacen full table scan. Ver db/migrate_v07.py para
+        # bases de datos existentes creadas antes de este índice.
+        Index("ix_game_date_pk", "game_date", "game_pk"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -189,6 +195,17 @@ class FeatureSnapshot(Base):
     model_version = Column(String, default=MODEL_VERSION)
     raw_inputs_json = Column(Text, nullable=False)  # dict serializado — ver save_feature_snapshot
 
+    # Congelados aparte del blob de arriba (que ya los incluye) para que se
+    # puedan auditar/consultar sin deserializar JSON. Sin esto, si
+    # PARK_FACTOR_WEIGHT/WEATHER_CORRECTION cambian en config.py después de
+    # esta fecha, recalcular este juego con model.predictor leería los
+    # valores NUEVOS en vez de los que realmente se usaron -- rompiendo la
+    # reproducibilidad exacta que este Store existe para garantizar.
+    park_factor_weight = Column(Float, nullable=True)
+    weather_correction = Column(Float, nullable=True)
+    starter_weight = Column(Float, nullable=True)
+    home_field_advantage = Column(Float, nullable=True)
+
 
 def _auto_add_missing_columns():
     """
@@ -240,14 +257,23 @@ def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> Non
             .one_or_none()
         )
         payload = json.dumps(raw_inputs, default=str)
+        frozen_config = {
+            "park_factor_weight": raw_inputs.get("park_factor_weight"),
+            "weather_correction": raw_inputs.get("weather_correction"),
+            "starter_weight": raw_inputs.get("starter_weight"),
+            "home_field_advantage": raw_inputs.get("home_field_advantage"),
+        }
         if existing:
             existing.raw_inputs_json = payload
             existing.captured_at = datetime.utcnow()
             existing.model_version = MODEL_VERSION
+            for key, value in frozen_config.items():
+                setattr(existing, key, value)
         else:
             session.add(FeatureSnapshot(
                 game_pk=game_pk, game_date=game_date,
                 raw_inputs_json=payload, model_version=MODEL_VERSION,
+                **frozen_config,
             ))
         session.commit()
     finally:

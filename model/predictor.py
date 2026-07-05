@@ -10,6 +10,7 @@ congela, así que un snapshot de hace meses se puede recalcular con esto sin
 volver a golpear ninguna API.
 """
 
+from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION
 from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA
 from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
@@ -19,6 +20,16 @@ from model.adjustments import shrunk_era
 
 def predict_from_raw_inputs(raw: dict) -> dict:
     league_era = raw.get("league_era", LEAGUE_AVG_ERA)
+
+    # PARK_FACTOR_WEIGHT/WEATHER_CORRECTION congelados en el snapshot en vez
+    # de leídos en vivo de config.py -- si esas constantes cambian en el
+    # futuro, un recálculo histórico de este juego debe seguir dando el
+    # mismo resultado que dio el día que se generó la predicción real. Un
+    # snapshot de antes de esta corrección no trae estas claves -- cae a
+    # los valores actuales de config.py, igual que el shrinkage de ERA de
+    # arriba cae al ERA crudo si el snapshot no trae innings_pitched.
+    park_factor_weight = raw.get("park_factor_weight", PARK_FACTOR_WEIGHT)
+    weather_correction = raw.get("weather_correction", WEATHER_CORRECTION)
 
     # Shrinkage del ERA del abridor hacia el promedio de liga, en proporción
     # a las entradas lanzadas -- sin esto, un abridor con 15 IP de muestra
@@ -35,11 +46,13 @@ def predict_from_raw_inputs(raw: dict) -> dict:
         raw["away_ops"], home_era, raw["away_bullpen_era"],
         raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
         is_home=False, temp_f=raw.get("temp_f"),
+        park_factor_weight=park_factor_weight, weather_correction=weather_correction,
     )
     home_mu = project_team_runs(
         raw["home_ops"], away_era, raw["home_bullpen_era"],
         raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
         is_home=True, temp_f=raw.get("temp_f"),
+        park_factor_weight=park_factor_weight, weather_correction=weather_correction,
     )
 
     away_p_raw = model_prob(

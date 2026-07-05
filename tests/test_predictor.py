@@ -54,3 +54,28 @@ def test_predict_from_raw_inputs_defaults_league_era_when_missing():
     # No debe lanzar KeyError — debe caer a LEAGUE_AVG_ERA del propio módulo.
     prediction = predict_from_raw_inputs(raw)
     assert 0 < prediction["home_model_prob"] < 1
+
+
+def test_predict_from_raw_inputs_works_without_frozen_park_config_keys():
+    # Snapshot capturado ANTES de la corrección V5 -- no trae
+    # park_factor_weight/weather_correction. No debe lanzar KeyError.
+    raw = _base_raw_inputs(park_factor=1.1)
+    prediction = predict_from_raw_inputs(raw)
+    assert 0 < prediction["home_model_prob"] < 1
+
+
+def test_predict_from_raw_inputs_uses_frozen_park_factor_weight_not_live_config(monkeypatch):
+    # Si config.PARK_FACTOR_WEIGHT cambia DESPUÉS de capturar un snapshot,
+    # recalcular ese snapshot debe seguir usando el valor congelado en el
+    # propio raw_inputs, no el valor actual de config.py -- si no, el
+    # recálculo histórico ya no sería reproducible.
+    import model.predictor as predictor_mod
+    monkeypatch.setattr(predictor_mod, "PARK_FACTOR_WEIGHT", 5.0)
+
+    raw_frozen = _base_raw_inputs(park_factor=1.1, park_factor_weight=1.0, weather_correction=0.0)
+    raw_using_live_config = _base_raw_inputs(park_factor=1.1)  # sin override -- cae al config "actual"
+
+    frozen_result = predict_from_raw_inputs(raw_frozen)
+    live_config_result = predict_from_raw_inputs(raw_using_live_config)
+
+    assert frozen_result["home_proj_runs"] != live_config_result["home_proj_runs"]

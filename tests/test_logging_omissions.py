@@ -1,0 +1,88 @@
+"""
+V8 — analyze_today() debe dejar rastro en el log de por qué omite un
+juego, en vez del `continue` silencioso original: sin esto, un juego que
+no aparece en el reporte del día no se puede diagnosticar sin depurar el
+código a mano.
+"""
+
+import logging
+
+import main
+
+
+def _fake_schedule_with_tbd_pitcher(target_date=None):
+    return [{
+        "game_pk": 888888,
+        "away_team": "TBD Away", "home_team": "TBD Home",
+        "away_team_id": 1, "home_team_id": 2,
+        "away_pitcher_id": None, "away_pitcher_name": None,
+        "home_pitcher_id": 20, "home_pitcher_name": "Ace",
+        "game_time": "2026-07-05T23:05:00Z",
+        "status": "Scheduled", "abstract_state": "Preview",
+    }]
+
+
+def _fake_schedule_with_confirmed_pitchers(target_date=None):
+    return [{
+        "game_pk": 888889,
+        "away_team": "A", "home_team": "B",
+        "away_team_id": 1, "home_team_id": 2,
+        "away_pitcher_id": 10, "away_pitcher_name": "P1",
+        "home_pitcher_id": 20, "home_pitcher_name": "P2",
+        "game_time": "2026-07-05T23:05:00Z",
+        "status": "Scheduled", "abstract_state": "Preview",
+    }]
+
+
+def test_analyze_today_logs_warning_when_probable_pitcher_missing(monkeypatch, caplog):
+    monkeypatch.setattr(main, "get_schedule", _fake_schedule_with_tbd_pitcher)
+    monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "preload_weather", lambda games, park_lookup: {})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert results == []
+    assert any("abridor probable" in r.message for r in caplog.records)
+
+
+def test_analyze_today_logs_warning_when_stats_are_missing(monkeypatch, caplog):
+    monkeypatch.setattr(main, "get_schedule", _fake_schedule_with_confirmed_pitchers)
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: None)
+    monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: None)
+    monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "preload_weather", lambda games, park_lookup: {})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert results == []
+    assert any("falta" in r.message for r in caplog.records)
+
+
+def _patch_full_pipeline_no_market_data(monkeypatch):
+    monkeypatch.setattr(main, "get_schedule", _fake_schedule_with_confirmed_pitchers)
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: (3.5, 100.0))
+    monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_bullpen_era", lambda tid, season=None: 4.30)
+    monkeypatch.setattr(main, "get_pitcher_command", lambda pid, season=None: {"k_pct": 0.25, "bb_pct": 0.08, "whip": 1.2})
+    monkeypatch.setattr(main, "get_pitcher_rest", lambda pid, season=None: {"days_rest": 5, "last_outing_pitches": 90})
+    monkeypatch.setattr(main, "get_park_info", lambda tid: {"name": "Test Park", "park_factor": 1.0, "lat": 40.0, "lon": -70.0})
+    monkeypatch.setattr(main, "preload_weather", lambda games, park_lookup: {})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "MARKET_SPREADS", {})
+    monkeypatch.setattr(main, "MARKET_TOTALS", {})
+
+
+def test_analyze_today_logs_warning_when_no_market_data_available(monkeypatch, caplog):
+    _patch_full_pipeline_no_market_data(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert len(results) == 1
+    assert any("sin datos de mercado" in r.message for r in caplog.records)

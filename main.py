@@ -3,6 +3,7 @@ MLB EDGE ANALYZER — Versión 0.6.0
 Orquestador: Realiza auditoría del día anterior y proyecciones del día actual.
 """
 
+import logging
 from datetime import date
 from logging_config import setup_logging
 from data.mlb_api import get_schedule
@@ -23,8 +24,11 @@ from tracking.results_tracker import update_results, print_performance_report, a
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
+    PARK_FACTOR_WEIGHT, WEATHER_CORRECTION,
 )
 from version_info import get_git_commit
+
+logger = logging.getLogger("mlb_edge_analyzer")
 
 # Cuotas de mercado cargadas a mano — se usan solo si no hay match en vivo
 # de The Odds API (ODDS_API_KEY sin configurar, o el juego no aparece en la
@@ -55,9 +59,11 @@ def analyze_today() -> list[dict]:
 
     for g in games:
         if g.get("abstract_state") not in ["Preview", "Final"]:
+            logger.debug(f"Omitiendo {g['away_team']} @ {g['home_team']}: estado {g.get('abstract_state')}")
             continue
 
         if not g.get("away_pitcher_id") or not g.get("home_pitcher_id"):
+            logger.warning(f"Omitiendo {g['away_team']} @ {g['home_team']}: abridor probable sin confirmar (TBD)")
             continue
 
         away_era_ip = get_pitcher_era_ip(g["away_pitcher_id"])
@@ -66,6 +72,12 @@ def analyze_today() -> list[dict]:
         home_ops = get_team_ops(g["home_team_id"])
 
         if None in (away_era_ip, home_era_ip, away_ops, home_ops):
+            missing = []
+            if away_era_ip is None: missing.append("away ERA/IP")
+            if home_era_ip is None: missing.append("home ERA/IP")
+            if away_ops is None: missing.append("away OPS")
+            if home_ops is None: missing.append("home OPS")
+            logger.warning(f"Omitiendo {g['away_team']} @ {g['home_team']}: falta {', '.join(missing)} (falla de API o datos no disponibles)")
             continue
 
         away_era, away_innings_pitched = away_era_ip
@@ -125,6 +137,7 @@ def analyze_today() -> list[dict]:
             "market_price": price, "market_no_vig": no_vig,
             "market_run_line": manual_rl, "market_totals": manual_totals,
             "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
+            "park_factor_weight": PARK_FACTOR_WEIGHT, "weather_correction": WEATHER_CORRECTION,
         }
 
         prediction = predict_from_raw_inputs(raw_inputs)
@@ -198,6 +211,10 @@ def analyze_today() -> list[dict]:
                 "over_odds": manual_totals.get("over"), "under_odds": manual_totals.get("under"),
                 "over_novig": totals_over_novig, "under_novig": totals_under_novig,
             }
+
+        if not market_lines:
+            logger.warning(f"{g['away_team']} @ {g['home_team']}: sin datos de mercado en ningún mercado "
+                           f"(moneyline/run_line/totals) -- no se podrá generar ningún pick real para este juego")
 
         candidates = generate_pick_candidates(prediction, market_lines,
                                                min_ev=MIN_PICK_EV, min_edge=MIN_PICK_EDGE)

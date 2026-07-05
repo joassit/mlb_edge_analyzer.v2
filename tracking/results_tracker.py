@@ -68,6 +68,37 @@ def update_results(days_back: int = 5) -> int:
     return updated
 
 
+def validate_probabilities(pred: GameAnalysis) -> bool:
+    """
+    Sanity check de rango [0,1] y de que las probabilidades del mismo
+    modelo sumen ~1 -- protege compute_metrics() de filas corruptas (bug de
+    persistencia, migración incompleta, edición manual de la DB) que de
+    otro modo inflarían o hundirían el Brier Score/accuracy en silencio en
+    vez de saltar a la vista como un dato malo.
+    """
+    errors = []
+
+    for field in ("away_model_prob", "home_model_prob", "away_skellam_prob", "home_skellam_prob"):
+        p = getattr(pred, field)
+        if p is None:
+            continue
+        if not (0.0 <= p <= 1.0):
+            errors.append(f"{field}={p} fuera de rango [0,1]")
+
+    # compute_metrics() solo depende de home_model_prob -- away_model_prob
+    # puede faltar en filas parciales/antiguas, así que el chequeo de suma
+    # se omite (no se rechaza la fila) cuando no hay con qué compararla.
+    if pred.away_model_prob is not None and pred.home_model_prob is not None:
+        heuristic_sum = pred.away_model_prob + pred.home_model_prob
+        if not (0.99 <= heuristic_sum <= 1.01):
+            errors.append(f"away_model_prob+home_model_prob suma {heuristic_sum}, no ~1.0")
+
+    if errors:
+        logger.error(f"Validación de probabilidades fallida para game_pk={pred.game_pk}: {errors}")
+        return False
+    return True
+
+
 def compute_metrics(days: int = 30) -> dict:
     """
     Calcula accuracy y Brier Score sobre las predicciones de los últimos
@@ -102,6 +133,12 @@ def compute_metrics(days: int = 30) -> dict:
         seen_pks.add(pred.game_pk)
         deduped_rows.append((pred, result))
     rows = deduped_rows
+
+    validated_rows = [(pred, result) for pred, result in rows if validate_probabilities(pred)]
+    n_invalid = len(rows) - len(validated_rows)
+    if n_invalid:
+        logger.warning(f"{n_invalid} predicción(es) excluida(s) de las métricas por validación de rango fallida")
+    rows = validated_rows
 
     if not rows:
         return {"n_games": 0, "accuracy": None, "brier_score": None}

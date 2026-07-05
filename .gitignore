@@ -8,3 +8,4 @@ logs/
 .env
 .cache/
 backups/
+reports/*.csv

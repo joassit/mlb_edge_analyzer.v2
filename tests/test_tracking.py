@@ -202,6 +202,68 @@ def test_compute_pick_performance_treats_push_as_no_stake_loss_neutral(tmp_path,
     assert perf["overall_real"]["roi"] == 0.0
 
 
+class _FakeValidationPrediction:
+    def __init__(self, game_pk=1, away_model_prob=0.4, home_model_prob=0.6,
+                 away_skellam_prob=0.45, home_skellam_prob=0.55):
+        self.game_pk = game_pk
+        self.away_model_prob = away_model_prob
+        self.home_model_prob = home_model_prob
+        self.away_skellam_prob = away_skellam_prob
+        self.home_skellam_prob = home_skellam_prob
+
+
+def test_validate_probabilities_accepts_valid_row():
+    assert results_tracker.validate_probabilities(_FakeValidationPrediction()) is True
+
+
+def test_validate_probabilities_rejects_probabilities_that_dont_sum_to_one():
+    bad = _FakeValidationPrediction(away_model_prob=0.6, home_model_prob=0.6)
+    assert results_tracker.validate_probabilities(bad) is False
+
+
+def test_validate_probabilities_rejects_out_of_range_values():
+    bad = _FakeValidationPrediction(away_model_prob=1.5, home_model_prob=-0.5)
+    assert results_tracker.validate_probabilities(bad) is False
+
+
+def test_validate_probabilities_ignores_missing_skellam_fields():
+    # Snapshots viejos pueden no tener Skellam -- no debe fallar por eso.
+    row = _FakeValidationPrediction(away_skellam_prob=None, home_skellam_prob=None)
+    assert results_tracker.validate_probabilities(row) is True
+
+
+def test_compute_metrics_excludes_rows_that_fail_probability_validation(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/metrics_invalid_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    # Fila válida
+    session.add(database.GameAnalysis(
+        game_pk=1, game_date=today, away_team="A", home_team="B",
+        away_model_prob=0.4, home_model_prob=0.6,
+    ))
+    session.add(database.ActualResult(
+        game_pk=1, game_date=today, home_score=5, away_score=2, winner="home", total_runs=7,
+    ))
+    # Fila corrupta: las probabilidades no suman 1 -- no debe contaminar Brier/accuracy
+    session.add(database.GameAnalysis(
+        game_pk=2, game_date=today, away_team="C", home_team="D",
+        away_model_prob=0.6, home_model_prob=0.6,
+    ))
+    session.add(database.ActualResult(
+        game_pk=2, game_date=today, home_score=3, away_score=1, winner="home", total_runs=4,
+    ))
+    session.commit()
+    session.close()
+
+    metrics = results_tracker.compute_metrics(days=30)
+
+    assert metrics["n_games"] == 1
+
+
 def test_compute_pick_performance_empty_when_no_picks_settled(tmp_path, monkeypatch):
     temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_empty_test.db")
     database.Base.metadata.create_all(temp_engine)
