@@ -34,7 +34,7 @@ jobs:
           ref: main
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           # 3.12: verificado localmente que las 6 dependencias pineadas
           # instalan limpio y que la suite completa (168 tests) pasa sin
