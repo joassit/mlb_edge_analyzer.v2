@@ -276,3 +276,84 @@ def test_analyze_today_falls_back_to_today_without_official_game_date(monkeypatc
     results = main.analyze_today()
 
     assert results[0]["game_date"] == _date.today().strftime("%Y-%m-%d")
+
+
+def _fake_get_schedule_two_games(target_date=None):
+    return [
+        {
+            "game_pk": 111, "away_team": "A", "home_team": "B",
+            "away_team_id": 1, "home_team_id": 2,
+            "away_pitcher_id": 10, "away_pitcher_name": "P1",
+            "home_pitcher_id": 20, "home_pitcher_name": "P2",
+            "game_time": "2026-07-05T23:05:00Z", "status": "Scheduled", "abstract_state": "Preview",
+        },
+        {
+            "game_pk": 222, "away_team": "C", "home_team": "D",
+            "away_team_id": 3, "home_team_id": 4,
+            "away_pitcher_id": 30, "away_pitcher_name": "P3",
+            "home_pitcher_id": 40, "home_pitcher_name": "P4",
+            "game_time": "2026-07-06T00:10:00Z", "status": "Scheduled", "abstract_state": "Preview",
+        },
+    ]
+
+
+def test_analyze_today_isolates_an_unexpected_error_in_one_game(monkeypatch):
+    """Un juego con un error inesperado (ej. un cambio de esquema que
+    provoque un KeyError/AttributeError no anticipado) no debe tumbar el
+    resto del día -- se descarta solo ese juego, se cuenta como error, y
+    los demás juegos se procesan con normalidad."""
+    era_ip_by_pitcher = {10: (3.00, 100.0), 20: (4.50, 90.0), 30: (3.50, 100.0), 40: (4.00, 90.0)}
+    ops_by_team = {1: 0.780, 2: 0.740, 3: 0.760, 4: 0.750}
+
+    def _bullpen_era_raises_for_team_2(team_id, season=None):
+        if team_id == 2:
+            raise KeyError("cambio de esquema inesperado en el roster")
+        return 4.30
+
+    monkeypatch.setattr(main, "get_schedule", _fake_get_schedule_two_games)
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: era_ip_by_pitcher[pid])
+    monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: ops_by_team[tid])
+    monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_bullpen_era", _bullpen_era_raises_for_team_2)
+    monkeypatch.setattr(main, "get_pitcher_command", lambda pid, season=None: {"k_pct": 0.25, "bb_pct": 0.08, "whip": 1.2})
+    monkeypatch.setattr(main, "get_pitcher_rest", lambda pid, season=None: {"days_rest": 5, "last_outing_pitches": 90})
+    monkeypatch.setattr(main, "get_park_info", lambda tid: {"name": "Test Park", "park_factor": 1.0, "lat": 40.0, "lon": -70.0})
+    monkeypatch.setattr(main, "preload_weather", lambda games, park_lookup: {})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "MARKET_SPREADS", {})
+    monkeypatch.setattr(main, "MARKET_TOTALS", {})
+
+    results = main.analyze_today()
+
+    # El juego 111 (home_team_id=2) explota -- se descarta. El 222 sigue.
+    assert len(results) == 1
+    assert results[0]["game_pk"] == 222
+
+    stats = main.analyze_today.last_run_stats
+    assert stats["total_games"] == 2
+    assert stats["processed"] == 1
+    assert stats["errors"] == 1
+    assert stats["discarded"] == 0
+
+
+def test_analyze_today_last_run_stats_counts_discarded_games(monkeypatch):
+    def _fake_schedule_with_tbd(target_date=None):
+        games = _fake_get_schedule_two_games(target_date)
+        games[0]["away_pitcher_id"] = None  # TBD -> descartado, no error
+        return games
+
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "get_schedule", _fake_schedule_with_tbd)
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: {30: (3.5, 100.0), 40: (4.0, 90.0)}[pid])
+    monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: {3: 0.760, 4: 0.750}[tid])
+    _clear_manual_markets(monkeypatch)
+
+    results = main.analyze_today()
+
+    assert len(results) == 1
+    stats = main.analyze_today.last_run_stats
+    assert stats["total_games"] == 2
+    assert stats["processed"] == 1
+    assert stats["discarded"] == 1
+    assert stats["errors"] == 0

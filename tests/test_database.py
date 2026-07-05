@@ -5,11 +5,27 @@ se redirige `engine`/`SessionLocal` del módulo real, nunca se toca
 mlb_edge.db ni se deja estado que contamine otros tests.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import db.database as database
+
+
+def test_utcnow_naive_returns_naive_datetime_close_to_now():
+    """Reemplazo de datetime.utcnow() (deprecado en Python 3.12+) -- debe
+    seguir devolviendo un datetime NAIVE (sin tzinfo), no uno aware, para
+    no cambiar el formato ya almacenado en columnas DateTime existentes.
+    Se compara contra datetime.now(timezone.utc), no contra utcnow(), para
+    que este propio test no dispare la advertencia de deprecación."""
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    result = database._utcnow_naive()
+    after = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    assert result.tzinfo is None
+    assert before <= result <= after
 
 
 @pytest.fixture

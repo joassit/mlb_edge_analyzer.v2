@@ -28,7 +28,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # 3.12: verificado localmente que las 6 dependencias pineadas
+          # instalan limpio y que la suite completa (168 tests) pasa sin
+          # ninguna advertencia bajo -W error::DeprecationWarning.
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -62,6 +65,7 @@ jobs:
             mlb-edge-db-
 
       - name: Run pipeline
+        id: run-pipeline
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
@@ -96,5 +100,53 @@ jobs:
           path: |
             reports/*.csv
             logs/*.log
+            mlb_edge.db
           if-no-files-found: ignore
           retention-days: 30
+
+      # Verificación automática de que la corrida fue real, no un no-op
+      # silencioso: confirma que el proceso llegó a su resumen final (no
+      # solo que "run main.py" no lanzó una excepción -- main.py podría en
+      # teoría terminar temprano sin procesar nada) y expone en una
+      # anotación visible de GitHub (::warning::/::error::) los conteos de
+      # descartados/errores, en vez de que queden enterrados en el log
+      # crudo. No hace fallar el job por errores por-juego (son aislados a
+      # propósito, ver _analyze_one_game() en main.py -- un juego con datos
+      # inesperados no debe tumbar el resto del día), pero SÍ hace fallar
+      # el job si el paso "Run pipeline" falló, o si nunca llegó a imprimir
+      # el resumen final (señal de que se salió antes de completar el ciclo).
+      - name: Validate run
+        if: always()
+        run: |
+          echo "--- Validando la corrida ---"
+
+          if [ "${{ steps.run-pipeline.outcome }}" != "success" ]; then
+            echo "::error::El paso 'Run pipeline' terminó con outcome=${{ steps.run-pipeline.outcome }} -- ver el log de ese paso para la causa raíz exacta."
+            exit 1
+          fi
+
+          LOG_FILE=$(ls -t logs/mlb_edge_*.log 2>/dev/null | head -n 1)
+          if [ -z "$LOG_FILE" ]; then
+            echo "::error::No se generó ningún archivo logs/mlb_edge_*.log -- setup_logging() no corrió o el proceso terminó antes de tiempo."
+            exit 1
+          fi
+          echo "Log encontrado: $LOG_FILE"
+
+          SUMMARY_LINE=$(grep "run_pipeline() completo en" "$LOG_FILE" | tail -n 1)
+          if [ -z "$SUMMARY_LINE" ]; then
+            echo "::error::El log no contiene la línea de resumen final ('run_pipeline() completo en...') -- el pipeline no llegó a terminar su ciclo completo aunque el proceso haya salido con código 0."
+            exit 1
+          fi
+          echo "Resumen final encontrado: $SUMMARY_LINE"
+
+          ERRORS=$(echo "$SUMMARY_LINE" | grep -oP 'errores=\K[0-9]+' || echo "0")
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::warning::$ERRORS juego(s) tuvieron un error aislado durante el procesamiento (ver 'Error inesperado procesando' en $LOG_FILE) -- no hizo fallar el job a propósito, pero requiere revisión."
+          fi
+
+          if [ ! -f mlb_edge.db ]; then
+            echo "::error::mlb_edge.db no existe después de la corrida -- init_db() no se ejecutó o la ruta de DATABASE_URL es inválida."
+            exit 1
+          fi
+
+          echo "✅ Validación completa: el pipeline corrió de principio a fin, generó su base de datos y su resumen final."

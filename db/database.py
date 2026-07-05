@@ -10,7 +10,7 @@ realmente hubiera tenido edge real (tracking de resultados).
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     create_engine, event, inspect, text,
@@ -23,6 +23,16 @@ from config import DATABASE_URL, MODEL_VERSION
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
+
+
+def _utcnow_naive() -> datetime:
+    """Reemplazo de datetime.utcnow() (deprecado desde Python 3.12,
+    eliminado en una versión futura). Devuelve el mismo tipo que el
+    original -- un datetime NAIVE en UTC -- para no cambiar el formato ya
+    almacenado en las columnas DateTime existentes (que no usan
+    timezone=True); solo cambia cómo se obtiene el valor, no su forma."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 if DATABASE_URL.startswith("sqlite"):
     @event.listens_for(engine, "connect")
@@ -94,7 +104,7 @@ class GameAnalysis(Base):
     decision = Column(String, nullable=True)  # tu decisión final, texto libre
     model_version = Column(String, default=MODEL_VERSION)
     git_commit = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
 
 
 class ActualResult(Base):
@@ -107,7 +117,7 @@ class ActualResult(Base):
     away_score = Column(Integer, nullable=False)
     winner = Column(String, nullable=False)  # "home" o "away"
     total_runs = Column(Integer, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=_utcnow_naive)
 
 
 class Bet(Base):
@@ -127,7 +137,7 @@ class Bet(Base):
     model_prob = Column(Float, nullable=False)
     expected_value = Column(Float, nullable=True)  # EV por unidad, calculado al momento de apostar
     stake = Column(Float, nullable=False)
-    placed_at = Column(DateTime, default=datetime.utcnow)
+    placed_at = Column(DateTime, default=_utcnow_naive)
     result = Column(String, default="pending")  # pending, win, loss
     profit = Column(Float, nullable=True)  # se llena al liquidar
     closing_odds = Column(Float, nullable=True)  # cuota del mismo lado cerca del inicio del juego
@@ -168,7 +178,7 @@ class Pick(Base):
     result = Column(String, default="pending")   # pending / win / loss / push
     profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)
     model_version = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
 
 
 class FeatureSnapshot(Base):
@@ -191,7 +201,7 @@ class FeatureSnapshot(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     game_pk = Column(Integer, nullable=False)
     game_date = Column(String, nullable=False)
-    captured_at = Column(DateTime, default=datetime.utcnow)
+    captured_at = Column(DateTime, default=_utcnow_naive)
     model_version = Column(String, default=MODEL_VERSION)
     raw_inputs_json = Column(Text, nullable=False)  # dict serializado — ver save_feature_snapshot
 
@@ -265,7 +275,7 @@ def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> Non
         }
         if existing:
             existing.raw_inputs_json = payload
-            existing.captured_at = datetime.utcnow()
+            existing.captured_at = _utcnow_naive()
             existing.model_version = MODEL_VERSION
             for key, value in frozen_config.items():
                 setattr(existing, key, value)
