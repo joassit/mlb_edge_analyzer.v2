@@ -108,6 +108,33 @@ def test_analyze_today_prefers_live_odds_over_manual_market_odds(monkeypatch):
     assert abs((row["away_market_no_vig_prob"] + row["home_market_no_vig_prob"]) - 1.0) < 1e-9
 
 
+def test_analyze_today_disambiguates_doubleheader_odds_by_game_time(monkeypatch):
+    """
+    Dos eventos de cuotas con los mismos equipos (doubleheader) -- sin
+    pasar game_time a match_odds_to_game(), siempre ganaría el primero
+    (el juego 1), asignándole sus cuotas también al juego 2. main.py debe
+    pasar g["game_time"] para que se desambigüe por commence_time.
+    """
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    game1_event = {
+        "away_team": "Away Team", "home_team": "Home Team", "commence_time": "2026-07-05T17:05:00Z",
+        "prices": [{"book": "fakebook", "away_price": -300, "home_price": 250, "last_update": None}],
+    }
+    game2_event = {
+        "away_team": "Away Team", "home_team": "Home Team", "commence_time": "2026-07-05T23:05:00Z",
+        "prices": [{"book": "fakebook", "away_price": -140, "home_price": 120, "last_update": None}],
+    }
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [game1_event, game2_event])
+
+    results = main.analyze_today()
+    row = results[0]
+
+    # _fake_get_schedule() da game_time="2026-07-05T23:05:00Z" -> debe
+    # matchear game2_event (-140/120), NO game1_event (-300/250).
+    assert abs(row["away_market_prob"] - main.implied_prob(-140)) < 1e-9
+
+
 def test_analyze_today_builds_feature_snapshot_with_raw_inputs(monkeypatch):
     _patch_pipeline(monkeypatch)
     monkeypatch.setattr(main, "MARKET_ODDS", {})

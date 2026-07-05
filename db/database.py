@@ -36,11 +36,20 @@ def _utcnow_naive() -> datetime:
 
 if DATABASE_URL.startswith("sqlite"):
     @event.listens_for(engine, "connect")
-    def _enable_sqlite_wal(dbapi_connection, connection_record):
-        """WAL permite que el dashboard lea mientras el cron escribe, sin
-        bloquear ninguno de los dos lados."""
+    def _enable_sqlite_pragmas(dbapi_connection, connection_record):
+        """
+        WAL permite que el dashboard lea mientras el cron escribe, sin
+        bloquear ninguno de los dos lados. synchronous=NORMAL es seguro en
+        modo WAL (solo arriesga la transacción más reciente ante un corte
+        de energía, nunca corrupción) y evita un fsync completo en cada
+        commit. foreign_keys=ON no tiene efecto todavía -- ningún modelo
+        declara ForeignKey() hoy -- pero lo dejamos activado para cuando
+        se agreguen relaciones reales entre tablas.
+        """
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA foreign_keys=ON;")
         cursor.close()
 
 

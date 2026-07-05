@@ -28,6 +28,29 @@ def test_utcnow_naive_returns_naive_datetime_close_to_now():
     assert before <= result <= after
 
 
+def test_sqlite_pragmas_set_wal_synchronous_and_foreign_keys(tmp_path):
+    """
+    El listener de conexión se registra vía @event.listens_for(engine, ...)
+    contra la instancia real de `engine` creada al importar el módulo -- no
+    se re-dispara si luego se monkeypatchea `database.engine` a un motor
+    nuevo (como hace el fixture isolated_db de abajo). Por eso se prueba
+    la función del listener directamente contra una conexión sqlite3 real
+    (con archivo, no :memory: -- SQLite reporta journal_mode='memory' para
+    bases en memoria sin importar qué PRAGMA se pida, así que probarlo ahí
+    daría un falso negativo para WAL específicamente).
+    """
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "pragma_test.db"))
+    try:
+        database._enable_sqlite_pragmas(conn, None)
+        cur = conn.cursor()
+        assert cur.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert cur.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
+        assert cur.execute("PRAGMA foreign_keys").fetchone()[0] == 1  # ON
+    finally:
+        conn.close()
+
+
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     temp_engine = create_engine(f"sqlite:///{tmp_path}/test.db")

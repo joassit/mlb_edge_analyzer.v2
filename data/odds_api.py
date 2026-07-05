@@ -24,12 +24,13 @@ import json
 import logging
 import os
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import requests
 
 from config import ODDS_API_CACHE_TTL_SECONDS, ODDS_API_MONTHLY_BUDGET, ODDS_CACHE_DIR
 from data.contracts import require, SchemaError
+from data.quote_gate import gate_quote
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -76,30 +77,45 @@ def _write_cache(payload: list) -> None:
         logger.warning(f"No se pudo escribir el caché de odds: {e}")
 
 
-def _check_and_reserve_budget() -> bool:
-    """
-    Lleva la cuenta de llamadas reales hechas este mes en un archivo local
-    simple (no es un rate limiter distribuido, es suficiente para un solo
-    proceso/usuario). Devuelve False si ya se agotó el presupuesto mensual.
-    """
+def _read_budget_counts() -> dict:
     path = _budget_file()
-    month_key = date.today().strftime("%Y-%m")
-    counts = {}
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                counts = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            counts = {}
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
-    used = counts.get(month_key, 0)
+
+def _check_budget_available() -> bool:
+    """
+    Solo LEE el contador de llamadas reales hechas este mes -- no reserva
+    ni incrementa nada. Devuelve False si ya se agotó el presupuesto
+    mensual. Separado de _record_budget_usage() a propósito: antes, el
+    contador se incrementaba ANTES de saber si la llamada HTTP iba a tener
+    éxito, así que una llamada fallida (timeout, 500, red caída) consumía
+    presupuesto igual que una exitosa -- una fuga real de cuota en la API
+    más limitada de todas las que usa el proyecto.
+    """
+    month_key = date.today().strftime("%Y-%m")
+    used = _read_budget_counts().get(month_key, 0)
     if used >= ODDS_API_MONTHLY_BUDGET:
         logger.warning(
             f"Presupuesto mensual de The Odds API agotado ({used}/{ODDS_API_MONTHLY_BUDGET} "
             f"en {month_key}) — se omite la llamada en vivo este ciclo."
         )
         return False
+    return True
 
+
+def _record_budget_usage() -> None:
+    """Incrementa el contador -- llamar SOLO después de una respuesta HTTP
+    exitosa (ver fetch_moneyline_odds)."""
+    path = _budget_file()
+    month_key = date.today().strftime("%Y-%m")
+    counts = _read_budget_counts()
+    used = counts.get(month_key, 0)
     counts[month_key] = used + 1
     try:
         with open(path, "w") as f:
@@ -111,7 +127,6 @@ def _check_and_reserve_budget() -> bool:
         logger.warning(
             f"Cerca del límite mensual de The Odds API: {counts[month_key]}/{ODDS_API_MONTHLY_BUDGET}."
         )
-    return True
 
 
 def _parse_payload(payload) -> list[dict]:
@@ -143,12 +158,25 @@ def _parse_payload(payload) -> list[dict]:
             home_price = outcomes.get(home_team)
             if away_price is None or home_price is None:
                 continue
-            prices.append({
+
+            raw_price = {
                 "book": book.get("key"),
                 "away_price": away_price,
                 "home_price": home_price,
                 "last_update": h2h.get("last_update") or book.get("last_update"),
-            })
+            }
+            gated = gate_quote(raw_price)
+            if gated is None:
+                logger.warning(f"Cuota descartada por esquema/rango inválido: {raw_price}")
+                continue
+            # fresh=False no se descarta aquí -- se conserva para CLV (ver
+            # record_closing_odds), pero best_available_price()/
+            # consensus_no_vig_prob() la excluyen para generar picks: una
+            # cuota vieja (ej. tras un scratch de pitcher) siempre "parece"
+            # tener valor, porque el mercado ya incorporó información que
+            # este snapshot no tiene.
+            raw_price["fresh"] = gated.fresh
+            prices.append(raw_price)
 
         events.append({
             "home_team": home_team,
@@ -178,7 +206,7 @@ def fetch_moneyline_odds() -> list[dict]:
     if cached is not None:
         return _parse_payload(cached)
 
-    if not _check_and_reserve_budget():
+    if not _check_budget_available():
         stale = _read_cache(ignore_ttl=True)
         if stale is not None:
             logger.warning("Usando el último caché de odds conocido (vencido) por falta de presupuesto.")
@@ -204,36 +232,81 @@ def fetch_moneyline_odds() -> list[dict]:
             return _parse_payload(stale)
         return []
 
+    _record_budget_usage()  # solo aquí, con la respuesta ya confirmada exitosa
     _write_cache(payload)
     return _parse_payload(payload)
 
 
-def match_odds_to_game(events: list[dict], away_team: str, home_team: str) -> dict | None:
-    """Empareja un juego de la MLB Stats API contra los eventos de The Odds
-    API por nombre de equipo (normalizado). None si no hay match."""
+def match_odds_to_game(events: list[dict], away_team: str, home_team: str,
+                        game_datetime_iso: str | None = None) -> dict | None:
+    """
+    Empareja un juego de la MLB Stats API contra los eventos de The Odds
+    API por nombre de equipo (normalizado). None si no hay match.
+
+    En un doubleheader (mismos dos equipos, mismo día, dos juegos), puede
+    haber más de un evento con el mismo nombre de equipos -- sin
+    `game_datetime_iso` se devuelve el primero (comportamiento anterior,
+    compatible hacia atrás), lo cual le asignaría al juego 2 las cuotas del
+    juego 1. Si se pasa `game_datetime_iso` (el `game_time`/gameDate real
+    del juego que viene de la MLB Stats API), se desambigua eligiendo el
+    evento cuyo commence_time esté más cerca de esa fecha/hora real.
+    """
     away_norm = _normalize_team_name(away_team)
     home_norm = _normalize_team_name(home_team)
-    for event in events:
-        if (_normalize_team_name(event["away_team"]) == away_norm
-                and _normalize_team_name(event["home_team"]) == home_norm):
-            return event
-    return None
+    matches = [
+        event for event in events
+        if _normalize_team_name(event["away_team"]) == away_norm
+        and _normalize_team_name(event["home_team"]) == home_norm
+    ]
+
+    if len(matches) <= 1 or not game_datetime_iso:
+        return matches[0] if matches else None
+
+    try:
+        target = datetime.fromisoformat(game_datetime_iso.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return matches[0]
+
+    def _distance(event: dict) -> timedelta:
+        commence_time = event.get("commence_time")
+        if not commence_time:
+            return timedelta(days=99)
+        try:
+            ct = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return timedelta(days=99)
+        return abs(ct - target)
+
+    return min(matches, key=_distance)
+
+
+def _fresh_prices(event: dict) -> list[dict]:
+    """
+    Filtra a las cuotas frescas (ver data/quote_gate.py) -- una cuota vieja
+    no debe alimentar ni el consenso ni la mejor cuota disponible, porque
+    en edge-hunting una línea vieja siempre "parece" tener valor. Los
+    precios que no pasaron por _parse_payload() (ej. dicts construidos a
+    mano en tests, o por callers directos) no tienen la clave "fresh" --
+    se tratan como frescas por defecto, no penalizamos la ausencia del dato.
+    """
+    return [p for p in event["prices"] if p.get("fresh", True)]
 
 
 def consensus_no_vig_prob(event: dict) -> tuple[float, float] | None:
     """
-    Promedia la probabilidad sin vig de cada bookmaker disponible para este
-    evento — el consenso "justo" del mercado, usado como referencia para
-    medir edge real y Closing Line Value. None si ningún bookmaker trajo
-    datos usables para este evento.
+    Promedia la probabilidad sin vig de cada bookmaker disponible (y
+    fresco) para este evento — el consenso "justo" del mercado, usado como
+    referencia para medir edge real y Closing Line Value. None si ningún
+    bookmaker trajo datos usables y frescos para este evento.
     """
     from model.edge import no_vig_probs
 
-    if not event["prices"]:
+    fresh = _fresh_prices(event)
+    if not fresh:
         return None
 
     away_probs, home_probs = [], []
-    for p in event["prices"]:
+    for p in fresh:
         away_p, home_p = no_vig_probs(p["away_price"], p["home_price"])
         away_probs.append(away_p)
         home_probs.append(home_p)
@@ -243,13 +316,15 @@ def consensus_no_vig_prob(event: dict) -> tuple[float, float] | None:
 
 def best_available_price(event: dict) -> dict | None:
     """
-    La mejor cuota tomable por lado (la que de verdad podrías apostar) —
-    distinta del consenso no-vig, que sirve para medir edge/CLV, no para
-    ejecutar la apuesta. None si no hay bookmakers con datos usables.
+    La mejor cuota tomable por lado, entre las frescas (la que de verdad
+    podrías apostar) — distinta del consenso no-vig, que sirve para medir
+    edge/CLV, no para ejecutar la apuesta. None si no hay bookmakers con
+    datos usables y frescos.
     """
-    if not event["prices"]:
+    fresh = _fresh_prices(event)
+    if not fresh:
         return None
 
-    best_away = max(p["away_price"] for p in event["prices"])
-    best_home = max(p["home_price"] for p in event["prices"])
+    best_away = max(p["away_price"] for p in fresh)
+    best_home = max(p["home_price"] for p in fresh)
     return {"away": best_away, "home": best_home}

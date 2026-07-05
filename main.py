@@ -133,7 +133,8 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
 
     # Cuotas: primero se intenta la mejor disponible en vivo (The Odds
     # API); si no hay match para este juego, cae a MARKET_ODDS manual.
-    odds_event = match_odds_to_game(odds_events, g["away_team"], g["home_team"])
+    odds_event = match_odds_to_game(odds_events, g["away_team"], g["home_team"],
+                                     game_datetime_iso=g.get("game_time"))
     live_price = best_available_price(odds_event) if odds_event else None
     no_vig = consensus_no_vig_prob(odds_event) if odds_event else None
     price = live_price or MARKET_ODDS.get(g["game_pk"])
