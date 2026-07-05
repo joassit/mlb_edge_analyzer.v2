@@ -65,7 +65,7 @@ jobs:
       # persistente real en vez de SQLite, y esta caché ya no hace falta.
       - name: Restore previous mlb_edge.db (best-effort, solo sin DATABASE_URL externo)
         if: ${{ env.HAS_EXTERNAL_DB != 'true' }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: mlb_edge.db
           key: mlb-edge-db-${{ github.run_id }}
@@ -92,7 +92,7 @@ jobs:
 
       - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
         if: ${{ always() && env.HAS_EXTERNAL_DB != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: mlb_edge.db
           key: mlb-edge-db-${{ github.run_id }}
