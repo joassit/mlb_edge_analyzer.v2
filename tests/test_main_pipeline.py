@@ -85,3 +85,36 @@ def test_analyze_today_computes_edge_when_market_odds_present(monkeypatch):
     # edge = model_prob - implied_prob del mercado, con implied_prob(-150) = 150/250 = 0.6
     assert abs(row["away_market_prob"] - 0.6) < 1e-9
     assert abs(row["away_edge"] - (row["away_model_prob"] - 0.6)) < 1e-9
+
+
+def test_analyze_today_prefers_live_odds_over_manual_market_odds(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    # MARKET_ODDS manual queda cargado, pero debe ganar la cuota en vivo
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": -999, "home": 999}})
+    live_event = {
+        "away_team": "Away Team", "home_team": "Home Team", "commence_time": None,
+        "prices": [{"book": "fakebook", "away_price": -140, "home_price": 120, "last_update": None}],
+    }
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [live_event])
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["away_market_prob"] is not None
+    assert abs(row["away_market_prob"] - main.implied_prob(-140)) < 1e-9
+    assert row["away_market_no_vig_prob"] is not None
+    assert abs((row["away_market_no_vig_prob"] + row["home_market_no_vig_prob"]) - 1.0) < 1e-9
+
+
+def test_analyze_today_builds_feature_snapshot_with_raw_inputs(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+
+    results = main.analyze_today()
+    snapshot = results[0]["_feature_snapshot"]
+
+    assert snapshot["away_era"] == 3.00
+    assert snapshot["home_era"] == 4.50
+    assert snapshot["away_ops"] == 0.780
+    assert snapshot["park_factor"] == 1.0
+    assert snapshot["market_price"] is None

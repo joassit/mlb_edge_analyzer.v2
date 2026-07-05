@@ -152,6 +152,42 @@ def compute_bet_performance(days: int = 30) -> dict:
     }
 
 
+def compute_clv_performance(days: int = 30) -> dict:
+    """
+    Closing Line Value promedio de las apuestas que ya tienen cuota de
+    cierre registrada (ver db.database.record_closing_odds). CLV positivo
+    sostenido en el tiempo es la señal más confiable de que el modelo tiene
+    skill real, no solo suerte de muestra chica — a diferencia de accuracy
+    o incluso ROI, que una racha corta puede inflar o hundir sin decir nada
+    sobre si el modelo es bueno.
+    """
+    from datetime import date, timedelta
+
+    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    session = SessionLocal()
+    try:
+        bets_with_clv = (
+            session.query(Bet)
+            .filter(Bet.game_date >= cutoff, Bet.clv.isnot(None))
+            .all()
+        )
+    finally:
+        session.close()
+
+    if not bets_with_clv:
+        return {"n_bets": 0, "avg_clv": None}
+
+    avg_clv = sum(b.clv for b in bets_with_clv) / len(bets_with_clv)
+    positive_clv = sum(1 for b in bets_with_clv if b.clv > 0)
+
+    return {
+        "n_bets": len(bets_with_clv),
+        "avg_clv": avg_clv,
+        "positive_clv_rate": positive_clv / len(bets_with_clv),
+    }
+
+
 def print_performance_report(days: int = 30) -> None:
     metrics = compute_metrics(days=days)
 
@@ -183,4 +219,13 @@ def print_performance_report(days: int = 30) -> None:
         print(f"Total apostado:      {bet_perf['total_staked']:.2f} unidades")
         print(f"Profit/pérdida:      {bet_perf['total_profit']:+.2f} unidades")
         print(f"ROI:                 {bet_perf['roi']:+.1%}")
+
+    clv_perf = compute_clv_performance(days=days)
+    if clv_perf["n_bets"] > 0:
+        print()
+        print(f"--- Closing Line Value (CLV) ---")
+        print(f"Apuestas con cuota de cierre registrada: {clv_perf['n_bets']}")
+        print(f"CLV promedio:        {clv_perf['avg_clv']:+.1%}  "
+              f"(positivo = bateaste la línea de cierre)")
+        print(f"% con CLV positivo:  {clv_perf['positive_clv_rate']:.1%}")
     print()

@@ -9,10 +9,12 @@ Guardamos cada análisis diario para poder ver después si el modelo
 realmente hubiera tenido edge real (tracking de resultados).
 """
 
+import json
 from datetime import datetime
 
 from sqlalchemy import (
-    create_engine, event, Column, Integer, String, Float, DateTime, UniqueConstraint
+    create_engine, event, inspect, text,
+    Column, Integer, String, Float, DateTime, Text, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -65,6 +67,8 @@ class GameAnalysis(Base):
     fair_total_runs = Column(Float, nullable=True)
     away_market_prob = Column(Float, nullable=True)
     home_market_prob = Column(Float, nullable=True)
+    away_market_no_vig_prob = Column(Float, nullable=True)
+    home_market_no_vig_prob = Column(Float, nullable=True)
     away_edge = Column(Float, nullable=True)
     home_edge = Column(Float, nullable=True)
     away_ev = Column(Float, nullable=True)
@@ -108,11 +112,118 @@ class Bet(Base):
     placed_at = Column(DateTime, default=datetime.utcnow)
     result = Column(String, default="pending")  # pending, win, loss
     profit = Column(Float, nullable=True)  # se llena al liquidar
+    closing_odds = Column(Float, nullable=True)  # cuota del mismo lado cerca del inicio del juego
+    clv = Column(Float, nullable=True)  # closing line value, en probabilidad (ver record_closing_odds)
+
+
+class FeatureSnapshot(Base):
+    """
+    Insumos crudos (ERA, OPS, bullpen, parque, clima, cuotas) usados para
+    generar una predicción, congelados con su fecha de captura.
+
+    Sin esto, "recalcular un juego histórico" significaría volver a
+    consultar la MLB Stats API por sus stats de temporada *actuales* —que
+    ya incluyen partidos posteriores al que se está recalculando— y
+    contaminar el backtest con información del futuro (data leakage). Todo
+    recálculo histórico debe leer de aquí, nunca volver a golpear la API en
+    vivo.
+    """
+    __tablename__ = "feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint("game_pk", "game_date", name="uq_feature_snapshot_game_pk_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    game_pk = Column(Integer, nullable=False)
+    game_date = Column(String, nullable=False)
+    captured_at = Column(DateTime, default=datetime.utcnow)
+    model_version = Column(String, default=MODEL_VERSION)
+    raw_inputs_json = Column(Text, nullable=False)  # dict serializado — ver save_feature_snapshot
+
+
+def _auto_add_missing_columns():
+    """
+    SQLAlchemy `create_all()` solo crea tablas que no existen — nunca altera
+    una tabla ya presente en el archivo `.db` del usuario. Como este
+    proyecto todavía no tiene un framework de migraciones (Alembic queda
+    para cuando el esquema esté más estable), cada columna nueva que se
+    agrega a un modelo existente rompería el primer INSERT contra una base
+    de datos creada con una versión anterior del código.
+
+    Este helper es una salvaguarda mínima y segura: solo AGREGA columnas
+    nullable que falten, nunca borra ni altera columnas existentes. Correr
+    dos veces es inofensivo (ALTER TABLE ADD COLUMN falla si ya existe, y
+    ese error se ignora a propósito).
+    """
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue
+            existing_columns = {col["name"] for col in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing_columns:
+                    continue
+                col_type = column.type.compile(engine.dialect)
+                try:
+                    conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}"))
+                except Exception:
+                    # Ya existe, o el dialecto no soporta ALTER simple — no es fatal.
+                    pass
 
 
 def init_db():
-    """Crea las tablas si no existen. Llamar una vez al arrancar el proyecto."""
+    """Crea las tablas que falten y agrega columnas nuevas a las que ya
+    existan. Llamar una vez al arrancar el proyecto."""
     Base.metadata.create_all(engine)
+    _auto_add_missing_columns()
+
+
+def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> None:
+    """Congela los insumos crudos de una predicción. Upsert por
+    (game_pk, game_date), igual que save_analysis — re-ejecutar el pipeline
+    el mismo día actualiza el snapshot, no lo duplica."""
+    session = SessionLocal()
+    try:
+        existing = (
+            session.query(FeatureSnapshot)
+            .filter_by(game_pk=game_pk, game_date=game_date)
+            .one_or_none()
+        )
+        payload = json.dumps(raw_inputs, default=str)
+        if existing:
+            existing.raw_inputs_json = payload
+            existing.captured_at = datetime.utcnow()
+            existing.model_version = MODEL_VERSION
+        else:
+            session.add(FeatureSnapshot(
+                game_pk=game_pk, game_date=game_date,
+                raw_inputs_json=payload, model_version=MODEL_VERSION,
+            ))
+        session.commit()
+    finally:
+        session.close()
+
+
+def get_feature_snapshot(game_pk: int, game_date: str) -> dict | None:
+    """Recupera los insumos crudos congelados de una predicción, para
+    recalcularla con un modelo nuevo sin volver a golpear ninguna API."""
+    session = SessionLocal()
+    try:
+        snap = (
+            session.query(FeatureSnapshot)
+            .filter_by(game_pk=game_pk, game_date=game_date)
+            .one_or_none()
+        )
+        if snap is None:
+            return None
+        return {
+            "raw_inputs": json.loads(snap.raw_inputs_json),
+            "captured_at": snap.captured_at,
+            "model_version": snap.model_version,
+        }
+    finally:
+        session.close()
 
 
 def save_analysis(row: dict) -> None:
@@ -186,6 +297,41 @@ def settle_bets_for_game(game_pk: int, winner: str) -> int:
                 bet.profit = -bet.stake
         session.commit()
         return len(pending)
+    finally:
+        session.close()
+
+
+def record_closing_odds(game_pk: int, side: str, closing_odds: float) -> int:
+    """
+    Registra la cuota de cierre para las apuestas pendientes/liquidadas de
+    un juego y lado dados, y calcula el CLV en espacio de probabilidad:
+
+        clv = implied_prob(closing_odds) - implied_prob(tu cuota al apostar)
+
+    Positivo = el mercado se movió hacia tu lado después de que apostaste
+    (bateaste la línea de cierre) — el indicador que la industria usa para
+    separar skill real de varianza favorable en muestra chica.
+
+    Nota: "cierre" aquí depende de CUÁNDO se llame esta función. Capturar
+    la cuota exacta al inicio del juego requiere un scheduler corriendo a
+    esa hora exacta (Orchestration Engine, fuera del alcance de esta fase)
+    — hoy es responsabilidad de quien invoque esta función llamarla lo más
+    cerca posible del inicio real del partido.
+    """
+    from model.edge import implied_prob
+
+    session = SessionLocal()
+    try:
+        bets = (
+            session.query(Bet)
+            .filter(Bet.game_pk == game_pk, Bet.side == side, Bet.market == "moneyline")
+            .all()
+        )
+        for bet in bets:
+            bet.closing_odds = closing_odds
+            bet.clv = implied_prob(closing_odds) - implied_prob(bet.odds)
+        session.commit()
+        return len(bets)
     finally:
         session.close()
 

@@ -8,9 +8,13 @@ de apuestas de MLB. Construido por etapas, empezando 100% gratis.
 - ✅ Obtener partidos del día (MLB Stats API, oficial y gratuita)
 - ✅ Obtener pitchers probables/confirmados
 - ✅ Obtener ERA de pitchers y OPS de equipos (MLB Stats API)
-- ✅ Calcular probabilidad del modelo
-- ✅ Calcular edge (si cargas cuotas manualmente en `main.py`)
-- ✅ Guardar histórico en base de datos (SQLite por defecto)
+- ✅ Calcular probabilidad del modelo (heurístico + Skellam), no placeholders
+- ✅ Cuotas en vivo (The Odds API) con fallback a `MARKET_ODDS` manual
+- ✅ Edge, EV y consenso sin vig (no-vig) contra el mercado
+- ✅ Guardar histórico en base de datos (SQLite por defecto), con upsert
+      idempotente — re-correr el pipeline el mismo día no duplica filas
+- ✅ Feature Snapshot Store — insumos crudos congelados por predicción,
+      para poder recalcular juegos históricos sin fuga de información
 - ✅ Generar reporte en consola + CSV
 - ✅ Dashboard en Streamlit
 - ✅ Segundo modelo en paralelo (Skellam sobre carreras proyectadas) — si
@@ -20,8 +24,9 @@ de apuestas de MLB. Construido por etapas, empezando 100% gratis.
       de cualquier Machine Learning)
 - ✅ Expected Value (EV) — lo que de verdad importa en apuestas, no solo accuracy
 - ✅ Tabla de apuestas reales separada de las predicciones, con liquidación
-      automática y cálculo de ROI real
+      automática, ROI real y Closing Line Value (CLV)
 - ✅ Versionado ligero (`model_version` + `git_commit` en cada predicción)
+- ✅ Tests de integración del orquestador + CI en GitHub Actions
 
 ## Registrar una apuesta real (opcional)
 
@@ -125,17 +130,68 @@ Cada corrida de `python main.py` escribe en `logs/mlb_edge_YYYYMMDD.log`
 los que falló alguna consulta a la API, con el motivo exacto. La consola
 solo muestra advertencias/errores para no ensuciar el reporte.
 
-## Cargar cuotas de mercado (opcional, para ver el edge real)
+## Cuotas de mercado — en vivo o manual
 
-Mientras no tengas una API de odds conectada, edita `MARKET_ODDS` en
-`main.py` con el `game_pk` de cada partido (lo puedes ver corriendo
-`python data/mlb_api.py` primero) y las cuotas moneyline:
+### Opción 1: The Odds API (recomendado)
+
+```bash
+export ODDS_API_KEY="tu-api-key-de-the-odds-api.com"
+```
+
+Con la variable de entorno seteada, `main.py` trae automáticamente las
+cuotas moneyline de todos los bookmakers disponibles (región US), las
+empareja contra los partidos del día por nombre de equipo, y usa **la
+mejor cuota disponible** para calcular edge/EV. Además calcula el
+**consenso sin vig** (promedio de la probabilidad "justa" de cada
+bookmaker, sin el margen de la casa) — es la base para medir Closing Line
+Value más adelante, no solo edge contra un mercado con vig incluido.
+
+Si la key no está configurada, o la API falla, o un partido no aparece en
+la respuesta: el pipeline no se rompe, simplemente no calcula edge para
+ese partido (a menos que también tengas `MARKET_ODDS` cargado — ver abajo).
+
+### Opción 2: cuotas manuales (fallback, o si no tienes key todavía)
+
+Edita `MARKET_ODDS` en `main.py` con el `game_pk` de cada partido (lo
+puedes ver corriendo `python data/mlb_api.py` primero) y las cuotas
+moneyline. Solo se usa si no hubo match en vivo para ese partido:
 
 ```python
 MARKET_ODDS = {
     717468: {"away": -135, "home": +115},
 }
 ```
+
+## Feature Snapshot Store (recálculo histórico sin fuga de información)
+
+Cada predicción guarda, además del resultado (`GameAnalysis`), los
+**insumos crudos** que la generaron (ERA, OPS, bullpen, comando, descanso,
+parque, clima, cuota de mercado) en la tabla `feature_snapshots`, con la
+fecha exacta de captura.
+
+Esto importa porque `data/stats.py` consulta stats de temporada *acumuladas
+a hoy*, no *acumuladas a la fecha del juego*. Si en el futuro se mejora el
+modelo y se quiere recalcular un juego de hace meses usando las funciones
+de `data/stats.py` de nuevo, el ERA/OPS ya incluiría partidos posteriores
+al juego que se recalcula — fuga de información hacia el pasado, el error
+más grave que puede tener un backtest. Cualquier recálculo histórico debe
+leer de `feature_snapshots` (vía `db.database.get_feature_snapshot`),
+nunca volver a golpear la API en vivo.
+
+## Closing Line Value (CLV)
+
+`db.database.record_closing_odds(game_pk, side, closing_odds)` registra la
+cuota de cierre de una apuesta ya hecha y calcula el CLV en espacio de
+probabilidad. CLV positivo sostenido en el tiempo es el indicador que la
+industria usa para separar skill real de varianza favorable en muestra
+chica — más confiable que accuracy o incluso ROI a corto plazo.
+
+Nota: capturar la cuota exacta al inicio del juego (no minutos u horas
+antes) requiere un scheduler corriendo justo a esa hora — eso es trabajo
+de un futuro Orchestration Engine, fuera del alcance actual. Por ahora,
+`record_closing_odds` es una función que puedes llamar manualmente (o
+disparar tú mismo cerca del inicio del juego) — el cálculo de CLV que hace
+es correcto, la automatización de *cuándo* llamarla es lo pendiente.
 
 ## Usar PostgreSQL en vez de SQLite
 
@@ -167,14 +223,28 @@ mlb_edge_analyzer/
     └── app.py                    # dashboard Streamlit
 ```
 
-## Roadmap (Etapa 2 en adelante)
+## Roadmap
 
-Funciones planeadas para cuando el modelo ya sea consistente:
+Ya implementado (Fase 0 + 1 + 2 de la auditoría técnica):
 
-- [ ] Bullpen (ERA de relevo, uso reciente de brazos)
-- [ ] Clima del estadio (afecta home runs, sobre todo en parques altos)
-- [ ] Run Line y Totales (no solo Moneyline)
-- [ ] Conexión a API de cuotas en tiempo real (The Odds API u otra)
-- [ ] Tracking automático de resultados reales vs. predicción del modelo
+- [x] Bullpen (ERA de relevo, ponderado por entradas lanzadas)
+- [x] Clima del estadio (Open-Meteo, temperatura y viento)
+- [x] Run Line y Totales (no solo Moneyline)
+- [x] Conexión a API de cuotas en tiempo real (The Odds API), con no-vig y CLV
+- [x] Tracking automático de resultados reales vs. predicción del modelo
+- [x] Idempotencia (upsert), contrato de validación de esquema, CI
+- [x] Feature Snapshot Store (recálculo histórico sin fuga de información)
+
+Pendiente (deliberadamente fuera de alcance por ahora — mono-MLB primero):
+
+- [ ] Risk Engine (límites de exposición agregada/correlación de portafolio)
+- [ ] Model Registry versionado (más allá de `model_version` + `git_commit`)
+- [ ] Backtesting Engine sobre los snapshots ya congelados
+- [ ] Orchestration Engine (scheduler con reintentos/checkpoints, necesario
+      para capturar la cuota de cierre real para CLV automáticamente)
+- [ ] Regresión logística / shrinkage bayesiano reemplazando las constantes
+      manuales de `model/probability.py`
 - [ ] Despliegue del dashboard en un servidor (Streamlit Community Cloud
       es gratis para empezar, o Railway/Render ~$5-20/mes)
+- [ ] Sport Adapter Layer / multi-deporte (NFL, NBA, NHL) — explícitamente
+      pospuesto hasta que el pipeline de MLB esté maduro

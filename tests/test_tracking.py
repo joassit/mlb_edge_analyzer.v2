@@ -3,6 +3,14 @@ Pruebas de la lógica de Brier Score / accuracy, usando objetos simples
 que imitan la forma de GameAnalysis/ActualResult sin tocar la base de datos.
 """
 
+from datetime import date
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+import db.database as database
+import tracking.results_tracker as results_tracker
+
 
 class _FakePrediction:
     def __init__(self, home_model_prob):
@@ -56,3 +64,35 @@ def test_worst_case_predictions_give_high_brier_score():
     accuracy, brier = _brier_and_accuracy(rows)
     assert accuracy == 0.0
     assert brier == 1.0
+
+
+def test_compute_clv_performance_averages_across_settled_bets(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/clv_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    session.add(database.Bet(game_pk=1, game_date=today, side="away", odds=-135, model_prob=0.6, stake=1.0, clv=0.05))
+    session.add(database.Bet(game_pk=2, game_date=today, side="home", odds=120, model_prob=0.5, stake=1.0, clv=-0.02))
+    session.commit()
+    session.close()
+
+    perf = results_tracker.compute_clv_performance(days=30)
+
+    assert perf["n_bets"] == 2
+    assert abs(perf["avg_clv"] - 0.015) < 1e-9
+    assert perf["positive_clv_rate"] == 0.5
+
+
+def test_compute_clv_performance_empty_when_no_bets_have_closing_line(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/clv_empty_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    perf = results_tracker.compute_clv_performance(days=30)
+
+    assert perf["n_bets"] == 0
+    assert perf["avg_clv"] is None

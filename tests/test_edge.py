@@ -1,6 +1,6 @@
 import pytest
 
-from model.edge import implied_prob, fair_odds, edge, kelly_fraction, expected_value
+from model.edge import implied_prob, fair_odds, edge, kelly_fraction, expected_value, no_vig_probs
 
 
 def test_implied_prob_favorite():
@@ -53,3 +53,22 @@ def test_expected_value_zero_at_fair_price():
     # si el modelo coincide exactamente con la cuota justa, EV ~ 0
     fair = fair_odds(0.60)
     assert abs(expected_value(model_p=0.60, odds=fair)) < 0.01
+
+
+def test_no_vig_probs_sums_to_one():
+    away_p, home_p = no_vig_probs(-135, 115)
+    assert abs((away_p + home_p) - 1.0) < 1e-9
+
+
+def test_no_vig_probs_removes_the_house_margin():
+    # -110/-110 implica 0.524 + 0.524 = 1.048 de vig; sin vig debe quedar 0.5/0.5
+    away_p, home_p = no_vig_probs(-110, -110)
+    assert abs(away_p - 0.5) < 1e-9
+    assert abs(home_p - 0.5) < 1e-9
+
+
+def test_no_vig_probs_symmetric_regardless_of_order():
+    away_p, home_p = no_vig_probs(-150, 130)
+    home_p2, away_p2 = no_vig_probs(130, -150)
+    assert abs(away_p - away_p2) < 1e-9
+    assert abs(home_p - home_p2) < 1e-9

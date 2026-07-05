@@ -17,16 +17,18 @@ from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
 from model.markets import run_line_prob, fair_total_line
 from model.edge import implied_prob, edge, expected_value
-from db.database import init_db, save_analysis
+from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
+from db.database import init_db, save_analysis, save_feature_snapshot
 from reports.generate_report import print_report, export_csv
 from audit_live import audit_live
 from tracking.results_tracker import update_results, print_performance_report
 from config import STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION
 from version_info import get_git_commit
 
-# Cuotas de mercado cargadas a mano mientras no haya una API de odds conectada
-# (ver roadmap Fase 2). Llena esto con el game_pk de cada partido (lo ves
-# corriendo `python data/mlb_api.py`) y las cuotas moneyline reales.
+# Cuotas de mercado cargadas a mano — se usan solo si no hay match en vivo
+# de The Odds API (ODDS_API_KEY sin configurar, o el juego no aparece en la
+# respuesta). Llena esto con el game_pk de cada partido (lo ves corriendo
+# `python data/mlb_api.py`) y las cuotas moneyline reales.
 MARKET_ODDS = {
     # 717468: {"away": -135, "home": +115},
 }
@@ -36,6 +38,7 @@ def analyze_today() -> list[dict]:
     league_ops = get_league_ops()
     games = get_schedule(date.today())
     weather_by_team = preload_weather(games, get_park_info)
+    odds_events = fetch_moneyline_odds()
     results = []
 
     for g in games:
@@ -89,19 +92,29 @@ def analyze_today() -> list[dict]:
         home_covers_rl_prob, away_covers_rl_prob = run_line_prob(home_mu, away_mu)
         fair_total_runs = fair_total_line(home_mu, away_mu)
 
-        # Edge/EV contra el mercado, solo si hay cuotas cargadas para este juego
-        odds = MARKET_ODDS.get(g["game_pk"])
-        if odds:
-            away_market_prob = implied_prob(odds["away"])
-            home_market_prob = implied_prob(odds["home"])
+        # Cuotas: primero se intenta la mejor disponible en vivo (The Odds
+        # API); si no hay match para este juego, cae a MARKET_ODDS manual.
+        odds_event = match_odds_to_game(odds_events, g["away_team"], g["home_team"])
+        live_price = best_available_price(odds_event) if odds_event else None
+        no_vig = consensus_no_vig_prob(odds_event) if odds_event else None
+        price = live_price or MARKET_ODDS.get(g["game_pk"])
+
+        if price:
+            away_market_prob = implied_prob(price["away"])
+            home_market_prob = implied_prob(price["home"])
             away_edge = edge(away_model_prob, away_market_prob)
             home_edge = edge(home_model_prob, home_market_prob)
-            away_ev = expected_value(away_model_prob, odds["away"])
-            home_ev = expected_value(home_model_prob, odds["home"])
+            away_ev = expected_value(away_model_prob, price["away"])
+            home_ev = expected_value(home_model_prob, price["home"])
         else:
             away_market_prob = home_market_prob = None
             away_edge = home_edge = None
             away_ev = home_ev = None
+
+        if no_vig:
+            away_market_no_vig_prob, home_market_no_vig_prob = no_vig
+        else:
+            away_market_no_vig_prob = home_market_no_vig_prob = None
 
         row = {
             "game_pk": g["game_pk"],
@@ -130,12 +143,31 @@ def analyze_today() -> list[dict]:
             "fair_total_runs": round(fair_total_runs, 2),
             "away_market_prob": away_market_prob,
             "home_market_prob": home_market_prob,
+            "away_market_no_vig_prob": away_market_no_vig_prob,
+            "home_market_no_vig_prob": home_market_no_vig_prob,
             "away_edge": away_edge,
             "home_edge": home_edge,
             "away_ev": away_ev,
             "home_ev": home_ev,
             "model_version": MODEL_VERSION,
             "git_commit": get_git_commit(),
+            # Insumos crudos para el Feature Snapshot Store — clave interna,
+            # run_pipeline() la extrae antes de reportar/exportar (no es un
+            # dato de reporte, es el punto-en-el-tiempo para recálculos futuros).
+            "_feature_snapshot": {
+                "away_era": away_era, "home_era": home_era,
+                "away_ops": away_ops, "home_ops": home_ops, "league_ops": league_ops,
+                "away_bullpen_era": away_bullpen, "home_bullpen_era": home_bullpen,
+                "away_k_pct": away_cmd["k_pct"], "away_bb_pct": away_cmd["bb_pct"],
+                "home_k_pct": home_cmd["k_pct"], "home_bb_pct": home_cmd["bb_pct"],
+                "away_days_rest": away_rest["days_rest"], "away_last_outing_pitches": away_rest["last_outing_pitches"],
+                "home_days_rest": home_rest["days_rest"], "home_last_outing_pitches": home_rest["last_outing_pitches"],
+                "park_factor": park["park_factor"], "park_name": park["name"],
+                "temp_f": weather.get("temp_f"), "wind_mph": weather.get("wind_mph"),
+                "wind_direction_deg": weather.get("wind_direction_deg"),
+                "market_price": price, "market_no_vig": no_vig,
+                "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
+            },
         }
 
         results.append(row)
@@ -159,9 +191,12 @@ def run_pipeline():
     results = analyze_today()
 
     if results:
-        print_report(results)
         for r in results:
+            snapshot = r.pop("_feature_snapshot", None)
             save_analysis(r)
+            if snapshot is not None:
+                save_feature_snapshot(r["game_pk"], r["game_date"], snapshot)
+        print_report(results)
         path = export_csv(results)
         print(f"\nReporte de hoy exportado a: {path}")
     else:

@@ -45,6 +45,25 @@ def expected_value(model_p: float, odds: float) -> float:
     return model_p * b - (1 - model_p)
 
 
+def no_vig_probs(odds_a: float, odds_b: float) -> tuple[float, float]:
+    """
+    Normaliza las cuotas de los dos lados de un mismo mercado (moneyline)
+    para remover el vig, devolviendo el consenso "justo" del mercado sin el
+    margen de la casa.
+
+    Esta es la base para medir Closing Line Value (CLV): comparar la
+    probabilidad de tu modelo contra la probabilidad implícita de UN lado
+    (con vig incluido) infla o entierra el edge según cuánto margen cobre
+    la casa. Comparar contra el consenso sin vig de ambos lados es lo que
+    permite distinguir skill real de varianza favorable en muestra chica.
+    """
+    p_a, p_b = implied_prob(odds_a), implied_prob(odds_b)
+    total = p_a + p_b
+    if total <= 0:
+        return 0.5, 0.5
+    return p_a / total, p_b / total
+
+
 def kelly_fraction(model_p: float, odds: float, fraction: float = 0.25) -> float:
     """
     Tamaño de apuesta sugerido como fracción del bankroll, usando Kelly

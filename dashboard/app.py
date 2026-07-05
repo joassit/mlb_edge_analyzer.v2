@@ -58,6 +58,6 @@ else:
 
             st.text_area("Tu decisión final", key=f"decision_{r['game_pk']}", placeholder="Notas / decisión...")
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows).drop(columns=["_feature_snapshot"], errors="ignore")
     st.divider()
     st.dataframe(df, use_container_width=True)
