@@ -186,6 +186,17 @@ class Pick(Base):
     ev = Column(Float, nullable=True)
     odds_used = Column(Float, nullable=True)
     forced = Column(Boolean, nullable=False, default=False)
+    # Qué modelo alimentó model_prob para este pick ("heuristic"/"skellam"/
+    # "negbin", ver config.PICK_PROBABILITY_SOURCE y model/picks.py) --
+    # trazabilidad: si se recalibra o se cambia la fuente en el futuro, un
+    # pick viejo sigue diciendo con qué modelo se generó de verdad.
+    prob_source = Column(String, nullable=True)
+    # True cuando el modelo que generó este pick (prob_source) favorece un
+    # lado distinto al que favorece el heurístico -- una señal de que el
+    # cambio de fuente de probabilidad realmente movió la recomendación,
+    # no solo el número. None cuando no aplica (run_line/totals nunca
+    # tuvieron una versión heurística que comparar).
+    directional_discrepancy = Column(Boolean, nullable=True)
     result = Column(String, default="pending")   # pending / win / loss / push
     profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)
     model_version = Column(String, nullable=True)
@@ -378,6 +389,8 @@ def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: s
                 "ev": p.get("ev"),
                 "odds_used": p.get("odds_used"),
                 "forced": p.get("forced", False),
+                "prob_source": p.get("prob_source"),
+                "directional_discrepancy": p.get("directional_discrepancy"),
                 "model_version": model_version,
             }
             if existing:

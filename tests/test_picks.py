@@ -12,6 +12,15 @@ def _prediction(**overrides) -> dict:
         "home_proj_runs": 3.5, "away_proj_runs": 5.0,
     }
     base.update(overrides)
+    # model/picks.py lee, por default, PICK_PROBABILITY_SOURCE="skellam"
+    # para moneyline -- estas pruebas ejercitan la MECÁNICA de generación/
+    # selección de candidatos, no qué modelo en particular alimenta la
+    # probabilidad, así que el fixture espeja Skellam/NB2 al heurístico
+    # salvo que el test override explícitamente alguno de los dos.
+    base.setdefault("home_skellam_prob", base["home_model_prob"])
+    base.setdefault("away_skellam_prob", base["away_model_prob"])
+    base.setdefault("home_negbin_prob", base["home_model_prob"])
+    base.setdefault("away_negbin_prob", base["away_model_prob"])
     return base
 
 
@@ -105,3 +114,88 @@ def test_select_picks_for_game_respects_max_picks():
     candidates = generate_pick_candidates(_prediction(), market_lines, min_ev=0.01, min_edge=0.01)
     picks = select_picks_for_game(candidates, force_at_least_one=True, max_picks=2)
     assert len(picks) <= 2
+
+
+# --- PICK_PROBABILITY_SOURCE: qué modelo alimenta moneyline ---
+
+def test_moneyline_defaults_to_skellam_probability_source():
+    # home_model_prob (heurístico) y home_skellam_prob DIFERENTES a
+    # propósito -- si el candidato usa el valor de Skellam (0.70), no el
+    # heurístico (0.40), confirma que el default realmente cambió de fuente.
+    prediction = _prediction(home_model_prob=0.40, away_model_prob=0.60,
+                              home_skellam_prob=0.70, away_skellam_prob=0.30)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+    })
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+    assert ml["prob_source"] == "skellam"
+    assert ml["model_prob"] in (0.70, 0.30)  # el lado elegido usa el prob de Skellam, no el heurístico
+
+
+def test_moneyline_can_use_heuristic_source_explicitly():
+    prediction = _prediction(home_model_prob=0.40, away_model_prob=0.60,
+                              home_skellam_prob=0.70, away_skellam_prob=0.30)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+    }, prob_source="heuristic")
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+    assert ml["prob_source"] == "heuristic"
+    assert ml["model_prob"] in (0.40, 0.60)
+
+
+def test_moneyline_can_use_negbin_source_explicitly():
+    prediction = _prediction(home_model_prob=0.40, away_model_prob=0.60,
+                              home_negbin_prob=0.55, away_negbin_prob=0.45)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+    }, prob_source="negbin")
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+    assert ml["prob_source"] == "negbin"
+    assert ml["model_prob"] in (0.55, 0.45)
+
+
+def test_directional_discrepancy_true_when_skellam_and_heuristic_disagree():
+    # Heurístico favorece al local (0.55 > 0.5); Skellam favorece al
+    # visitante (home 0.45 < 0.5) -- discrepancia direccional real.
+    prediction = _prediction(home_model_prob=0.55, away_model_prob=0.45,
+                              home_skellam_prob=0.45, away_skellam_prob=0.55)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.45, "away_novig": 0.55},
+    })
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+    assert ml["directional_discrepancy"] is True
+
+
+def test_directional_discrepancy_false_when_skellam_and_heuristic_agree():
+    prediction = _prediction(home_model_prob=0.45, away_model_prob=0.55,
+                              home_skellam_prob=0.40, away_skellam_prob=0.60)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+    })
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+    assert ml["directional_discrepancy"] is False
+
+
+def test_directional_discrepancy_always_false_with_heuristic_source():
+    # prob_source="heuristic" no tiene nada distinto contra qué comparar --
+    # discrepancia siempre False, nunca None ni True.
+    prediction = _prediction(home_model_prob=0.55, away_model_prob=0.45,
+                              home_skellam_prob=0.45, away_skellam_prob=0.55)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.45, "away_novig": 0.55},
+    }, prob_source="heuristic")
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+    assert ml["directional_discrepancy"] is False
+
+
+def test_run_line_and_totals_always_report_skellam_source_no_discrepancy():
+    # run_line/totals nunca tuvieron una versión heurística -- siempre
+    # Skellam, y la discrepancia direccional no aplica (None, no False).
+    market_lines = {
+        "run_line": {"line": 1.5, "home_odds": 150, "away_odds": -180, "home_novig": None, "away_novig": None},
+        "totals": {"line": 8.5, "over_odds": -110, "under_odds": -110, "over_novig": None, "under_novig": None},
+    }
+    candidates = generate_pick_candidates(_prediction(), market_lines, prob_source="heuristic")
+    for c in candidates:
+        assert c["prob_source"] == "skellam"
+        assert c["directional_discrepancy"] is None

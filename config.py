@@ -67,6 +67,23 @@ WEATHER_CORRECTION = 0.0
 # y actualizar este comentario con la fecha y el número de juegos usados.
 NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "7.0"))
 
+# --- Fuente de probabilidad para picks de moneyline ---
+# Qué modelo alimenta la probabilidad de moneyline en model/picks.py:
+# "heuristic" (ERA/OPS), "skellam" (Poisson) o "negbin" (Binomial Negativo).
+# Cambia SOLO moneyline -- run_line/totals siempre se calculan a partir de
+# las carreras proyectadas (Skellam/NB2), nunca del heurístico, así que no
+# tienen una fuente configurable que cambiar.
+#
+# Por qué "skellam" y no "heuristic": el heurístico calcula una probabilidad
+# de victoria a partir de ERA/OPS de forma independiente de las carreras
+# proyectadas: es una segunda opinión, útil para el chequeo de acuerdo entre
+# modelos, pero Skellam es el que efectivamente modela el marcador (de ahí
+# sale el total y el run line también) -- generar el pick de moneyline desde
+# un modelo distinto al que ya se usa para los otros dos mercados dejaba al
+# heurístico corriendo la mesa de decisión de apuesta sin ninguna razón
+# consistente frente a los otros dos picks del mismo partido.
+PICK_PROBABILITY_SOURCE = os.getenv("PICK_PROBABILITY_SOURCE", "skellam")
+
 # --- The Odds API: protección de presupuesto ---
 # El free tier de The Odds API es ~500 requests/mes — el más limitado de
 # todas las APIs que usa este proyecto (MLB Stats API y Open-Meteo no

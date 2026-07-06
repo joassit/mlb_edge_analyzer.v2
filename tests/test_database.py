@@ -220,6 +220,37 @@ def test_save_picks_upserts_instead_of_duplicating(isolated_db):
         session.close()
 
 
+def test_save_picks_persists_prob_source_and_directional_discrepancy(isolated_db):
+    pick = _make_pick("moneyline", "away")
+    pick["prob_source"] = "skellam"
+    pick["directional_discrepancy"] = True
+
+    isolated_db.save_picks(1, "2026-07-05", [pick], model_version="v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        row = session.query(isolated_db.Pick).filter_by(game_pk=1, game_date="2026-07-05").one()
+        assert row.prob_source == "skellam"
+        assert row.directional_discrepancy is True
+    finally:
+        session.close()
+
+
+def test_save_picks_defaults_prob_source_to_none_when_absent(isolated_db):
+    # _make_pick no manda prob_source/directional_discrepancy -- no debe
+    # romper el guardado (compatibilidad con picks generados antes de que
+    # existieran estos campos).
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("moneyline", "away")], model_version="v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        row = session.query(isolated_db.Pick).filter_by(game_pk=1, game_date="2026-07-05").one()
+        assert row.prob_source is None
+        assert row.directional_discrepancy is None
+    finally:
+        session.close()
+
+
 def test_save_picks_allows_multiple_markets_same_game(isolated_db):
     picks = [
         _make_pick("moneyline", "away"),

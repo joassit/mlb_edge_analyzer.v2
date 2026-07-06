@@ -104,6 +104,7 @@ def team_label(pick: dict, game: dict) -> str:
 
 _MARKET_REVIEW_LABELS = {"moneyline": "ML", "run_line": "Handicap", "totals": "Totales"}
 _OUTCOME_LABELS = {"win": "✅ ACERTÓ", "loss": "❌ FALLÓ", "push": "➖ PUSH"}
+_PROB_SOURCE_LABELS = {"heuristic": "Heurístico", "skellam": "Skellam", "negbin": "Bin. Neg."}
 
 
 def _format_win_rate(value: float | None) -> str:
@@ -278,8 +279,11 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
             print("  Picks recomendados:")
             for p in picks:
                 tag = "  ⚠️ forzado (sin edge real)" if p.get("forced") else ""
+                source = p.get("prob_source")
+                source_tag = f"  [fuente: {_PROB_SOURCE_LABELS.get(source, source)}]" if source else ""
+                discrepancy_tag = "  ⚡ discrepancia direccional vs. heurístico" if p.get("directional_discrepancy") else ""
                 print(f"    • {team_label(p, r):<18}  "
-                      f"(edge {p['edge']:+.1%}, EV {p['ev']:+.2f}){tag}")
+                      f"(edge {p['edge']:+.1%}, EV {p['ev']:+.2f}){tag}{source_tag}{discrepancy_tag}")
 
         print("-" * 70)
 
