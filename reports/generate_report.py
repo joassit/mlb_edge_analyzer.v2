@@ -239,14 +239,27 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
             print(f"  Skellam  -> visitante: {r['away_skellam_prob']:.3f}   local: {r['home_skellam_prob']:.3f}"
                   f"   (carreras proy.: {r['away_proj_runs']:.1f} - {r['home_proj_runs']:.1f})")
 
-            fav_a = r["away_model_prob"] > 0.5
-            fav_b = r["away_skellam_prob"] > 0.5
-            agree = "✅ ambos modelos coinciden en el favorito" if fav_a == fav_b else "⚠️  los modelos DISCREPAN en el favorito"
+            # Skellam y NB2 comparten el mismo mu proyectado -- son un solo
+            # voto ("familia mu"), no dos independientes. El acuerdo real que
+            # importa es heurístico vs. esa familia, no heurístico vs. Skellam
+            # vs. NB2 por separado.
+            heuristic_favors_away = r["away_model_prob"] > 0.5
+            mu_family_favors_away = r["away_skellam_prob"] > 0.5
+            agree = ("✅ heurístico y familia Skellam/NB2 coinciden en el favorito"
+                     if heuristic_favors_away == mu_family_favors_away
+                     else "⚠️  heurístico DISCREPA de la familia Skellam/NB2")
             print(f"  {agree}")
 
         if r.get("away_negbin_prob") is not None:
             print(f"  Bin.Neg. -> visitante: {r['away_negbin_prob']:.3f}   local: {r['home_negbin_prob']:.3f}"
                   f"   (dispersión k, cola gorda vs. Skellam/Poisson)")
+
+            if r.get("away_skellam_prob") is not None:
+                skellam_favors_away = r["away_skellam_prob"] > 0.5
+                negbin_favors_away = r["away_negbin_prob"] > 0.5
+                if skellam_favors_away != negbin_favors_away:
+                    print("  🔀 Skellam y NB2 discrepan entre sí (raro -- revisar mu "
+                          "proyectado, el juego está en el límite exacto)")
 
         if r.get("home_covers_rl_prob") is not None:
             print(f"  Run Line -> {r['home_team']} -1.5: {r['home_covers_rl_prob']:.1%}   "
@@ -270,7 +283,7 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
             print(f"  EV       -> visitante: {r['away_ev']:+.3f}   local: {r['home_ev']:+.3f}  (por unidad apostada)")
 
             if r.get("flag_review"):
-                print(f"  🔎 candidato a revisión: edge >= umbral y los dos modelos coinciden en el favorito")
+                print("  🔎 candidato a revisión: edge >= umbral y heurístico coincide con la familia Skellam/NB2 en el favorito")
         else:
             print("  Mercado  -> (sin cuotas cargadas todavía)")
 

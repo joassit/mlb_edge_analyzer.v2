@@ -385,3 +385,37 @@ def test_analyze_today_last_run_stats_counts_discarded_games(monkeypatch):
     assert stats["processed"] == 1
     assert stats["discarded"] == 1
     assert stats["errors"] == 0
+
+
+# --- _mu_family_agrees_internally / _heuristic_agrees_with_mu_family ---
+# Skellam y NB2 comparten el mismo mu proyectado -- son un solo voto real
+# ("familia mu"), no dos independientes. Estas dos funciones puras son las
+# que deciden qué cuenta como "los modelos coinciden" en flag_review.
+
+def test_mu_family_agrees_internally_true_when_both_favor_same_side():
+    assert main._mu_family_agrees_internally(away_skellam_prob=0.65, away_negbin_prob=0.60) is True
+
+
+def test_mu_family_agrees_internally_false_when_they_disagree():
+    # Skellam favorece al visitante (>0.5), NB2 favorece al local (<0.5)
+    # -- el caso raro que de verdad importa detectar.
+    assert main._mu_family_agrees_internally(away_skellam_prob=0.51, away_negbin_prob=0.49) is False
+
+
+def test_mu_family_agrees_internally_exact_tie_at_half_counts_as_agreement():
+    # Ni Skellam ni NB2 favorecen a nadie (exactamente 0.5 -- "away_prob > 0.5"
+    # es False para ambos) -- False == False cuenta como acuerdo, mismo
+    # criterio que ya usaba el chequeo original de dos modelos.
+    assert main._mu_family_agrees_internally(away_skellam_prob=0.5, away_negbin_prob=0.5) is True
+
+
+def test_heuristic_agrees_with_mu_family_true_when_same_side():
+    assert main._heuristic_agrees_with_mu_family(away_model_prob=0.55, away_skellam_prob=0.60) is True
+
+
+def test_heuristic_agrees_with_mu_family_false_when_different_sides():
+    assert main._heuristic_agrees_with_mu_family(away_model_prob=0.55, away_skellam_prob=0.45) is False
+
+
+def test_heuristic_agrees_with_mu_family_exact_tie_at_half_counts_as_agreement():
+    assert main._heuristic_agrees_with_mu_family(away_model_prob=0.5, away_skellam_prob=0.5) is True

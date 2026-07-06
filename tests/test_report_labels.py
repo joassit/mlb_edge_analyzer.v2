@@ -119,3 +119,44 @@ def test_print_report_uses_team_label_for_picks(capsys):
     out = capsys.readouterr().out
     assert "Phillies ML" in out
     assert "PREDICCIONES DE HOY" in out
+
+
+def _row_with_models(away_model_prob, away_skellam_prob, away_negbin_prob):
+    return {
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": away_model_prob, "home_model_prob": 1 - away_model_prob,
+        "away_skellam_prob": away_skellam_prob, "home_skellam_prob": 1 - away_skellam_prob,
+        "away_negbin_prob": away_negbin_prob, "home_negbin_prob": 1 - away_negbin_prob,
+        "away_proj_runs": 4.0, "home_proj_runs": 4.0,
+    }
+
+
+def test_report_shows_agreement_when_heuristic_and_mu_family_favor_same_side(capsys):
+    # Heurístico y Skellam favorecen al visitante; NB2 también coincide
+    # internamente con Skellam -- acuerdo total, sin avisos.
+    row = _row_with_models(away_model_prob=0.60, away_skellam_prob=0.65, away_negbin_prob=0.62)
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "✅ heurístico y familia Skellam/NB2 coinciden en el favorito" in out
+    assert "DISCREPA" not in out
+    assert "🔀" not in out
+
+
+def test_report_shows_heuristic_vs_mu_family_disagreement(capsys):
+    # Heurístico favorece al local; Skellam (y NB2, de acuerdo entre sí)
+    # favorecen al visitante -- discrepancia heurístico vs. familia mu.
+    row = _row_with_models(away_model_prob=0.45, away_skellam_prob=0.60, away_negbin_prob=0.58)
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "⚠️  heurístico DISCREPA de la familia Skellam/NB2" in out
+    assert "coinciden en el favorito" not in out
+
+
+def test_report_shows_internal_skellam_negbin_disagreement(capsys):
+    # Caso raro: Skellam favorece al visitante, NB2 favorece al local --
+    # debe aparecer el aviso aparte, sin importar qué diga el heurístico.
+    row = _row_with_models(away_model_prob=0.60, away_skellam_prob=0.51, away_negbin_prob=0.49)
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "🔀 Skellam y NB2 discrepan entre sí" in out

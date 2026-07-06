@@ -115,6 +115,24 @@ def analyze_today() -> list[dict]:
     return results
 
 
+def _mu_family_agrees_internally(away_skellam_prob: float, away_negbin_prob: float) -> bool:
+    """
+    Skellam y NB2 reciben el mismo home_mu/away_mu (mismo motor
+    project_team_runs()) -- son la misma "familia mu", no dos votos
+    independientes. Devuelve False solo en el caso RARO donde el supuesto
+    de dispersión (Poisson vs. Binomial Negativo) alcanza a cambiar cuál
+    lado queda arriba de 0.5 -- señal genuina de un juego al límite exacto.
+    """
+    return (away_skellam_prob > 0.5) == (away_negbin_prob > 0.5)
+
+
+def _heuristic_agrees_with_mu_family(away_model_prob: float, away_skellam_prob: float) -> bool:
+    """¿El heurístico (ERA/OPS) favorece el mismo lado que la familia mu
+    (Skellam, representante de esa familia ya que casi nunca discrepa
+    internamente con NB2)? Los 2 votos reales del sistema, no 3."""
+    return (away_model_prob > 0.5) == (away_skellam_prob > 0.5)
+
+
 def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
                        away_era_ip, home_era_ip, away_ops, home_ops) -> dict:
     """Cuerpo de análisis de un solo juego, extraído de analyze_today() para
@@ -221,13 +239,23 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
     if fav is not None and fav["side"] is not None and away_edge is not None:
         model_edge_vs_market_favorite = home_edge if fav["side"] == "home" else away_edge
 
-    # Candidato a revisión: edge por encima del umbral Y los dos
-    # modelos independientes (heurístico + Skellam) de acuerdo en el
-    # favorito. Es una preselección para que decidas tú — nunca una
-    # apuesta automática.
-    models_agree = (away_model_prob > 0.5) == (away_skellam_prob > 0.5)
+    # mu_family_agrees_internally en False es RARO -- pasa solo cuando el
+    # juego está tan cerrado que el supuesto de dispersión (Poisson vs.
+    # Binomial Negativo) alcanza a cambiar cuál lado queda arriba de 0.5.
+    # Señal genuina de un caso límite, no ruido -- queda en el log (además
+    # de en el reporte, ver reports/generate_report.py) en vez de esconderse.
+    if not _mu_family_agrees_internally(away_skellam_prob, away_negbin_prob):
+        logger.info(f"{g['away_team']} @ {g['home_team']}: Skellam y NB2 discrepan entre sí en el "
+                    f"favorito (away: Skellam={away_skellam_prob:.3f} NB2={away_negbin_prob:.3f}) -- "
+                    f"juego en el límite exacto, revisar mu proyectado")
+
+    # Candidato a revisión: edge por encima del umbral Y los dos VOTOS
+    # reales (heurístico vs. familia mu Skellam+NB2) de acuerdo en el
+    # favorito -- ver _heuristic_agrees_with_mu_family arriba. Es una
+    # preselección para que decidas tú — nunca una apuesta automática.
+    heuristic_agrees_with_mu_family = _heuristic_agrees_with_mu_family(away_model_prob, away_skellam_prob)
     flag_review = bool(
-        models_agree
+        heuristic_agrees_with_mu_family
         and away_edge is not None
         and max(abs(away_edge), abs(home_edge)) >= REVIEW_EDGE_THRESHOLD
     )

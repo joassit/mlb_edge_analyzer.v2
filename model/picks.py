@@ -8,9 +8,10 @@ manuales de totales cargadas para un partido, ese es el único candidato
 evaluado — "el mejor mercado disponible", no un mercado fijo.
 """
 
-from config import PICK_PROBABILITY_SOURCE
+from config import PICK_PROBABILITY_SOURCE, NEGBIN_DISPERSION
 from model.edge import implied_prob, edge as edge_fn, expected_value
 from model.markets import run_line_prob, totals_prob
+from model.negbin_model import negbin_run_line_prob, negbin_totals_prob
 
 # Qué campos de `prediction` alimentan la probabilidad de moneyline según
 # PICK_PROBABILITY_SOURCE -- mismo mapeo (away_field, home_field) que
@@ -21,6 +22,11 @@ _PROB_SOURCE_FIELDS = {
     "skellam": ("away_skellam_prob", "home_skellam_prob"),
     "negbin": ("away_negbin_prob", "home_negbin_prob"),
 }
+
+# Run Line y Totales nunca tuvieron una versión heurística (siempre salieron
+# de las carreras proyectadas, nunca de ERA/OPS) -- así que PICK_PROBABILITY_SOURCE
+# "heuristic" cae a Skellam para estos dos mercados, no hay otra opción real.
+_MARKET_PROB_SOURCE = {"heuristic": "skellam", "skellam": "skellam", "negbin": "negbin"}
 
 
 def _build_candidate(market: str, selection: str, line, model_prob: float,
@@ -116,29 +122,41 @@ def generate_pick_candidates(prediction: dict, market_lines: dict,
         if best:
             candidates.append(best)
 
+    market_prob_source = _MARKET_PROB_SOURCE[prob_source]
+
     rl = market_lines.get("run_line")
     if rl:
         line = rl.get("line", 1.5)
-        home_cover_prob, away_cover_prob = run_line_prob(
-            prediction["home_proj_runs"], prediction["away_proj_runs"], line
-        )
+        if market_prob_source == "negbin":
+            home_cover_prob, away_cover_prob = negbin_run_line_prob(
+                prediction["home_proj_runs"], prediction["away_proj_runs"], NEGBIN_DISPERSION, line
+            )
+        else:
+            home_cover_prob, away_cover_prob = run_line_prob(
+                prediction["home_proj_runs"], prediction["away_proj_runs"], line
+            )
         best = _best_side("run_line", [
             ("home", line, home_cover_prob, rl.get("home_odds"), rl.get("home_novig")),
             ("away", line, away_cover_prob, rl.get("away_odds"), rl.get("away_novig")),
-        ], min_ev, min_edge, prob_source="skellam", directional_discrepancy=None)
+        ], min_ev, min_edge, prob_source=market_prob_source, directional_discrepancy=None)
         if best:
             candidates.append(best)
 
     totals = market_lines.get("totals")
     if totals and totals.get("line") is not None:
         line = totals["line"]
-        over_prob, under_prob = totals_prob(
-            prediction["home_proj_runs"], prediction["away_proj_runs"], line
-        )
+        if market_prob_source == "negbin":
+            over_prob, under_prob = negbin_totals_prob(
+                prediction["home_proj_runs"], prediction["away_proj_runs"], NEGBIN_DISPERSION, line
+            )
+        else:
+            over_prob, under_prob = totals_prob(
+                prediction["home_proj_runs"], prediction["away_proj_runs"], line
+            )
         best = _best_side("totals", [
             ("over", line, over_prob, totals.get("over_odds"), totals.get("over_novig")),
             ("under", line, under_prob, totals.get("under_odds"), totals.get("under_novig")),
-        ], min_ev, min_edge, prob_source="skellam", directional_discrepancy=None)
+        ], min_ev, min_edge, prob_source=market_prob_source, directional_discrepancy=None)
         if best:
             candidates.append(best)
 

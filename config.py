@@ -94,9 +94,10 @@ ODDS_API_MONTHLY_BUDGET = int(os.getenv("ODDS_API_MONTHLY_BUDGET", "500"))
 ODDS_CACHE_DIR = os.getenv("ODDS_CACHE_DIR", ".cache/odds")
 
 # Umbral de edge (en probabilidad) a partir del cual un juego se marca como
-# "candidato a revisión" en el reporte — solo si además los dos modelos
-# (heurístico y Skellam) coinciden en el favorito. Es una preselección
-# para que decidas tú, nunca una apuesta automática.
+# "candidato a revisión" en el reporte — solo si además los dos VOTOS
+# reales (heurístico vs. familia mu Skellam+NB2, que comparten el mismo
+# mu proyectado y casi nunca discrepan entre sí) coinciden en el favorito.
+# Es una preselección para que decidas tú, nunca una apuesta automática.
 REVIEW_EDGE_THRESHOLD = float(os.getenv("REVIEW_EDGE_THRESHOLD", "0.03"))
 
 # --- Picks recomendados (moneyline / run_line / totals) ---

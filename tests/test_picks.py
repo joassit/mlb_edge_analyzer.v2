@@ -3,7 +3,10 @@ Pruebas de model/picks.py — generación y selección de picks recomendados,
 sin tocar red ni base de datos.
 """
 
+from config import NEGBIN_DISPERSION
 from model.picks import generate_pick_candidates, select_picks_for_game
+from model.markets import run_line_prob, totals_prob
+from model.negbin_model import negbin_run_line_prob, negbin_totals_prob
 
 
 def _prediction(**overrides) -> dict:
@@ -199,3 +202,97 @@ def test_run_line_and_totals_always_report_skellam_source_no_discrepancy():
     for c in candidates:
         assert c["prob_source"] == "skellam"
         assert c["directional_discrepancy"] is None
+
+
+# --- NB2 conectado de verdad a Run Line y Totales ---
+
+def test_run_line_uses_negbin_probabilities_when_prob_source_is_negbin():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "run_line": {"line": 1.5, "home_odds": 150, "away_odds": -180, "home_novig": None, "away_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="negbin")
+    rl = next(c for c in candidates if c["market"] == "run_line")
+
+    home_cover_negbin, away_cover_negbin = negbin_run_line_prob(3.5, 5.0, NEGBIN_DISPERSION, 1.5)
+    expected_prob = home_cover_negbin if rl["selection"] == "home" else away_cover_negbin
+
+    assert rl["prob_source"] == "negbin"
+    assert abs(rl["model_prob"] - expected_prob) < 1e-9
+    # Confirma que de verdad es una probabilidad DISTINTA a la de Skellam
+    # (si no, la prueba no protegería nada -- podría estar llamando a la
+    # función equivocada y pasar por coincidencia).
+    home_cover_skellam, away_cover_skellam = run_line_prob(3.5, 5.0, 1.5)
+    expected_skellam = home_cover_skellam if rl["selection"] == "home" else away_cover_skellam
+    assert abs(expected_prob - expected_skellam) > 1e-6
+
+
+def test_run_line_uses_skellam_probabilities_when_prob_source_is_skellam():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "run_line": {"line": 1.5, "home_odds": 150, "away_odds": -180, "home_novig": None, "away_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="skellam")
+    rl = next(c for c in candidates if c["market"] == "run_line")
+
+    home_cover_skellam, away_cover_skellam = run_line_prob(3.5, 5.0, 1.5)
+    expected_prob = home_cover_skellam if rl["selection"] == "home" else away_cover_skellam
+
+    assert rl["prob_source"] == "skellam"
+    assert abs(rl["model_prob"] - expected_prob) < 1e-9
+
+
+def test_totals_uses_negbin_probabilities_when_prob_source_is_negbin():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "totals": {"line": 8.5, "over_odds": -110, "under_odds": -110, "over_novig": None, "under_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="negbin")
+    totals = next(c for c in candidates if c["market"] == "totals")
+
+    over_negbin, under_negbin = negbin_totals_prob(3.5, 5.0, NEGBIN_DISPERSION, 8.5)
+    expected_prob = over_negbin if totals["selection"] == "over" else under_negbin
+
+    assert totals["prob_source"] == "negbin"
+    assert abs(totals["model_prob"] - expected_prob) < 1e-9
+
+    over_poisson, under_poisson = totals_prob(3.5, 5.0, 8.5)
+    expected_poisson = over_poisson if totals["selection"] == "over" else under_poisson
+    assert abs(expected_prob - expected_poisson) > 1e-6
+
+
+def test_totals_uses_skellam_probabilities_when_prob_source_is_skellam():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "totals": {"line": 8.5, "over_odds": -110, "under_odds": -110, "over_novig": None, "under_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="skellam")
+    totals = next(c for c in candidates if c["market"] == "totals")
+
+    over_poisson, under_poisson = totals_prob(3.5, 5.0, 8.5)
+    expected_prob = over_poisson if totals["selection"] == "over" else under_poisson
+
+    assert totals["prob_source"] == "skellam"
+    assert abs(totals["model_prob"] - expected_prob) < 1e-9
+
+
+def test_run_line_and_totals_fall_back_to_skellam_when_heuristic_requested():
+    # PICK_PROBABILITY_SOURCE="heuristic" no tiene versión propia de estos
+    # mercados -- ya cubierto arriba para prob_source, aquí se confirma
+    # además que el NÚMERO usado es realmente el de Skellam, no NB2.
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "run_line": {"line": 1.5, "home_odds": 150, "away_odds": -180, "home_novig": None, "away_novig": None},
+        "totals": {"line": 8.5, "over_odds": -110, "under_odds": -110, "over_novig": None, "under_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="heuristic")
+
+    rl = next(c for c in candidates if c["market"] == "run_line")
+    home_cover_skellam, away_cover_skellam = run_line_prob(3.5, 5.0, 1.5)
+    expected_rl = home_cover_skellam if rl["selection"] == "home" else away_cover_skellam
+    assert abs(rl["model_prob"] - expected_rl) < 1e-9
+
+    totals = next(c for c in candidates if c["market"] == "totals")
+    over_poisson, under_poisson = totals_prob(3.5, 5.0, 8.5)
+    expected_totals = over_poisson if totals["selection"] == "over" else under_poisson
+    assert abs(totals["model_prob"] - expected_totals) < 1e-9
