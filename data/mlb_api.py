@@ -83,6 +83,14 @@ def _parse_game(g: dict) -> dict | SchemaError:
         "game_date_official": g.get("officialDate"),
         "status": detailed_state,
         "abstract_state": abstract_state,
+        # gameNumber/doubleHeader identifican juego 1 vs. juego 2 de una
+        # doble cartelera -- cada uno trae su propio game_pk DISTINTO en
+        # MLB Stats API, así que no hay forma de detectarlos por game_pk;
+        # se usan opcionalmente (.get, no require()) para no volver esto un
+        # campo obligatorio -- solo enriquecen el mensaje de descarte en
+        # main.py::analyze_today() cuando aplica.
+        "game_number": g.get("gameNumber"),
+        "double_header": g.get("doubleHeader"),
     }
 
 def get_game_result(game_pk: int) -> dict | None:

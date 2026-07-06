@@ -160,3 +160,61 @@ def test_report_shows_internal_skellam_negbin_disagreement(capsys):
     print_report([row])
     out = capsys.readouterr().out
     assert "🔀 Skellam y NB2 discrepan entre sí" in out
+
+
+# --- Visibilidad de juegos descartados en el reporte (Sección 2) ---
+
+def test_print_report_shows_discarded_game_message(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    discarded = [{"away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+                  "message": "Philadelphia Phillies @ Kansas City Royals -- ya estaba en curso "
+                             "(estado: In Progress), no se generó predicción."}]
+    print_report(rows, discarded_games=discarded)
+    out = capsys.readouterr().out
+    assert "⏱️ 1 juego no procesado:" in out
+    assert "Philadelphia Phillies @ Kansas City Royals" in out
+    assert "ya estaba en curso" in out
+
+
+def test_print_report_lists_multiple_discarded_games(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    discarded = [
+        {"away_team": "C", "home_team": "D", "message": "C @ D -- pospuesto (estado: Postponed), no se generó predicción."},
+        {"away_team": "E", "home_team": "F", "message": "E @ F -- ya estaba en curso (estado: In Progress), no se generó predicción."},
+    ]
+    print_report(rows, discarded_games=discarded)
+    out = capsys.readouterr().out
+    assert "⏱️ 2 juegos no procesados:" in out
+    assert "C @ D -- pospuesto" in out
+    assert "E @ F -- ya estaba en curso" in out
+
+
+def test_print_report_shows_no_discard_note_when_there_are_none(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    print_report(rows, discarded_games=None)
+    out = capsys.readouterr().out
+    assert "⏱️" not in out
+    assert "no procesado" not in out
+
+
+def test_print_report_shows_discard_note_even_with_no_games_processed(capsys):
+    # Si TODOS los juegos del día se descartaron (rows vacío), el reporte
+    # debe seguir explicando por qué -- no solo decir "no hay juegos".
+    discarded = [{"away_team": "A", "home_team": "B",
+                  "message": "A @ B -- pospuesto (estado: Postponed), no se generó predicción."}]
+    print_report([], discarded_games=discarded)
+    out = capsys.readouterr().out
+    assert "⏱️ 1 juego no procesado:" in out
+    assert "No hay juegos analizados hoy." in out

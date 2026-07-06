@@ -5,7 +5,7 @@ Orquestador: Realiza auditoría del día anterior y proyecciones del día actual
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from logging_config import setup_logging
 from data.mlb_api import get_schedule
 from data.stats import (
@@ -53,23 +53,104 @@ MARKET_TOTALS = {
 }
 
 
+def _discard_reason_phrase(detailed_state: str | None) -> str:
+    """Frase legible según el estado detallado (detailedState) que trae MLB
+    Stats API -- distingue "ya en curso" de "pospuesto"/"suspendido"/
+    "retrasado" en vez de agruparlos todos bajo un "descartado" genérico:
+    un juego en curso y uno pospuesto son situaciones muy distintas para
+    quien lee el reporte (ver CAMBIO 1 de la auditoría de visibilidad de
+    descartes)."""
+    s = (detailed_state or "").lower()
+    if "in progress" in s or s == "live":
+        return "ya estaba en curso"
+    if "postponed" in s:
+        return "pospuesto"
+    if "suspended" in s:
+        return "suspendido"
+    if "delayed" in s:
+        return "con inicio retrasado"
+    return f"estado inusual ({detailed_state})" if detailed_state else "estado desconocido"
+
+
+def _format_game_time(iso_str: str | None) -> str | None:
+    """HH:MM UTC legible a partir del gameDate ISO de MLB Stats API, o None
+    si no viene o no se puede parsear -- el mensaje de descarte simplemente
+    omite la hora en ese caso, no la inventa."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.strftime("%H:%M UTC")
+
+
+def _build_discard_message(game: dict, other_games_same_matchup: list[dict]) -> str:
+    """Mensaje legible de por qué se descartó `game` por estado fuera de
+    Preview/Final. Si `other_games_same_matchup` no está vacío (mismo
+    away_team_id/home_team_id -- MLB Stats API le da un game_pk DISTINTO a
+    cada juego de una doble cartelera, así que la única forma de
+    detectarlos es por matchup + gameNumber, nunca por game_pk), identifica
+    ambos juegos por separado en vez de reportar un descarte genérico de 1
+    juego (ver CAMBIO 3: esto es justo lo que confundió el reporte de
+    Phillies @ Royals del 2026-07-06)."""
+    reason = _discard_reason_phrase(game.get("status"))
+    game_time = _format_game_time(game.get("game_time"))
+    time_note = f", inicio programado {game_time}" if game_time else ""
+    base = f"{game['away_team']} @ {game['home_team']}"
+
+    if not other_games_same_matchup:
+        return f"{base} -- {reason} (estado: {game.get('status')}){time_note}, no se generó predicción."
+
+    sibling = other_games_same_matchup[0]
+    own_num = game.get("game_number") or "?"
+    sibling_num = sibling.get("game_number") or "?"
+    sibling_abstract = sibling.get("abstract_state")
+    if sibling_abstract == "Preview":
+        sibling_desc = f"juego {sibling_num} sigue en Preview y sí se procesó"
+    elif sibling_abstract == "Final":
+        sibling_desc = f"juego {sibling_num} ya terminó (Final) y sí se procesó"
+    else:
+        sibling_reason = _discard_reason_phrase(sibling.get("status"))
+        sibling_desc = f"juego {sibling_num} tampoco se procesó ({sibling_reason}, estado: {sibling.get('status')})"
+
+    return (f"{base} -- juego {own_num} de doble cartelera, {reason} "
+            f"(estado: {game.get('status')}){time_note}; {sibling_desc}.")
+
+
 def analyze_today() -> list[dict]:
     league_ops = get_league_ops()
     games = get_schedule(date.today())
     weather_by_team = preload_weather(games, get_park_info)
     odds_events = fetch_moneyline_odds()
     results = []
+    discarded_games = []
     n_discarded = 0
     n_errors = 0
 
+    # Agrupado por matchup (no por game_pk -- ver docstring de
+    # _build_discard_message) para poder distinguir un descarte por doble
+    # cartelera de uno aislado.
+    games_by_matchup: dict[tuple, list[dict]] = {}
+    for g in games:
+        games_by_matchup.setdefault((g["away_team_id"], g["home_team_id"]), []).append(g)
+
     for g in games:
         if g.get("abstract_state") not in ["Preview", "Final"]:
-            logger.debug(f"Omitiendo {g['away_team']} @ {g['home_team']}: estado {g.get('abstract_state')}")
+            siblings = [
+                s for s in games_by_matchup[(g["away_team_id"], g["home_team_id"])]
+                if s["game_pk"] != g["game_pk"]
+            ]
+            message = _build_discard_message(g, siblings)
+            logger.warning(f"Omitiendo {message}")
+            discarded_games.append({"away_team": g["away_team"], "home_team": g["home_team"], "message": message})
             n_discarded += 1
             continue
 
         if not g.get("away_pitcher_id") or not g.get("home_pitcher_id"):
-            logger.warning(f"Omitiendo {g['away_team']} @ {g['home_team']}: abridor probable sin confirmar (TBD)")
+            message = f"{g['away_team']} @ {g['home_team']} -- abridor probable sin confirmar (TBD), no se generó predicción."
+            logger.warning(f"Omitiendo {message}")
+            discarded_games.append({"away_team": g["away_team"], "home_team": g["home_team"], "message": message})
             n_discarded += 1
             continue
 
@@ -84,7 +165,10 @@ def analyze_today() -> list[dict]:
             if home_era_ip is None: missing.append("home ERA/IP")
             if away_ops is None: missing.append("away OPS")
             if home_ops is None: missing.append("home OPS")
-            logger.warning(f"Omitiendo {g['away_team']} @ {g['home_team']}: falta {', '.join(missing)} (falla de API o datos no disponibles)")
+            message = (f"{g['away_team']} @ {g['home_team']} -- falta {', '.join(missing)} "
+                       f"(falla de API o datos no disponibles), no se generó predicción.")
+            logger.warning(f"Omitiendo {message}")
+            discarded_games.append({"away_team": g["away_team"], "home_team": g["home_team"], "message": message})
             n_discarded += 1
             continue
 
@@ -106,6 +190,7 @@ def analyze_today() -> list[dict]:
     stats = {
         "total_games": len(games), "processed": len(results),
         "discarded": n_discarded, "errors": n_errors,
+        "discarded_games": discarded_games,
     }
     analyze_today.last_run_stats = stats
     logger.info(
@@ -434,38 +519,42 @@ def run_pipeline():
     # API solo para saber cuántos juegos se descartaron o fallaron con error.
     stats = getattr(analyze_today, "last_run_stats", None) or {
         "total_games": len(results), "processed": len(results), "discarded": 0, "errors": 0,
+        "discarded_games": [],
     }
 
+    picks_by_game = {}
+    all_picks_rows = []
+
+    for r in results:
+        snapshot = r.pop("_feature_snapshot", None)
+        picks = r.pop("_picks", [])
+
+        save_analysis(r)
+        if snapshot is not None:
+            save_feature_snapshot(r["game_pk"], r["game_date"], snapshot)
+        if picks:
+            save_picks(r["game_pk"], r["game_date"], picks, MODEL_VERSION)
+            picks_by_game[r["game_pk"]] = picks
+            for p in picks:
+                all_picks_rows.append({
+                    "game_pk": r["game_pk"], "game_date": r["game_date"],
+                    "away_team": r["away_team"], "home_team": r["home_team"],
+                    **p,
+                })
+
+    # print_report() se llama SIEMPRE, incluso sin resultados -- así el
+    # detalle de juegos descartados (ver analyze_today()) queda visible en
+    # el reporte aunque todos los juegos del día se hayan descartado, en
+    # vez de perderse detrás de un "no hay juegos" genérico.
+    print_report(results, picks_by_game=picks_by_game, discarded_games=stats.get("discarded_games"))
+
     if results:
-        picks_by_game = {}
-        all_picks_rows = []
-
-        for r in results:
-            snapshot = r.pop("_feature_snapshot", None)
-            picks = r.pop("_picks", [])
-
-            save_analysis(r)
-            if snapshot is not None:
-                save_feature_snapshot(r["game_pk"], r["game_date"], snapshot)
-            if picks:
-                save_picks(r["game_pk"], r["game_date"], picks, MODEL_VERSION)
-                picks_by_game[r["game_pk"]] = picks
-                for p in picks:
-                    all_picks_rows.append({
-                        "game_pk": r["game_pk"], "game_date": r["game_date"],
-                        "away_team": r["away_team"], "home_team": r["home_team"],
-                        **p,
-                    })
-
-        print_report(results, picks_by_game=picks_by_game)
         path = export_csv(results)
         print(f"\nReporte de hoy exportado a: {path}")
 
         if all_picks_rows:
             picks_path = export_picks_csv(all_picks_rows)
             print(f"Picks exportados a: {picks_path}")
-    else:
-        print("No hay juegos para analizar hoy.")
 
     elapsed = time.monotonic() - start_time
 

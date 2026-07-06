@@ -210,8 +210,9 @@ def print_yesterday_review(review: dict | None) -> None:
     _print_daily_review_summary(review)
 
 
-def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
-    if not rows:
+def print_report(rows: list[dict], picks_by_game: dict | None = None,
+                  discarded_games: list[dict] | None = None) -> None:
+    if not rows and not discarded_games:
         print("No hay juegos analizados hoy.")
         return
 
@@ -220,6 +221,25 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
     print("\n" + "=" * 70)
     print(f"  PREDICCIONES DE HOY — {date.today().strftime('%Y-%m-%d')}")
     print("=" * 70 + "\n")
+
+    # Visible en el reporte, no solo en el log (main.py::analyze_today() ya
+    # loggea cada descarte a WARNING con el detalle real) -- un juego en
+    # curso, pospuesto o de doble cartelera que no se procesó debe quedar
+    # claro aquí, junto al conteo de procesados/descartados, en vez de
+    # obligar a quien lee el reporte a adivinarlo o ir a buscar el log.
+    if discarded_games:
+        n = len(discarded_games)
+        if n == 1:
+            print(f"⏱️ 1 juego no procesado: {discarded_games[0]['message']}")
+        else:
+            print(f"⏱️ {n} juegos no procesados:")
+            for d in discarded_games:
+                print(f"  - {d['message']}")
+        print()
+
+    if not rows:
+        print("No hay juegos analizados hoy.")
+        return
 
     for r in rows:
         print(f"{r['away_team']} @ {r['home_team']}")

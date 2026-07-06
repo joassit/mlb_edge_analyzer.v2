@@ -419,3 +419,112 @@ def test_heuristic_agrees_with_mu_family_false_when_different_sides():
 
 def test_heuristic_agrees_with_mu_family_exact_tie_at_half_counts_as_agreement():
     assert main._heuristic_agrees_with_mu_family(away_model_prob=0.5, away_skellam_prob=0.5) is True
+
+
+# --- Visibilidad de descartes: _discard_reason_phrase / _build_discard_message ---
+# Antes de esta auditoría, un juego descartado por estado (in progress,
+# pospuesto, suspendido...) se loggeaba a nivel DEBUG -- invisible en la
+# consola de GitHub Actions (el StreamHandler de logging_config.py solo
+# muestra WARNING+). Esto causó confusión real: un descarte de Phillies @
+# Royals no pudo explicarse en el reporte. Estas pruebas cubren las
+# funciones puras que arman el mensaje detallado.
+
+def test_discard_reason_phrase_distinguishes_in_progress():
+    assert main._discard_reason_phrase("In Progress") == "ya estaba en curso"
+
+
+def test_discard_reason_phrase_distinguishes_postponed_from_in_progress():
+    assert main._discard_reason_phrase("Postponed") == "pospuesto"
+    assert main._discard_reason_phrase("Postponed") != main._discard_reason_phrase("In Progress")
+
+
+def test_discard_reason_phrase_distinguishes_suspended():
+    assert main._discard_reason_phrase("Suspended: Rain") == "suspendido"
+
+
+def test_discard_reason_phrase_distinguishes_delayed():
+    assert main._discard_reason_phrase("Delayed Start") == "con inicio retrasado"
+
+
+def test_discard_reason_phrase_falls_back_for_unknown_state():
+    assert main._discard_reason_phrase("Something New") == "estado inusual (Something New)"
+
+
+_GAME_IN_PROGRESS = {
+    "away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+    "status": "In Progress", "game_time": "2026-07-06T15:03:00Z", "game_number": 1,
+}
+
+
+def test_build_discard_message_names_teams_and_real_state_for_in_progress():
+    msg = main._build_discard_message(_GAME_IN_PROGRESS, other_games_same_matchup=[])
+    assert "Philadelphia Phillies @ Kansas City Royals" in msg
+    assert "ya estaba en curso" in msg
+    assert "estado: In Progress" in msg
+    assert "15:03 UTC" in msg
+
+
+def test_build_discard_message_postponed_differs_from_in_progress():
+    postponed_game = {**_GAME_IN_PROGRESS, "status": "Postponed"}
+    msg_in_progress = main._build_discard_message(_GAME_IN_PROGRESS, other_games_same_matchup=[])
+    msg_postponed = main._build_discard_message(postponed_game, other_games_same_matchup=[])
+    assert msg_in_progress != msg_postponed
+    assert "pospuesto" in msg_postponed
+    assert "ya estaba en curso" not in msg_postponed
+
+
+def test_build_discard_message_doubleheader_identifies_both_games():
+    # Juego 1 (Phillies @ Royals) en curso; juego 2 del mismo matchup sigue
+    # en Preview y sí se procesó -- exactamente el caso que confundió el
+    # reporte real del 2026-07-06.
+    game_1 = _GAME_IN_PROGRESS
+    game_2 = {
+        "away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+        "status": "Scheduled", "abstract_state": "Preview",
+        "game_time": "2026-07-06T20:05:00Z", "game_number": 2,
+    }
+
+    msg = main._build_discard_message(game_1, other_games_same_matchup=[game_2])
+
+    assert "juego 1 de doble cartelera" in msg
+    assert "ya estaba en curso" in msg
+    assert "juego 2 sigue en Preview y sí se procesó" in msg
+
+
+def test_build_discard_message_doubleheader_both_games_not_processed():
+    game_1 = _GAME_IN_PROGRESS
+    game_2_postponed = {
+        "away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+        "status": "Postponed", "abstract_state": "Postponed",
+        "game_time": "2026-07-06T20:05:00Z", "game_number": 2,
+    }
+
+    msg = main._build_discard_message(game_1, other_games_same_matchup=[game_2_postponed])
+
+    assert "juego 1 de doble cartelera" in msg
+    assert "juego 2 tampoco se procesó" in msg
+    assert "pospuesto" in msg
+
+
+def test_analyze_today_populates_discarded_games_with_detailed_message(monkeypatch):
+    def _fake_schedule_in_progress(target_date=None):
+        games = _fake_get_schedule_two_games(target_date)
+        games[0]["abstract_state"] = "Live"
+        games[0]["status"] = "In Progress"
+        return games
+
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "get_schedule", _fake_schedule_in_progress)
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: {30: (3.5, 100.0), 40: (4.0, 90.0)}[pid])
+    monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: {3: 0.760, 4: 0.750}[tid])
+    _clear_manual_markets(monkeypatch)
+
+    main.analyze_today()
+
+    stats = main.analyze_today.last_run_stats
+    assert stats["discarded"] == 1
+    assert len(stats["discarded_games"]) == 1
+    message = stats["discarded_games"][0]["message"]
+    assert "A @ B" in message
+    assert "ya estaba en curso" in message
+    assert "estado: In Progress" in message
