@@ -21,7 +21,9 @@ from model.picks import generate_pick_candidates, select_picks_for_game
 from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
-from tracking.results_tracker import update_results, print_performance_report, audit_totals, compute_daily_review
+from tracking.results_tracker import (
+    update_results, print_performance_report, print_calibration_report, audit_totals, compute_daily_review,
+)
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
@@ -334,13 +336,24 @@ def run_pipeline():
     logger.info(f"Iniciando run_pipeline() -- model_version={MODEL_VERSION} git_commit={git_commit}")
 
     # 1. Auditoría de resultados y desempeño del día(s) anterior(es) --
-    # ventana rodante de 30 días (print_performance_report/audit_totals),
-    # complementaria a la Sección 1 del reporte diario de abajo (que es
-    # exactamente UN día, para revisar ayer partido por partido).
+    # ventana rodante de 30/90 días (print_performance_report/
+    # print_calibration_report/audit_totals), complementaria a la Sección 1
+    # del reporte diario de abajo (que es exactamente UN día, para revisar
+    # ayer partido por partido).
+    #
+    # print_calibration_report() vivía SOLO en track_results.py, un script
+    # separado que nunca corre en el cron de producción (daily_pipeline.yml
+    # solo ejecuta `python main.py`) -- la calibración por bucket de
+    # confianza jamás aparecía en un reporte real por eso. track_results.py
+    # además duplicaría la llamada a update_results() de la línea de abajo
+    # sin ningún beneficio (ya no quedarían resultados pendientes que
+    # actualizar), así que la solución es traer la llamada aquí, no agregar
+    # un segundo script al workflow.
     print("\n--- 🔍 AUDITANDO RESULTADOS DEL DÍA ANTERIOR ---")
     updated = update_results()
     print(f"Resultados actualizados: {updated}")
     print_performance_report()
+    print_calibration_report()
     audit_totals()
 
     # Sección 1 del reporte diario: revisión de ayer, mercado por mercado.
