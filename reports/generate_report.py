@@ -44,6 +44,10 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
             agree = "✅ ambos modelos coinciden en el favorito" if fav_a == fav_b else "⚠️  los modelos DISCREPAN en el favorito"
             print(f"  {agree}")
 
+        if r.get("away_negbin_prob") is not None:
+            print(f"  Bin.Neg. -> visitante: {r['away_negbin_prob']:.3f}   local: {r['home_negbin_prob']:.3f}"
+                  f"   (dispersión k, cola gorda vs. Skellam/Poisson)")
+
         if r.get("home_covers_rl_prob") is not None:
             print(f"  Run Line -> {r['home_team']} -1.5: {r['home_covers_rl_prob']:.1%}   "
                   f"{r['away_team']} +1.5: {r['away_covers_rl_prob']:.1%}")

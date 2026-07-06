@@ -52,6 +52,21 @@ PARK_FACTOR_WEIGHT = 1.0
 # un valor plausible pero sin validar. Neutralizado a 0.0 hasta backtest.
 WEATHER_CORRECTION = 0.0
 
+# --- Binomial Negativo: dispersión de carreras ---
+# Parámetro k de model/negbin_model.py (varianza = mu + mu^2/k). Entre más
+# chico, más sobredispersión (cola gorda) vs. Poisson/Skellam. Se calibra
+# por máxima verosimilitud contra resultados reales (ver
+# scripts/calibrate_dispersion.py) en cuanto haya ~100 juegos con resultado
+# en la base de datos.
+#
+# Valor actual: 7.0 -- PRIOR de literatura sabermétrica, sin calibrar
+# todavía contra datos propios (0 juegos con resultado real disponibles al
+# momento de fijar esto). k entre 5 y 10 es el rango típico reportado para
+# carreras por equipo por juego en MLB. Recalibrar corriendo
+# scripts/calibrate_dispersion.py apenas se acumulen suficientes resultados,
+# y actualizar este comentario con la fecha y el número de juegos usados.
+NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "7.0"))
+
 # --- The Odds API: protección de presupuesto ---
 # El free tier de The Odds API es ~500 requests/mes — el más limitado de
 # todas las APIs que usa este proyecto (MLB Stats API y Open-Meteo no

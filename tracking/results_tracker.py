@@ -68,6 +68,19 @@ def update_results(days_back: int = 5) -> int:
     return updated
 
 
+# Un modelo por entrada: (campo de prob. del visitante, campo de prob. del
+# local). compute_metrics() recorre esto para reportar accuracy/Brier/Log
+# Loss de heurístico, Skellam y Binomial Negativo por separado, en vez de
+# mezclarlos -- cada modelo puede tener una fila con ese campo en None
+# (predicciones guardadas antes de que existiera ese modelo), y eso NO debe
+# contarse como una falla del modelo, solo como "sin dato para este juego".
+_MODEL_FIELDS = {
+    "heuristic": ("away_model_prob", "home_model_prob"),
+    "skellam": ("away_skellam_prob", "home_skellam_prob"),
+    "negbin": ("away_negbin_prob", "home_negbin_prob"),
+}
+
+
 def validate_probabilities(pred: GameAnalysis) -> bool:
     """
     Sanity check de rango [0,1] y de que las probabilidades del mismo
@@ -78,12 +91,17 @@ def validate_probabilities(pred: GameAnalysis) -> bool:
     """
     errors = []
 
-    for field in ("away_model_prob", "home_model_prob", "away_skellam_prob", "home_skellam_prob"):
-        p = getattr(pred, field)
-        if p is None:
-            continue
-        if not (0.0 <= p <= 1.0):
-            errors.append(f"{field}={p} fuera de rango [0,1]")
+    for _, (away_field, home_field) in _MODEL_FIELDS.items():
+        for field in (away_field, home_field):
+            # getattr con default None -- no todo caller pasa un GameAnalysis
+            # real (los tests unitarios usan objetos simples que imitan solo
+            # los campos que necesitan), y una fila sin este atributo debe
+            # tratarse igual que un valor ausente, no como un error.
+            p = getattr(pred, field, None)
+            if p is None:
+                continue
+            if not (0.0 <= p <= 1.0):
+                errors.append(f"{field}={p} fuera de rango [0,1]")
 
     # compute_metrics() solo depende de home_model_prob -- away_model_prob
     # puede faltar en filas parciales/antiguas, así que el chequeo de suma
@@ -97,6 +115,51 @@ def validate_probabilities(pred: GameAnalysis) -> bool:
         logger.error(f"Validación de probabilidades fallida para game_pk={pred.game_pk}: {errors}")
         return False
     return True
+
+
+def _compute_model_metrics(rows: list, home_field: str) -> dict:
+    """
+    Accuracy/Brier/Log Loss de UN modelo (identificado por su campo de
+    probabilidad del local en GameAnalysis), sobre las filas de `rows` que
+    sí tienen ese campo -- una fila con home_field=None (modelo agregado
+    después de que esa predicción se guardó) se excluye de ESE modelo sin
+    afectar a los demás ni contarse como fallida.
+    """
+    correct = 0
+    brier_sum = 0.0
+    log_loss_sum = 0.0
+    n = 0
+
+    for pred, result in rows:
+        home_prob = getattr(pred, home_field, None)
+        if home_prob is None:
+            continue
+        n += 1
+
+        actual_home_win = 1 if result.winner == "home" else 0
+        predicted_winner_is_home = home_prob > 0.5
+        actual_winner_is_home = actual_home_win == 1
+
+        if predicted_winner_is_home == actual_winner_is_home:
+            correct += 1
+
+        brier_sum += (home_prob - actual_home_win) ** 2
+
+        p_clipped = min(max(home_prob, 1e-15), 1 - 1e-15)
+        log_loss_sum += -(
+            actual_home_win * math.log(p_clipped) +
+            (1 - actual_home_win) * math.log(1 - p_clipped)
+        )
+
+    if n == 0:
+        return {"n_games": 0, "accuracy": None, "brier_score": None, "log_loss": None}
+
+    return {
+        "n_games": n,
+        "accuracy": correct / n,
+        "brier_score": brier_sum / n,
+        "log_loss": log_loss_sum / n,
+    }
 
 
 def compute_metrics(days: int = 30) -> dict:
@@ -141,7 +204,9 @@ def compute_metrics(days: int = 30) -> dict:
     rows = validated_rows
 
     if not rows:
-        return {"n_games": 0, "accuracy": None, "brier_score": None}
+        return {"n_games": 0, "accuracy": None, "brier_score": None,
+                "by_model": {name: {"n_games": 0, "accuracy": None, "brier_score": None, "log_loss": None}
+                             for name in _MODEL_FIELDS}}
 
     correct = 0
     brier_sum = 0.0
@@ -173,6 +238,16 @@ def compute_metrics(days: int = 30) -> dict:
             market_n += 1
 
     n = len(rows)
+    # by_model reporta heurístico/Skellam/Binomial Negativo por separado,
+    # cada uno solo sobre las filas que sí tienen ese campo -- "heuristic"
+    # aquí es un recálculo redundante de lo mismo que ya está arriba (n,
+    # accuracy, brier_score, log_loss), a propósito: los campos de nivel
+    # superior existen desde antes de que hubiera más de un modelo y no se
+    # tocan (otros callers/tests dependen de esas claves), by_model es la
+    # extensión aditiva para comparar los tres.
+    by_model = {name: _compute_model_metrics(rows, home_field)
+                for name, (_, home_field) in _MODEL_FIELDS.items()}
+
     return {
         "n_games": n,
         "accuracy": correct / n,
@@ -180,6 +255,7 @@ def compute_metrics(days: int = 30) -> dict:
         "log_loss": log_loss_sum / n,
         "market_brier_score": (market_brier_sum / market_n) if market_n else None,
         "market_n_games": market_n,
+        "by_model": by_model,
     }
 
 
@@ -329,6 +405,18 @@ def print_performance_report(days: int = 30) -> None:
         veredicto = "tu modelo le gana al mercado" if diff > 0 else "el mercado le gana a tu modelo"
         print(f"Brier del mercado: {metrics['market_brier_score']:.4f}  "
               f"(consenso sin vig, {metrics['market_n_games']} juegos con cuota) — {veredicto}")
+
+    by_model = metrics.get("by_model") or {}
+    _MODEL_LABELS = {"heuristic": "Heurístico", "skellam": "Skellam", "negbin": "Binomial Negativo"}
+    if any(by_model.get(name, {}).get("n_games") for name in _MODEL_LABELS):
+        print("\n--- Comparación de modelos (mismos juegos, cuando el dato existe) ---")
+        for name, label in _MODEL_LABELS.items():
+            m = by_model.get(name, {})
+            if not m.get("n_games"):
+                print(f"{label:<18} sin datos todavía (el modelo se agregó después de estas predicciones)")
+                continue
+            print(f"{label:<18} n={m['n_games']:<4} accuracy={m['accuracy']:.1%}  "
+                  f"brier={m['brier_score']:.4f}  log_loss={m['log_loss']:.4f}")
 
     pick_perf = compute_pick_performance(days=days)
     print()

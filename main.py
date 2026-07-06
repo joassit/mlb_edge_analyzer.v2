@@ -25,7 +25,7 @@ from tracking.results_tracker import update_results, print_performance_report, a
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
-    PARK_FACTOR_WEIGHT, WEATHER_CORRECTION,
+    PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION,
 )
 from version_info import get_git_commit
 
@@ -178,12 +178,14 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "market_run_line": manual_rl, "market_totals": manual_totals,
         "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
         "park_factor_weight": PARK_FACTOR_WEIGHT, "weather_correction": WEATHER_CORRECTION,
+        "negbin_dispersion": NEGBIN_DISPERSION,
     }
 
     prediction = predict_from_raw_inputs(raw_inputs)
     away_mu, home_mu = prediction["away_proj_runs"], prediction["home_proj_runs"]
     away_model_prob, home_model_prob = prediction["away_model_prob"], prediction["home_model_prob"]
     away_skellam_prob, home_skellam_prob = prediction["away_skellam_prob"], prediction["home_skellam_prob"]
+    away_negbin_prob, home_negbin_prob = prediction["away_negbin_prob"], prediction["home_negbin_prob"]
     home_covers_rl_prob, away_covers_rl_prob = prediction["home_covers_rl_prob"], prediction["away_covers_rl_prob"]
     fair_total_runs = prediction["fair_total_runs"]
 
@@ -290,6 +292,8 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "home_model_prob": home_model_prob,
         "away_skellam_prob": away_skellam_prob,
         "home_skellam_prob": home_skellam_prob,
+        "away_negbin_prob": away_negbin_prob,
+        "home_negbin_prob": home_negbin_prob,
         "home_covers_rl_prob": home_covers_rl_prob,
         "away_covers_rl_prob": away_covers_rl_prob,
         "fair_total_runs": round(fair_total_runs, 2),

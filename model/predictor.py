@@ -10,10 +10,11 @@ congela, así que un snapshot de hace meses se puede recalcular con esto sin
 volver a golpear ninguna API.
 """
 
-from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION
+from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION
 from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA
 from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
+from model.negbin_model import negbin_win_prob
 from model.markets import run_line_prob, fair_total_line
 from model.adjustments import shrunk_era
 
@@ -30,6 +31,7 @@ def predict_from_raw_inputs(raw: dict) -> dict:
     # arriba cae al ERA crudo si el snapshot no trae innings_pitched.
     park_factor_weight = raw.get("park_factor_weight", PARK_FACTOR_WEIGHT)
     weather_correction = raw.get("weather_correction", WEATHER_CORRECTION)
+    negbin_dispersion = raw.get("negbin_dispersion", NEGBIN_DISPERSION)
 
     # Shrinkage del ERA del abridor hacia el promedio de liga, en proporción
     # a las entradas lanzadas -- sin esto, un abridor con 15 IP de muestra
@@ -76,6 +78,9 @@ def predict_from_raw_inputs(raw: dict) -> dict:
     home_skellam_prob = skellam_win_prob(home_mu, away_mu)
     away_skellam_prob = 1.0 - home_skellam_prob
 
+    home_negbin_prob = negbin_win_prob(home_mu, away_mu, negbin_dispersion)
+    away_negbin_prob = 1.0 - home_negbin_prob
+
     home_covers_rl_prob, away_covers_rl_prob = run_line_prob(home_mu, away_mu)
     fair_total_runs = fair_total_line(home_mu, away_mu)
 
@@ -86,6 +91,8 @@ def predict_from_raw_inputs(raw: dict) -> dict:
         "home_model_prob": home_model_prob,
         "away_skellam_prob": away_skellam_prob,
         "home_skellam_prob": home_skellam_prob,
+        "away_negbin_prob": away_negbin_prob,
+        "home_negbin_prob": home_negbin_prob,
         "home_covers_rl_prob": home_covers_rl_prob,
         "away_covers_rl_prob": away_covers_rl_prob,
         "fair_total_runs": fair_total_runs,

@@ -94,6 +94,8 @@ class GameAnalysis(Base):
     home_proj_runs = Column(Float, nullable=True)
     away_skellam_prob = Column(Float, nullable=True)
     home_skellam_prob = Column(Float, nullable=True)
+    away_negbin_prob = Column(Float, nullable=True)
+    home_negbin_prob = Column(Float, nullable=True)
     home_covers_rl_prob = Column(Float, nullable=True)
     away_covers_rl_prob = Column(Float, nullable=True)
     fair_total_runs = Column(Float, nullable=True)
