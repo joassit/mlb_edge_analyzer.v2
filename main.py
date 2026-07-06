@@ -119,9 +119,42 @@ def _mu_family_agrees_internally(away_skellam_prob: float, away_negbin_prob: flo
     """
     Skellam y NB2 reciben el mismo home_mu/away_mu (mismo motor
     project_team_runs()) -- son la misma "familia mu", no dos votos
-    independientes. Devuelve False solo en el caso RARO donde el supuesto
-    de dispersión (Poisson vs. Binomial Negativo) alcanza a cambiar cuál
-    lado queda arriba de 0.5 -- señal genuina de un juego al límite exacto.
+    independientes. Teóricamente detecta cuando Skellam y NB2 discrepan en
+    dirección (cuál lado queda arriba de 0.5).
+
+    En la práctica, con k=7.0 (o cualquier k razonable para carreras de
+    MLB), esto es prácticamente inalcanzable para mu_home != mu_away --
+    verificado con un barrido exhaustivo de 202,500 combinaciones de
+    mu_home/mu_away (rango 1.0-10.0, paso 0.02, con away_prob = 1 -
+    home_prob calculado igual que model/predictor.py) y forzando k hasta
+    0.01 (dispersión absurda, muy por debajo de cualquier valor con
+    sentido para un juego real): cero discrepancias de dirección cuando
+    los dos mu son distintos.
+
+    El único disparador real conocido es el empate EXACTO (mu_home ==
+    mu_away bit a bit) -- y ni siquiera ahí es universal: de 450 valores
+    de mu probados en empate exacto, solo ~30% dispararon el artefacto
+    (ej. mu=1.0 sí, mu=4.5 no). La causa es un residuo de punto flotante
+    de ~2e-16 en la renormalización de scipy.stats.skellam.cdf dentro de
+    skellam_win_prob() -- cuya DIRECCIÓN (por encima o por debajo de 0.5)
+    depende del valor específico de mu, no de un sesgo consistente. La
+    suma truncada de negbin_win_prob() no arrastra ese residuo (da 0.5
+    exacto en todo empate), así que cuando el residuo de Skellam cae del
+    lado que cruza 0.5 tras el complemento away=1-home, se ve como
+    discrepancia; cuando cae del otro lado, no. No es una discrepancia
+    real de modelo ni una señal de que la dispersión cambie el favorito
+    -- ver tests/test_model_agreement_real.py para la verificación
+    completa con las funciones reales (incluye la corrección de una
+    primera investigación que comparaba mal el lado "away").
+
+    Se deja la comparación con `>` estricto (sin tolerancia/epsilon) a
+    propósito: este flag no alimenta flag_review ni ningún pick/edge/EV
+    real (solo un log informativo y una línea del reporte), así que el
+    artefacto no tiene ningún costo -- agregar un epsilon introduciría un
+    número mágico nuevo a mantener por un caso sin consecuencia real. Este
+    flag existe como red de seguridad ante ese caso límite y ante un k
+    futuro mucho más extremo del actual, no como detector de un fenómeno
+    que ocurra hoy.
     """
     return (away_skellam_prob > 0.5) == (away_negbin_prob > 0.5)
 
@@ -239,15 +272,16 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
     if fav is not None and fav["side"] is not None and away_edge is not None:
         model_edge_vs_market_favorite = home_edge if fav["side"] == "home" else away_edge
 
-    # mu_family_agrees_internally en False es RARO -- pasa solo cuando el
-    # juego está tan cerrado que el supuesto de dispersión (Poisson vs.
-    # Binomial Negativo) alcanza a cambiar cuál lado queda arriba de 0.5.
-    # Señal genuina de un caso límite, no ruido -- queda en el log (además
-    # de en el reporte, ver reports/generate_report.py) en vez de esconderse.
+    # mu_family_agrees_internally en False es prácticamente inalcanzable con
+    # valores reales de MLB (ver docstring de la función) -- si aparece, casi
+    # seguro es el artefacto de punto flotante del empate exacto mu_home==
+    # mu_away, no una señal real de que la dispersión cambió el favorito.
+    # Se deja el log igual: barato, y sirve de red de seguridad si algún día
+    # sí ocurre por una razón real (ej. un k futuro mucho más extremo).
     if not _mu_family_agrees_internally(away_skellam_prob, away_negbin_prob):
         logger.info(f"{g['away_team']} @ {g['home_team']}: Skellam y NB2 discrepan entre sí en el "
                     f"favorito (away: Skellam={away_skellam_prob:.3f} NB2={away_negbin_prob:.3f}) -- "
-                    f"juego en el límite exacto, revisar mu proyectado")
+                    f"probablemente el artefacto de punto flotante del empate exacto, no una señal real")
 
     # Candidato a revisión: edge por encima del umbral Y los dos VOTOS
     # reales (heurístico vs. familia mu Skellam+NB2) de acuerdo en el

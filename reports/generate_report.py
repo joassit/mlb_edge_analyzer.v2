@@ -258,8 +258,9 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None) -> None:
                 skellam_favors_away = r["away_skellam_prob"] > 0.5
                 negbin_favors_away = r["away_negbin_prob"] > 0.5
                 if skellam_favors_away != negbin_favors_away:
-                    print("  🔀 Skellam y NB2 discrepan entre sí (raro -- revisar mu "
-                          "proyectado, el juego está en el límite exacto)")
+                    print("  🔀 Skellam y NB2 discrepan entre sí (prácticamente inalcanzable con "
+                          "mu/k reales -- casi seguro el artefacto de punto flotante del empate "
+                          "exacto, no una señal real de modelo)")
 
         if r.get("home_covers_rl_prob") is not None:
             print(f"  Run Line -> {r['home_team']} -1.5: {r['home_covers_rl_prob']:.1%}   "
