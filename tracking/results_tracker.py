@@ -295,6 +295,26 @@ def compute_bet_performance(days: int = 30) -> dict:
     }
 
 
+def _summarize_picks(subset: list) -> dict:
+    """
+    Hit rate y ROI nocional (1u pareja por pick) de una lista de Pick ya
+    liquidados (result en win/loss/push). Módulo-level a propósito: la
+    usan tanto compute_pick_performance() (ventana rodante de N días) como
+    compute_daily_review() (un solo día) -- misma definición de hit
+    rate/ROI en ambos, nunca dos fórmulas que diverjan con el tiempo.
+    """
+    if not subset:
+        return {"n_picks": 0, "win_rate": None, "roi": None}
+    decided = [p for p in subset if p.result != "push"]
+    wins = sum(1 for p in decided if p.result == "win")
+    total_profit = sum(p.profit_unit for p in subset if p.profit_unit is not None)
+    return {
+        "n_picks": len(subset),
+        "win_rate": (wins / len(decided)) if decided else None,
+        "roi": (total_profit / len(subset)) if subset else None,
+    }
+
+
 def compute_pick_performance(days: int = 30) -> dict:
     """
     Desempeño de los Picks generados por el sistema — en unidades
@@ -318,30 +338,134 @@ def compute_pick_performance(days: int = 30) -> dict:
     finally:
         session.close()
 
-    def _summarize(subset: list) -> dict:
-        if not subset:
-            return {"n_picks": 0, "win_rate": None, "roi": None}
-        decided = [p for p in subset if p.result != "push"]
-        wins = sum(1 for p in decided if p.result == "win")
-        total_profit = sum(p.profit_unit for p in subset if p.profit_unit is not None)
-        return {
-            "n_picks": len(subset),
-            "win_rate": (wins / len(decided)) if decided else None,
-            "roi": (total_profit / len(subset)) if subset else None,
+    by_market = {}
+    for market in ("moneyline", "run_line", "totals"):
+        market_picks = [p for p in picks if p.market == market]
+        by_market[market] = {
+            "real": _summarize_picks([p for p in market_picks if not p.forced]),
+            "forced": _summarize_picks([p for p in market_picks if p.forced]),
         }
+
+    return {
+        "overall_real": _summarize_picks([p for p in picks if not p.forced]),
+        "overall_forced": _summarize_picks([p for p in picks if p.forced]),
+        "by_market": by_market,
+    }
+
+
+def _pick_to_dict(pick: "Pick | None") -> dict | None:
+    """Representación plana de un Pick liquidado, para el reporte diario
+    -- reports/generate_report.py no debe importar el modelo SQLAlchemy
+    solo para leer estos campos."""
+    if pick is None:
+        return None
+    return {
+        "market": pick.market,
+        "selection": pick.selection,
+        "line": pick.line,
+        "model_prob": pick.model_prob,
+        "forced": pick.forced,
+        "result": pick.result,
+        "profit_unit": pick.profit_unit,
+    }
+
+
+def compute_daily_review(review_date: str) -> dict:
+    """
+    Revisión detallada de UN día específico (normalmente ayer): por
+    partido, con los 3 mercados (moneyline/run_line/totals) uno al lado
+    del otro -- a diferencia de compute_metrics()/compute_pick_performance()
+    (ventana rodante de N días), esto es exactamente un día, pensado para
+    la Sección 1 del reporte diario.
+
+    Reutiliza el mismo criterio de dedup por game_pk (se queda con la fila
+    de mayor id si el juego se recalculó con una model_version nueva ese
+    día) y la misma validate_probabilities() que compute_metrics(), para
+    que el Brier Score de este reporte no se calcule sobre una fila
+    corrupta ni cuente un juego recalculado dos veces.
+    """
+    session = SessionLocal()
+    try:
+        analysis_rows = (
+            session.query(GameAnalysis)
+            .filter(GameAnalysis.game_date == review_date)
+            .order_by(GameAnalysis.id.desc())
+            .all()
+        )
+        results_by_pk = {
+            r.game_pk: r
+            for r in session.query(ActualResult).filter(ActualResult.game_date == review_date).all()
+        }
+        picks = (
+            session.query(Pick)
+            .filter(Pick.game_date == review_date, Pick.result != "pending")
+            .all()
+        )
+    finally:
+        session.close()
+
+    seen_pks = set()
+    deduped_analysis = []
+    for pred in analysis_rows:
+        if pred.game_pk in seen_pks:
+            continue
+        seen_pks.add(pred.game_pk)
+        deduped_analysis.append(pred)
+
+    picks_by_game = {}
+    for p in picks:
+        picks_by_game.setdefault(p.game_pk, {})[p.market] = p
+
+    games = []
+    brier_sum = 0.0
+    brier_n = 0
+
+    for pred in deduped_analysis:
+        result = results_by_pk.get(pred.game_pk)
+        if result is None:
+            continue  # el juego de ayer todavía no tiene marcador real (raro, pero posible)
+        if not validate_probabilities(pred):
+            continue
+
+        proj_margin = proj_total = None
+        if pred.away_proj_runs is not None and pred.home_proj_runs is not None:
+            proj_margin = pred.home_proj_runs - pred.away_proj_runs
+            proj_total = pred.away_proj_runs + pred.home_proj_runs
+
+        game_picks = picks_by_game.get(pred.game_pk, {})
+        games.append({
+            "game_pk": pred.game_pk,
+            "away_team": pred.away_team, "home_team": pred.home_team,
+            "away_score": result.away_score, "home_score": result.home_score,
+            "actual_margin": result.home_score - result.away_score,
+            "actual_total": result.total_runs,
+            "proj_margin": proj_margin, "proj_total": proj_total,
+            "picks": {
+                "moneyline": _pick_to_dict(game_picks.get("moneyline")),
+                "run_line": _pick_to_dict(game_picks.get("run_line")),
+                "totals": _pick_to_dict(game_picks.get("totals")),
+            },
+        })
+
+        if pred.home_model_prob is not None:
+            actual_home_win = 1 if result.winner == "home" else 0
+            brier_sum += (pred.home_model_prob - actual_home_win) ** 2
+            brier_n += 1
 
     by_market = {}
     for market in ("moneyline", "run_line", "totals"):
         market_picks = [p for p in picks if p.market == market]
         by_market[market] = {
-            "real": _summarize([p for p in market_picks if not p.forced]),
-            "forced": _summarize([p for p in market_picks if p.forced]),
+            "real": _summarize_picks([p for p in market_picks if not p.forced]),
+            "forced": _summarize_picks([p for p in market_picks if p.forced]),
         }
 
     return {
-        "overall_real": _summarize([p for p in picks if not p.forced]),
-        "overall_forced": _summarize([p for p in picks if p.forced]),
+        "review_date": review_date,
+        "n_games": len(games),
+        "games": games,
         "by_market": by_market,
+        "brier_score": (brier_sum / brier_n) if brier_n else None,
     }
 
 

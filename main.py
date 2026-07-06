@@ -5,7 +5,7 @@ Orquestador: Realiza auditoría del día anterior y proyecciones del día actual
 
 import logging
 import time
-from datetime import date
+from datetime import date, timedelta
 from logging_config import setup_logging
 from data.mlb_api import get_schedule
 from data.stats import (
@@ -20,8 +20,8 @@ from model.edge import implied_prob, edge, expected_value, market_favorite, no_v
 from model.picks import generate_pick_candidates, select_picks_for_game
 from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
-from reports.generate_report import print_report, export_csv, export_picks_csv
-from tracking.results_tracker import update_results, print_performance_report, audit_totals
+from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
+from tracking.results_tracker import update_results, print_performance_report, audit_totals, compute_daily_review
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
@@ -333,12 +333,23 @@ def run_pipeline():
     git_commit = get_git_commit()
     logger.info(f"Iniciando run_pipeline() -- model_version={MODEL_VERSION} git_commit={git_commit}")
 
-    # 1. Auditoría de resultados y desempeño del día(s) anterior(es)
+    # 1. Auditoría de resultados y desempeño del día(s) anterior(es) --
+    # ventana rodante de 30 días (print_performance_report/audit_totals),
+    # complementaria a la Sección 1 del reporte diario de abajo (que es
+    # exactamente UN día, para revisar ayer partido por partido).
     print("\n--- 🔍 AUDITANDO RESULTADOS DEL DÍA ANTERIOR ---")
     updated = update_results()
     print(f"Resultados actualizados: {updated}")
     print_performance_report()
     audit_totals()
+
+    # Sección 1 del reporte diario: revisión de ayer, mercado por mercado.
+    # SIEMPRE se imprime (aunque no haya datos) y SIEMPRE antes de la
+    # Sección 2 (predicciones de hoy) -- print_yesterday_review() maneja
+    # el caso "sin datos" explícitamente, nunca se omite en silencio.
+    yesterday_str = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_review = compute_daily_review(yesterday_str)
+    print_yesterday_review(yesterday_review)
 
     # 2. Análisis
     print("\n--- ⚾ GENERANDO PREDICCIONES PARA HOY ---")
