@@ -31,7 +31,6 @@ Uso:
 
 from datetime import date
 
-import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 

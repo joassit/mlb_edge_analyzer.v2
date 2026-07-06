@@ -4,8 +4,6 @@ de UN día específico (partido por partido, mercado por mercado) que
 alimenta la Sección 1 del reporte diario.
 """
 
-from datetime import date
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
