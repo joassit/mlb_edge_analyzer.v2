@@ -259,6 +259,120 @@ def compute_metrics(days: int = 30) -> dict:
     }
 
 
+# Rango [low, high) de confianza en el favorito declarado -- confidence =
+# max(prob, 1-prob) siempre cae en [0.5, 1.0], así que el último bucket usa
+# 1.01 como tope para incluir el caso límite confidence == 1.0 sin un
+# operador distinto solo para ese bucket.
+_CALIBRATION_BUCKETS = [
+    (0.50, 0.55, "50-55%"),
+    (0.55, 0.60, "55-60%"),
+    (0.60, 0.65, "60-65%"),
+    (0.65, 0.70, "65-70%"),
+    (0.70, 0.75, "70-75%"),
+    (0.75, 1.01, "75%+"),
+]
+
+
+def _bucket_index_for_confidence(confidence: float) -> int | None:
+    for i, (low, high, _label) in enumerate(_CALIBRATION_BUCKETS):
+        if low <= confidence < high:
+            return i
+    return None  # confidence fuera de [0.5, 1.0] -- no debería pasar nunca
+
+
+def _compute_model_calibration(rows: list, home_field: str) -> dict:
+    """
+    Calibración de UN modelo (su campo de probabilidad del local) sobre
+    `rows` ya deduplicadas y validadas -- agrupa por bucket de confianza en
+    el favorito declarado (max(prob, 1-prob)) y compara hit_rate real
+    contra la confianza promedio que el modelo dijo tener en ese bucket.
+
+    gap = hit_rate - avg_confidence:
+      gap > 0 -> el modelo está SUBconfiado ahí (acierta más de lo que dice
+                 creer -- hay value sin explotar).
+      gap < 0 -> el modelo está SOBREconfiado ahí (acierta menos de lo que
+                 dice creer -- ahí es donde se pierde dinero apostando).
+    """
+    bucket_totals = [{"n": 0, "hits": 0, "confidence_sum": 0.0} for _ in _CALIBRATION_BUCKETS]
+    n_games = 0
+    n_skipped = 0
+
+    for pred, result in rows:
+        home_prob = getattr(pred, home_field, None)
+        if home_prob is None:
+            n_skipped += 1
+            continue
+        n_games += 1
+
+        confidence = max(home_prob, 1.0 - home_prob)
+        favorite_is_home = home_prob >= 0.5
+        actual_home_win = (result.winner == "home")
+        hit = favorite_is_home == actual_home_win
+
+        idx = _bucket_index_for_confidence(confidence)
+        if idx is None:
+            continue
+        bucket_totals[idx]["n"] += 1
+        bucket_totals[idx]["hits"] += 1 if hit else 0
+        bucket_totals[idx]["confidence_sum"] += confidence
+
+    buckets = []
+    for (_low, _high, label), totals in zip(_CALIBRATION_BUCKETS, bucket_totals):
+        n = totals["n"]
+        if n == 0:
+            buckets.append({"label": label, "n": 0, "hits": 0,
+                             "hit_rate": None, "avg_confidence": None, "gap": None})
+            continue
+        hit_rate = totals["hits"] / n
+        avg_confidence = totals["confidence_sum"] / n
+        buckets.append({
+            "label": label, "n": n, "hits": totals["hits"],
+            "hit_rate": hit_rate, "avg_confidence": avg_confidence,
+            "gap": hit_rate - avg_confidence,
+        })
+
+    return {"n_games": n_games, "n_skipped": n_skipped, "buckets": buckets}
+
+
+def compute_calibration(days: int = 90) -> dict:
+    """
+    Calibración por bucket de confianza (ver _compute_model_calibration)
+    para los 3 modelos de _MODEL_FIELDS, sobre la misma ventana de días,
+    mismo dedup por game_pk y misma validate_probabilities() que
+    compute_metrics() -- deliberadamente NO comparte código con
+    compute_metrics() más allá de eso (no se toca esa función), para que
+    un cambio futuro en una no arrastre a la otra por accidente.
+    """
+    from datetime import date, timedelta
+
+    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(GameAnalysis, ActualResult)
+            .join(ActualResult, GameAnalysis.game_pk == ActualResult.game_pk)
+            .filter(GameAnalysis.game_date >= cutoff)
+            .order_by(GameAnalysis.id.desc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    seen_pks = set()
+    deduped_rows = []
+    for pred, result in rows:
+        if pred.game_pk in seen_pks:
+            continue
+        seen_pks.add(pred.game_pk)
+        deduped_rows.append((pred, result))
+
+    validated_rows = [(pred, result) for pred, result in deduped_rows if validate_probabilities(pred)]
+
+    return {name: _compute_model_calibration(validated_rows, home_field)
+            for name, (_, home_field) in _MODEL_FIELDS.items()}
+
+
 def compute_bet_performance(days: int = 30) -> dict:
     """
     Desempeño de las apuestas REALES que registraste (no solo predicciones).
@@ -588,6 +702,48 @@ def print_performance_report(days: int = 30) -> None:
         print(f"CLV promedio:        {clv_perf['avg_clv']:+.1%}  "
               f"(positivo = bateaste la línea de cierre)")
         print(f"% con CLV positivo:  {clv_perf['positive_clv_rate']:.1%}")
+    print()
+
+
+_CALIBRATION_MODEL_LABELS = {"heuristic": "Heurístico", "skellam": "Skellam", "negbin": "Binomial Negativo"}
+_SMALL_SAMPLE_THRESHOLD = 20
+
+
+def print_calibration_report(days: int = 90) -> None:
+    """
+    Calibración por bucket de confianza (ver compute_calibration) para los
+    3 modelos -- ¿cuándo el modelo dice "60% de confianza", de verdad
+    acierta 60% de las veces? Un gap negativo sostenido en un bucket es
+    donde el modelo está sobreconfiado y perdería dinero apostando ahí
+    aunque su accuracy general se vea bien.
+    """
+    calibration = compute_calibration(days=days)
+
+    print(f"\n{'=' * 78}")
+    print(f"{'CALIBRACIÓN POR BUCKET DE CONFIANZA — últimos ' + str(days) + ' días':^78}")
+    print(f"{'=' * 78}")
+
+    for name, label in _CALIBRATION_MODEL_LABELS.items():
+        model_cal = calibration.get(name, {"n_games": 0, "n_skipped": 0, "buckets": []})
+        print(f"\n--- {label} ---")
+
+        if model_cal["n_games"] == 0:
+            skip_note = f" ({model_cal['n_skipped']} predicción(es) sin este dato, omitidas)" if model_cal["n_skipped"] else ""
+            print(f"Sin datos suficientes todavía.{skip_note}")
+            continue
+
+        print(f"{'Rango':<8} | {'N':>4} | {'Aciertos':>8} | {'Efectividad':>11} | {'Confianza decl.':>15} | {'Gap':>7}")
+        print("-" * 78)
+        for b in model_cal["buckets"]:
+            if b["n"] == 0:
+                print(f"{b['label']:<8} | {0:>4} | {'-':>8} | {'-':>11} | {'-':>15} | {'-':>7}")
+                continue
+            nota = "  (muestra chica)" if b["n"] < _SMALL_SAMPLE_THRESHOLD else ""
+            print(f"{b['label']:<8} | {b['n']:>4} | {b['hits']:>8} | {b['hit_rate']:>10.1%} | "
+                  f"{b['avg_confidence']:>14.1%} | {b['gap']:>+6.1%}{nota}")
+
+        if model_cal["n_skipped"]:
+            print(f"({model_cal['n_skipped']} predicción(es) sin probabilidad de este modelo, omitidas de arriba)")
     print()
 
 
