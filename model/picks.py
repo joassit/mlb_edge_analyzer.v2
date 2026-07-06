@@ -113,7 +113,13 @@ def generate_pick_candidates(prediction: dict, market_lines: dict,
         else:
             source_favors_home = home_prob > 0.5
             heuristic_favors_home = prediction["home_model_prob"] > 0.5
-            directional_discrepancy = source_favors_home != heuristic_favors_home
+            # bool() explícito: home_prob/heuristic_favors_home suelen venir de
+            # skellam_win_prob()/negbin_win_prob() (numpy.float64 vía scipy), y
+            # una comparación entre ellos da numpy.bool_, no el bool nativo de
+            # Python -- comparar ese resultado con `is True`/`is False` (como
+            # hacen los tests) fallaría aunque el valor sea correcto. Mismo
+            # tratamiento que ya recibe flag_review en main.py.
+            directional_discrepancy = bool(source_favors_home != heuristic_favors_home)
 
         best = _best_side("moneyline", [
             ("home", None, home_prob, ml.get("home_odds"), ml.get("home_novig")),

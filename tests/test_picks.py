@@ -6,7 +6,8 @@ sin tocar red ni base de datos.
 from config import NEGBIN_DISPERSION
 from model.picks import generate_pick_candidates, select_picks_for_game
 from model.markets import run_line_prob, totals_prob
-from model.negbin_model import negbin_run_line_prob, negbin_totals_prob
+from model.negbin_model import negbin_run_line_prob, negbin_totals_prob, negbin_win_prob
+from model.skellam_model import skellam_win_prob
 
 
 def _prediction(**overrides) -> dict:
@@ -296,3 +297,72 @@ def test_run_line_and_totals_fall_back_to_skellam_when_heuristic_requested():
     over_poisson, under_poisson = totals_prob(3.5, 5.0, 8.5)
     expected_totals = over_poisson if totals["selection"] == "over" else under_poisson
     assert abs(totals["model_prob"] - expected_totals) < 1e-9
+
+
+# --- directional_discrepancy con valores REALES (numpy.bool_ vs bool nativo) ---
+#
+# Las pruebas test_directional_discrepancy_* de arriba usan la fixture
+# _prediction(), que solo tiene floats de Python escritos a mano -- pasan
+# aunque directional_discrepancy no esté envuelto en bool(), porque nunca
+# ejercitan la ruta real vía scipy (comparar dos floats de Python siempre da
+# bool nativo). Las de aquí alimentan home_skellam_prob/home_negbin_prob con
+# la salida REAL de skellam_win_prob()/negbin_win_prob() (numpy.float64) --
+# la misma ruta que sigue el pipeline en producción -- y verifican el tipo
+# explícitamente, no solo el valor, para que un futuro bool() removido por
+# accidente vuelva a fallar aquí (mismo patrón que
+# tests/test_model_agreement_real.py para mu_family_internal_disagreement).
+
+def test_directional_discrepancy_is_native_bool_and_true_with_real_skellam_values():
+    mu_home, mu_away = 3.0, 5.5  # Skellam real desfavorece al local
+    home_skellam_prob = skellam_win_prob(mu_home, mu_away)
+    away_skellam_prob = 1.0 - home_skellam_prob
+    assert home_skellam_prob < 0.5
+
+    # Heurístico a propósito del lado contrario -- discrepancia real, no inventada.
+    prediction = _prediction(home_model_prob=0.60, away_model_prob=0.40,
+                              home_skellam_prob=home_skellam_prob, away_skellam_prob=away_skellam_prob,
+                              home_proj_runs=mu_home, away_proj_runs=mu_away)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+    })
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+
+    assert type(ml["directional_discrepancy"]) is bool  # no numpy.bool_
+    assert ml["directional_discrepancy"] is True
+
+
+def test_directional_discrepancy_is_native_bool_and_false_when_real_skellam_values_agree():
+    mu_home, mu_away = 5.5, 3.0  # Skellam real favorece al local
+    home_skellam_prob = skellam_win_prob(mu_home, mu_away)
+    away_skellam_prob = 1.0 - home_skellam_prob
+    assert home_skellam_prob > 0.5
+
+    # Heurístico coincide con Skellam -- sin discrepancia.
+    prediction = _prediction(home_model_prob=0.60, away_model_prob=0.40,
+                              home_skellam_prob=home_skellam_prob, away_skellam_prob=away_skellam_prob,
+                              home_proj_runs=mu_home, away_proj_runs=mu_away)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": -150, "away_odds": 130, "home_novig": 0.60, "away_novig": 0.40},
+    })
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+
+    assert type(ml["directional_discrepancy"]) is bool
+    assert ml["directional_discrepancy"] is False
+
+
+def test_directional_discrepancy_is_native_bool_and_true_with_real_negbin_values():
+    mu_home, mu_away = 3.0, 5.5  # NB2 real desfavorece al local
+    home_negbin_prob = negbin_win_prob(mu_home, mu_away, NEGBIN_DISPERSION)
+    away_negbin_prob = 1.0 - home_negbin_prob
+    assert home_negbin_prob < 0.5
+
+    prediction = _prediction(home_model_prob=0.60, away_model_prob=0.40,
+                              home_negbin_prob=home_negbin_prob, away_negbin_prob=away_negbin_prob,
+                              home_proj_runs=mu_home, away_proj_runs=mu_away)
+    candidates = generate_pick_candidates(prediction, {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+    }, prob_source="negbin")
+    ml = next(c for c in candidates if c["market"] == "moneyline")
+
+    assert type(ml["directional_discrepancy"]) is bool
+    assert ml["directional_discrepancy"] is True
