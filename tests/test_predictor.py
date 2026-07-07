@@ -101,3 +101,21 @@ def test_predict_from_raw_inputs_run_line_probs_unaffected_by_market_run_line_fa
     assert old_result["home_covers_rl_prob"] == new_result["home_covers_rl_prob"]
     assert old_result["away_covers_rl_prob"] == new_result["away_covers_rl_prob"]
     assert old_result == new_result  # snapshot completo idéntico, no solo el run line
+
+
+def test_predict_from_raw_inputs_falls_back_to_league_avg_runs_per_game_constant_when_missing():
+    # A2: raw["league_avg_runs_per_game"] es una clave NUEVA -- un snapshot
+    # congelado antes de este cambio no la trae. Debe recalcular EXACTAMENTE
+    # igual que un snapshot que sí trae la constante actual de forma
+    # explícita (Regla 4 de compatibilidad hacia atrás).
+    from model.runs_projection import LEAGUE_AVG_RUNS_PER_GAME
+
+    raw_old_snapshot = _base_raw_inputs()
+    assert "league_avg_runs_per_game" not in raw_old_snapshot
+
+    raw_with_explicit_constant = _base_raw_inputs(league_avg_runs_per_game=LEAGUE_AVG_RUNS_PER_GAME)
+
+    old_result = predict_from_raw_inputs(raw_old_snapshot)
+    explicit_result = predict_from_raw_inputs(raw_with_explicit_constant)
+
+    assert old_result == explicit_result

@@ -37,6 +37,8 @@ def _fake_schedule_with_confirmed_pitchers(target_date=None):
 def test_analyze_today_logs_warning_when_probable_pitcher_missing(monkeypatch, caplog):
     monkeypatch.setattr(main, "get_schedule", _fake_schedule_with_tbd_pitcher)
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
     monkeypatch.setattr(main, "preload_weather", lambda games, park_lookup: {})
     monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
 
@@ -52,6 +54,8 @@ def test_analyze_today_logs_warning_when_stats_are_missing(monkeypatch, caplog):
     monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: None)
     monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: None)
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
     monkeypatch.setattr(main, "preload_weather", lambda games, park_lookup: {})
     monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
 
@@ -67,6 +71,8 @@ def _patch_full_pipeline_no_market_data(monkeypatch):
     monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: (3.5, 100.0))
     monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: 0.750)
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
     monkeypatch.setattr(main, "get_bullpen_era", lambda tid, season=None: 4.30)
     monkeypatch.setattr(main, "get_pitcher_command", lambda pid, season=None: {"k_pct": 0.25, "bb_pct": 0.08, "whip": 1.2})
     monkeypatch.setattr(main, "get_pitcher_rest", lambda pid, season=None: {"days_rest": 5, "last_outing_pitches": 90})

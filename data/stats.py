@@ -24,6 +24,8 @@ _cache_lock = threading.Lock()
 
 _pitcher_stats_cache: dict[int, dict] = {}
 _league_ops_cache: float | None = None
+_league_era_cache: float | None = None
+_league_runs_per_game_cache: float | None = None
 _bullpen_cache: dict[int, float] = {}
 
 
@@ -161,6 +163,94 @@ def get_league_ops(season: int = SEASON) -> float:
     with _cache_lock:
         _league_ops_cache = result
     return _league_ops_cache
+
+
+def get_league_era(season: int = SEASON) -> float:
+    """
+    ERA promedio de liga, ponderado por entradas lanzadas de cada equipo
+    (mismo criterio de ponderación que get_league_ops() pondera por PA) --
+    A2: antes model.runs_projection.LEAGUE_AVG_ERA era una constante fija
+    (4.30) mientras el OPS de liga sí se traía en vivo, un sesgo
+    direccional si el entorno de carreras real de la temporada se aleja de
+    ese valor. Cae a LEAGUE_AVG_ERA (ya no como valor fijo, solo como
+    fallback) si la API falla.
+    """
+    global _league_era_cache
+    with _cache_lock:
+        if _league_era_cache is not None:
+            return _league_era_cache
+
+    from model.runs_projection import LEAGUE_AVG_ERA
+    try:
+        params = {"stats": "season", "group": "pitching", "season": season, "sportId": 1}
+        resp = session.get(f"{MLB_API_BASE}/teams/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        weighted_era_sum = 0.0
+        total_ip = 0.0
+        for split in payload["stats"][0]["splits"]:
+            stat = split["stat"]
+            ip_str = stat.get("inningsPitched")
+            era = stat.get("era")
+            if ip_str is None or era is None:
+                continue
+            ip = _parse_innings(str(ip_str))
+            if ip <= 0:
+                continue
+            weighted_era_sum += float(era) * ip
+            total_ip += ip
+
+        result = (weighted_era_sum / total_ip) if total_ip > 0 else LEAGUE_AVG_ERA
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+        logger.warning(f"No se pudo obtener ERA de liga, usando fallback {LEAGUE_AVG_ERA}: {e}")
+        result = LEAGUE_AVG_ERA
+
+    with _cache_lock:
+        _league_era_cache = result
+    return _league_era_cache
+
+
+def get_league_runs_per_game(season: int = SEASON) -> float:
+    """
+    Carreras anotadas promedio POR EQUIPO por juego (no el total combinado
+    de un juego) -- sum(runs de todos los equipos) / sum(juegos jugados de
+    todos los equipos), consistente con cómo model.runs_projection.
+    project_team_runs() usa LEAGUE_AVG_RUNS_PER_GAME (multiplicado por el
+    offense_factor de UN equipo, no de dos). Cae a LEAGUE_AVG_RUNS_PER_GAME
+    (ya no como valor fijo, solo como fallback) si la API falla.
+    """
+    global _league_runs_per_game_cache
+    with _cache_lock:
+        if _league_runs_per_game_cache is not None:
+            return _league_runs_per_game_cache
+
+    from model.runs_projection import LEAGUE_AVG_RUNS_PER_GAME
+    try:
+        params = {"stats": "season", "group": "hitting", "season": season, "sportId": 1}
+        resp = session.get(f"{MLB_API_BASE}/teams/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        total_runs = 0
+        total_games = 0
+        for split in payload["stats"][0]["splits"]:
+            stat = split["stat"]
+            runs = stat.get("runs")
+            games = stat.get("gamesPlayed")
+            if runs is None or not games:
+                continue
+            total_runs += int(runs)
+            total_games += int(games)
+
+        result = (total_runs / total_games) if total_games > 0 else LEAGUE_AVG_RUNS_PER_GAME
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+        logger.warning(f"No se pudo obtener carreras/juego de liga, usando fallback {LEAGUE_AVG_RUNS_PER_GAME}: {e}")
+        result = LEAGUE_AVG_RUNS_PER_GAME
+
+    with _cache_lock:
+        _league_runs_per_game_cache = result
+    return _league_runs_per_game_cache
 
 
 def get_bullpen_era(team_id: int, season: int = SEASON) -> float:

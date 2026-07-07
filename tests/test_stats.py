@@ -78,3 +78,91 @@ def test_get_league_ops_excludes_batters_below_min_pa(monkeypatch):
     league_ops = stats.get_league_ops(season=2026)
 
     assert abs(league_ops - 0.900) < 1e-9
+
+
+# --- A2: get_league_era / get_league_runs_per_game (vivas, no constantes fijas) ---
+
+def test_get_league_era_is_weighted_by_innings_pitched(monkeypatch):
+    payload = {
+        "stats": [{"splits": [
+            {"stat": {"era": "3.00", "inningsPitched": "1000.0"}},
+            {"stat": {"era": "5.00", "inningsPitched": "100.0"}},
+        ]}]
+    }
+    monkeypatch.setattr(stats.session, "get", lambda *a, **k: _FakeResponse(payload))
+    monkeypatch.setattr(stats, "_league_era_cache", None)
+
+    league_era = stats.get_league_era(season=2026)
+
+    simple_mean = (3.00 + 5.00) / 2
+    expected_weighted = (3.00 * 1000.0 + 5.00 * 100.0) / (1000.0 + 100.0)
+    assert abs(league_era - expected_weighted) < 1e-6
+    assert league_era < simple_mean  # se acerca más al equipo con más entradas (ERA 3.00)
+
+
+def test_get_league_era_falls_back_to_constant_on_api_failure(monkeypatch):
+    import requests
+    from model.runs_projection import LEAGUE_AVG_ERA
+
+    def fail(*a, **k):
+        raise requests.RequestException("red caída")
+
+    monkeypatch.setattr(stats.session, "get", fail)
+    monkeypatch.setattr(stats, "_league_era_cache", None)
+
+    assert stats.get_league_era(season=2026) == LEAGUE_AVG_ERA
+
+
+def test_get_league_era_falls_back_when_no_usable_splits(monkeypatch):
+    from model.runs_projection import LEAGUE_AVG_ERA
+    payload = {"stats": [{"splits": []}]}
+    monkeypatch.setattr(stats.session, "get", lambda *a, **k: _FakeResponse(payload))
+    monkeypatch.setattr(stats, "_league_era_cache", None)
+
+    assert stats.get_league_era(season=2026) == LEAGUE_AVG_ERA
+
+
+def test_get_league_era_caches_result(monkeypatch):
+    payload = {"stats": [{"splits": [{"stat": {"era": "4.00", "inningsPitched": "500.0"}}]}]}
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(stats.session, "get", fake_get)
+    monkeypatch.setattr(stats, "_league_era_cache", None)
+
+    stats.get_league_era(season=2026)
+    stats.get_league_era(season=2026)
+
+    assert calls["n"] == 1
+
+
+def test_get_league_runs_per_game_is_total_runs_over_total_games(monkeypatch):
+    payload = {
+        "stats": [{"splits": [
+            {"stat": {"runs": 800, "gamesPlayed": 162}},
+            {"stat": {"runs": 700, "gamesPlayed": 162}},
+        ]}]
+    }
+    monkeypatch.setattr(stats.session, "get", lambda *a, **k: _FakeResponse(payload))
+    monkeypatch.setattr(stats, "_league_runs_per_game_cache", None)
+
+    result = stats.get_league_runs_per_game(season=2026)
+
+    expected = (800 + 700) / (162 + 162)
+    assert abs(result - expected) < 1e-9
+
+
+def test_get_league_runs_per_game_falls_back_to_constant_on_api_failure(monkeypatch):
+    import requests
+    from model.runs_projection import LEAGUE_AVG_RUNS_PER_GAME
+
+    def fail(*a, **k):
+        raise requests.RequestException("red caída")
+
+    monkeypatch.setattr(stats.session, "get", fail)
+    monkeypatch.setattr(stats, "_league_runs_per_game_cache", None)
+
+    assert stats.get_league_runs_per_game(season=2026) == LEAGUE_AVG_RUNS_PER_GAME

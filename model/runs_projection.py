@@ -13,14 +13,16 @@ def project_team_runs(team_ops: float, opp_starter_era: float, opp_bullpen_era: 
                       park_factor: float = 1.0, starter_weight: float = 0.65,
                       is_home: bool = False, temp_f: float = None,
                       park_factor_weight: float = PARK_FACTOR_WEIGHT,
-                      weather_correction: float = WEATHER_CORRECTION) -> float:
+                      weather_correction: float = WEATHER_CORRECTION,
+                      league_avg_runs_per_game: float = LEAGUE_AVG_RUNS_PER_GAME) -> float:
     """
     Carreras esperadas de UN equipo con ajuste de peso para el factor de parque.
 
-    `park_factor_weight`/`weather_correction` son parámetros (no solo
-    globals de config) para que un FeatureSnapshot congelado pueda
-    recalcularse con los valores vigentes AL MOMENTO de la predicción
-    original, aunque config.py cambie después -- ver model/predictor.py.
+    `park_factor_weight`/`weather_correction`/`league_avg_runs_per_game` son
+    parámetros (no solo globals de config/módulo) para que un
+    FeatureSnapshot congelado pueda recalcularse con los valores vigentes
+    AL MOMENTO de la predicción original, aunque esos valores cambien
+    después -- ver model/predictor.py.
     """
     offense_factor = _offense_factor(team_ops, league_ops)
     opp_pitching_era = starter_weight * opp_starter_era + (1 - starter_weight) * opp_bullpen_era
@@ -35,7 +37,7 @@ def project_team_runs(team_ops: float, opp_starter_era: float, opp_bullpen_era: 
     if temp_f and temp_f > 85:
         weather_impact = weather_correction
 
-    runs = LEAGUE_AVG_RUNS_PER_GAME * offense_factor * pitching_factor * weighted_park_factor
+    runs = league_avg_runs_per_game * offense_factor * pitching_factor * weighted_park_factor
     
     # Sumar impacto del clima al total
     runs += (runs * weather_impact)

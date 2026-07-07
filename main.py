@@ -18,11 +18,10 @@ from logging_config import setup_logging
 from data.mlb_api import get_schedule
 from data.stats import (
     get_pitcher_era_ip, get_team_ops, get_league_ops, get_bullpen_era,
-    get_pitcher_command, get_pitcher_rest,
+    get_pitcher_command, get_pitcher_rest, get_league_era, get_league_runs_per_game,
 )
 from data.park_factors import get_park_info
 from data.weather import preload_weather
-from model.runs_projection import LEAGUE_AVG_ERA
 from model.predictor import predict_from_raw_inputs
 from model.edge import implied_prob, edge, expected_value, market_favorite, no_vig_probs
 from model.picks import generate_pick_candidates, select_picks_for_game
@@ -141,6 +140,12 @@ def _build_discard_message(game: dict, other_games_same_matchup: list[dict]) -> 
 
 def analyze_today() -> list[dict]:
     league_ops = get_league_ops()
+    # A2: antes LEAGUE_AVG_ERA/LEAGUE_AVG_RUNS_PER_GAME (model/runs_projection.py)
+    # eran constantes fijas mientras league_ops sí se traía en vivo -- un
+    # sesgo direccional si el entorno de carreras real de la temporada se
+    # aleja de esos valores. Una sola llamada por día, igual que league_ops.
+    league_era = get_league_era()
+    league_runs_per_game = get_league_runs_per_game()
     games = get_schedule(date.today())
     weather_by_team = preload_weather(games, get_park_info)
     odds_events = fetch_moneyline_odds()
@@ -209,6 +214,7 @@ def analyze_today() -> list[dict]:
             row = _analyze_one_game(
                 g, league_ops, weather_by_team, odds_events,
                 away_era_ip, home_era_ip, away_ops, home_ops,
+                league_era=league_era, league_runs_per_game=league_runs_per_game,
             )
             results.append(row)
         except Exception as e:
@@ -318,7 +324,8 @@ def _validated_manual_market(game_pk: int, market_label: str, raw: dict | None,
 
 
 def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
-                       away_era_ip, home_era_ip, away_ops, home_ops) -> dict:
+                       away_era_ip, home_era_ip, away_ops, home_ops,
+                       league_era: float, league_runs_per_game: float) -> dict:
     """Cuerpo de análisis de un solo juego, extraído de analyze_today() para
     que el try/except de aislamiento de errores por juego (un juego con un
     dato inesperado no debe tumbar el resto del día) tenga un límite claro,
@@ -373,7 +380,7 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "away_era": away_era, "home_era": home_era,
         "away_innings_pitched": away_innings_pitched, "home_innings_pitched": home_innings_pitched,
         "away_ops": away_ops, "home_ops": home_ops, "league_ops": league_ops,
-        "league_era": LEAGUE_AVG_ERA,
+        "league_era": league_era, "league_avg_runs_per_game": league_runs_per_game,
         "away_bullpen_era": away_bullpen, "home_bullpen_era": home_bullpen,
         "away_k_pct": away_cmd["k_pct"], "away_bb_pct": away_cmd["bb_pct"],
         "home_k_pct": home_cmd["k_pct"], "home_bb_pct": home_cmd["bb_pct"],

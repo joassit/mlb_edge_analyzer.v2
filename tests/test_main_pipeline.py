@@ -38,6 +38,8 @@ def _patch_pipeline(monkeypatch):
     monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: era_ip_by_pitcher[pid])
     monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: ops_by_team[tid])
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
     monkeypatch.setattr(main, "get_bullpen_era", lambda tid, season=None: 4.30)
     monkeypatch.setattr(main, "get_pitcher_command", lambda pid, season=None: {"k_pct": 0.25, "bb_pct": 0.08, "whip": 1.2})
     monkeypatch.setattr(main, "get_pitcher_rest", lambda pid, season=None: {"days_rest": 5, "last_outing_pitches": 90})
@@ -72,6 +74,37 @@ def test_analyze_today_computes_real_probabilities_not_hardcoded_defaults(monkey
     # Sin cuotas cargadas para este game_pk, no debe inventarse un edge
     assert row["away_edge"] is None
     assert row["home_edge"] is None
+
+
+def test_analyze_today_uses_live_league_era_and_runs_per_game_not_hardcoded_constants(monkeypatch):
+    # A2: antes LEAGUE_AVG_ERA/LEAGUE_AVG_RUNS_PER_GAME (model/runs_projection.py)
+    # eran constantes fijas hardcodeadas en raw_inputs, sin importar lo que
+    # devolvieran get_league_era()/get_league_runs_per_game() -- si esta
+    # prueba pasara con la versión vieja del código (antes de A2),
+    # cambiar esos mocks no debería afectar la proyección en absoluto.
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
+
+    baseline_results = main.analyze_today()
+    baseline_row = baseline_results[0]
+
+    # Valores MUY distintos a las constantes hardcodeadas de
+    # model/runs_projection.py (LEAGUE_AVG_ERA=4.30, LEAGUE_AVG_RUNS_PER_GAME=4.4).
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 7.0)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 9.0)
+
+    live_results = main.analyze_today()
+    live_row = live_results[0]
+
+    assert live_row["away_proj_runs"] != baseline_row["away_proj_runs"]
+    assert live_row["home_proj_runs"] != baseline_row["home_proj_runs"]
+
+    # Los valores en vivo quedan congelados en el snapshot -- no la constante.
+    snapshot = live_results[0]["_feature_snapshot"]
+    assert snapshot["league_era"] == 7.0
+    assert snapshot["league_avg_runs_per_game"] == 9.0
 
 
 def test_analyze_today_computes_edge_when_market_odds_present(monkeypatch):
@@ -342,6 +375,8 @@ def test_analyze_today_isolates_an_unexpected_error_in_one_game(monkeypatch):
     monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: era_ip_by_pitcher[pid])
     monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: ops_by_team[tid])
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
     monkeypatch.setattr(main, "get_bullpen_era", _bullpen_era_raises_for_team_2)
     monkeypatch.setattr(main, "get_pitcher_command", lambda pid, season=None: {"k_pct": 0.25, "bb_pct": 0.08, "whip": 1.2})
     monkeypatch.setattr(main, "get_pitcher_rest", lambda pid, season=None: {"days_rest": 5, "last_outing_pitches": 90})

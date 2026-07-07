@@ -11,7 +11,7 @@ volver a golpear ninguna API.
 """
 
 from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION
-from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA
+from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA, LEAGUE_AVG_RUNS_PER_GAME
 from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
 from model.negbin_model import negbin_win_prob
@@ -21,6 +21,10 @@ from model.adjustments import shrunk_era
 
 def predict_from_raw_inputs(raw: dict) -> dict:
     league_era = raw.get("league_era", LEAGUE_AVG_ERA)
+    # A2: congelado en el snapshot igual que league_era -- un snapshot de
+    # antes de este cambio no trae esta clave, cae a la constante actual
+    # (mismo criterio de compatibilidad que el resto de este bloque).
+    league_avg_runs_per_game = raw.get("league_avg_runs_per_game", LEAGUE_AVG_RUNS_PER_GAME)
 
     # PARK_FACTOR_WEIGHT/WEATHER_CORRECTION congelados en el snapshot en vez
     # de leídos en vivo de config.py -- si esas constantes cambian en el
@@ -49,12 +53,14 @@ def predict_from_raw_inputs(raw: dict) -> dict:
         raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
         is_home=False, temp_f=raw.get("temp_f"),
         park_factor_weight=park_factor_weight, weather_correction=weather_correction,
+        league_avg_runs_per_game=league_avg_runs_per_game,
     )
     home_mu = project_team_runs(
         raw["home_ops"], away_era, raw["home_bullpen_era"],
         raw["league_ops"], league_era, raw["park_factor"], raw["starter_weight"],
         is_home=True, temp_f=raw.get("temp_f"),
         park_factor_weight=park_factor_weight, weather_correction=weather_correction,
+        league_avg_runs_per_game=league_avg_runs_per_game,
     )
 
     away_p_raw = model_prob(

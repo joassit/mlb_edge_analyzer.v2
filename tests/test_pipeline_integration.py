@@ -44,6 +44,8 @@ def _patch_two_game_pipeline(monkeypatch):
     monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: era_ip_by_pitcher[pid])
     monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: ops_by_team[tid])
     monkeypatch.setattr(main, "get_league_ops", lambda season=None: 0.750)
+    monkeypatch.setattr(main, "get_league_era", lambda season=None: 4.30)
+    monkeypatch.setattr(main, "get_league_runs_per_game", lambda season=None: 4.4)
     monkeypatch.setattr(main, "get_bullpen_era", lambda tid, season=None: 4.30)
     monkeypatch.setattr(main, "get_pitcher_command", lambda pid, season=None: {"k_pct": 0.25, "bb_pct": 0.08, "whip": 1.2})
     monkeypatch.setattr(main, "get_pitcher_rest", lambda pid, season=None: {"days_rest": 5, "last_outing_pitches": 90})
