@@ -137,54 +137,6 @@ jobs:
           fi
           python main.py
 
-      # TEMPORAL -- diagnóstico de una sola vez para armar el informe de
-      # auditoría pedido por el propietario (histórico real de
-      # game_analysis/picks/actual_results). Se retira en un commit
-      # posterior, no es parte del pipeline de producción.
-      - name: TEMP - Dump DB diagnostics for audit report
-        if: always()
-        env:
-          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
-        run: |
-          if [ -n "$DATABASE_URL_SECRET" ]; then
-            export DATABASE_URL="$DATABASE_URL_SECRET"
-          fi
-          python -c "
-          import json
-          from db.database import SessionLocal, GameAnalysis, Pick, ActualResult, FeatureSnapshot
-
-          session = SessionLocal()
-          try:
-              ga_rows = session.query(GameAnalysis).all()
-              picks = session.query(Pick).all()
-              results = session.query(ActualResult).all()
-              snapshots = session.query(FeatureSnapshot).all()
-          finally:
-              session.close()
-
-          def ga_to_dict(r):
-              return {c.name: getattr(r, c.name) for c in GameAnalysis.__table__.columns if c.name != 'created_at'}
-
-          def pick_to_dict(r):
-              return {c.name: getattr(r, c.name) for c in Pick.__table__.columns}
-
-          def result_to_dict(r):
-              return {c.name: getattr(r, c.name) for c in ActualResult.__table__.columns if c.name != 'updated_at'}
-
-          out = {
-              'game_analysis_count': len(ga_rows),
-              'picks_count': len(picks),
-              'actual_results_count': len(results),
-              'feature_snapshots_count': len(snapshots),
-              'game_analysis': [ga_to_dict(r) for r in ga_rows],
-              'picks': [pick_to_dict(r) for r in picks],
-              'actual_results': [result_to_dict(r) for r in results],
-          }
-          print('===DIAGNOSTIC_JSON_START===')
-          print(json.dumps(out, default=str))
-          print('===DIAGNOSTIC_JSON_END===')
-          "
-
       - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
         # Se salta junto con "Run pipeline" (mismo condicional) -- si no
         # corrió, mlb_edge.db no cambió respecto al ya restaurado, y
