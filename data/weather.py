@@ -69,7 +69,11 @@ def get_game_weather(lat: float, lon: float, game_datetime_iso: str) -> dict:
         if target_hour in times:
             idx = times.index(target_hour)
         else:
-            idx = 0  # fallback: primera hora del día si no hay match exacto
+            # Sin match exacto: la hora disponible más cercana en el tiempo,
+            # no la primera del día (que podía estar a horas de distancia).
+            game_dt_naive = game_dt.replace(tzinfo=None)
+            hour_dts = [datetime.fromisoformat(t) for t in times]
+            idx = min(range(len(hour_dts)), key=lambda i: abs((hour_dts[i] - game_dt_naive).total_seconds()))
 
         result["temp_f"] = temps[idx]
         result["wind_mph"] = winds[idx]
