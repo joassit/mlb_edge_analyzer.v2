@@ -349,6 +349,47 @@ def test_print_report_pick_line_shows_dato_no_disponible_without_odds_used(capsy
     assert "prob. implícita Dato no disponible" in out
 
 
+def test_print_report_pick_line_shows_market_prob_actually_used_for_edge(capsys):
+    # Reproduce el hallazgo de la auditoría del commit 21a30c5: con cuota
+    # en vivo, "prob. implícita" (derivada SOLO del momio, CON vig) puede
+    # diferir del consenso sin vig que el edge realmente usa -- incluso
+    # con signo opuesto. La línea debe mostrar el número REAL usado para
+    # el edge (p["market_prob"]), no solo el derivado del momio.
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    # odds_used=-160 implica 61.5% con vig, pero el edge se calculó contra
+    # un consenso sin vig de 58% -- deliberadamente distinto.
+    picks_by_game = {1: [{"market": "moneyline", "selection": "away", "line": None,
+                          "edge": 0.02, "ev": 0.1, "forced": False,
+                          "odds_used": -160, "market_prob": 0.58}]}
+    print_report(rows, picks_by_game=picks_by_game)
+    out = capsys.readouterr().out
+    assert "momio -160" in out
+    assert "prob. implícita 61.5%" in out
+    assert "58.0%" in out  # el market_prob real usado para el edge, no 61.5%
+    assert "usada para el edge" in out
+
+
+def test_print_report_pick_line_market_prob_shows_dato_no_disponible_for_old_picks(capsys):
+    # Picks generados ANTES de este commit no traen "market_prob" en el
+    # dict -- no debe inventarse ese valor ni reventar, debe leerse
+    # explícitamente como no disponible.
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    picks_by_game = {1: [{"market": "moneyline", "selection": "home", "line": None,
+                          "edge": 0.05, "ev": 0.1, "forced": False, "odds_used": -150}]}
+    assert "market_prob" not in picks_by_game[1][0]
+    print_report(rows, picks_by_game=picks_by_game)
+    out = capsys.readouterr().out
+    assert "usada para el edge Dato no disponible" in out
+
+
 def test_print_yesterday_review_shows_opening_odds_and_missing_clv_note(capsys):
     review = {
         "review_date": "2026-07-05",

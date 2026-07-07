@@ -372,8 +372,17 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
                 discrepancy_tag = "  ⚡ discrepancia direccional vs. heurístico" if p.get("directional_discrepancy") else ""
                 odds_used = p.get("odds_used")
                 implied_txt = f"{implied_prob(odds_used):.1%}" if odds_used is not None else _DATO_NO_DISPONIBLE
+                # market_prob es la base REAL del edge (model/picks.py::_build_candidate) --
+                # consenso sin vig si hay cuota en vivo, o implied_prob(odds_used) si es
+                # manual. NO siempre coincide con "prob. implícita" de arriba (esa es
+                # siempre implied_prob(momio), con vig, de la mejor cuota individual) --
+                # mostrar ambas para que el cálculo del edge sea reconstruible sin ambigüedad.
+                market_prob_used = p.get("market_prob")
+                market_prob_txt = f"{market_prob_used:.1%}" if market_prob_used is not None else _DATO_NO_DISPONIBLE
                 print(f"    • {team_label(p, r):<18}  "
                       f"(momio {_format_odds(odds_used)}, prob. implícita {implied_txt}, "
+                      f"prob. mercado usada para el edge {market_prob_txt} (sin vig si hay "
+                      f"consenso en vivo, si no implícita del momio), "
                       f"edge {p['edge']:+.1%}, EV {p['ev']:+.2f}, Kelly {_DATO_NO_DISPONIBLE})"
                       f"{tag}{source_tag}{discrepancy_tag}")
 
