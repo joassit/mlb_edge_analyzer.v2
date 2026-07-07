@@ -1,4 +1,4 @@
-from model.runs_projection import project_team_runs
+from model.runs_projection import project_team_runs, LEAGUE_AVG_RUNS_PER_GAME
 
 
 def test_strong_offense_vs_weak_pitching_projects_more_runs():
@@ -22,3 +22,21 @@ def test_park_factor_scales_projected_runs():
 def test_floor_prevents_zero_runs():
     runs = project_team_runs(0.300, 1.0, 1.0, league_ops=0.750, park_factor=0.5)
     assert runs >= 0.3
+
+
+def test_league_avg_runs_per_game_parameter_defaults_to_module_constant():
+    default_call = project_team_runs(0.750, 4.0, 4.0, league_ops=0.750, park_factor=1.0)
+    explicit_call = project_team_runs(0.750, 4.0, 4.0, league_ops=0.750, park_factor=1.0,
+                                       league_avg_runs_per_game=LEAGUE_AVG_RUNS_PER_GAME)
+    assert default_call == explicit_call
+
+
+def test_higher_league_avg_runs_per_game_scales_projection_up():
+    # A2: antes esto era una constante fija del módulo, imposible de
+    # override -- ahora un entorno de carreras real más alto (ej. temporada
+    # de mucha ofensiva) debe reflejarse directamente en la proyección.
+    low_env = project_team_runs(0.750, 4.0, 4.0, league_ops=0.750, park_factor=1.0,
+                                 league_avg_runs_per_game=4.4)
+    high_env = project_team_runs(0.750, 4.0, 4.0, league_ops=0.750, park_factor=1.0,
+                                  league_avg_runs_per_game=5.5)
+    assert high_env > low_env

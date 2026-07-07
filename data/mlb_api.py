@@ -1,94 +1,111 @@
-"""
-Cliente para la MLB Stats API (oficial, gratuita, sin API key).
-Documentación no oficial de referencia: https://github.com/toddrob99/MLB-StatsAPI
-
-Aquí obtenemos:
-- Calendario del día (juegos programados)
-- Pitchers probables (cuando ya están confirmados por los equipos)
-"""
-
-from datetime import date
+import logging
 import requests
-
+from datetime import date
 from config import MLB_API_BASE
+from data.contracts import require, SchemaError
+from data.http import session
 
+logger = logging.getLogger("mlb_edge_analyzer")
 
 def get_schedule(target_date: date = None) -> list[dict]:
-    """
-    Devuelve la lista de juegos de un día, con pitchers probables cuando
-    ya están confirmados. Si target_date es None, usa hoy.
-
-    Cada elemento del resultado tiene:
-    {
-        "game_pk": int,
-        "away_team": str,
-        "home_team": str,
-        "away_team_id": int,
-        "home_team_id": int,
-        "away_pitcher_id": int | None,
-        "away_pitcher_name": str | None,
-        "home_pitcher_id": int | None,
-        "home_pitcher_name": str | None,
-        "game_time": str,
-        "status": str,
-    }
-    """
+    """Lista de juegos de la fecha dada. Devuelve [] si la API falla (red,
+    timeout, esquema) -- nunca propaga la excepción hacia el pipeline."""
     if target_date is None:
         target_date = date.today()
 
     params = {
-        "sportId": 1,  # MLB
+        "sportId": 1,
         "date": target_date.strftime("%Y-%m-%d"),
         "hydrate": "probablePitcher,team,linescore",
     }
 
-    resp = requests.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"No se pudo obtener el schedule de {target_date}: {e}")
+        return []
 
     games = []
-    seen_pks = set()
     for date_block in payload.get("dates", []):
         for g in date_block.get("games", []):
-            if g["gamePk"] in seen_pks:
+            parsed = _parse_game(g)
+            if isinstance(parsed, SchemaError):
+                # Un solo juego con esquema roto no debe tumbar el resto del
+                # día — se salta ese juego y se sigue con los demás.
+                logger.error(f"Juego omitido por cambio de esquema: {parsed}")
                 continue
-            seen_pks.add(g["gamePk"])
-
-            away = g["teams"]["away"]
-            home = g["teams"]["home"]
-
-            away_pitcher = away.get("probablePitcher")
-            home_pitcher = home.get("probablePitcher")
-
-            games.append({
-                "game_pk": g["gamePk"],
-                "away_team": away["team"]["name"],
-                "home_team": home["team"]["name"],
-                "away_team_id": away["team"]["id"],
-                "home_team_id": home["team"]["id"],
-                "away_pitcher_id": away_pitcher["id"] if away_pitcher else None,
-                "away_pitcher_name": away_pitcher["fullName"] if away_pitcher else None,
-                "home_pitcher_id": home_pitcher["id"] if home_pitcher else None,
-                "home_pitcher_name": home_pitcher["fullName"] if home_pitcher else None,
-                "game_time": g.get("gameDate"),
-                "status": g["status"]["detailedState"],
-                "abstract_state": g["status"]["abstractGameState"],  # "Preview" | "Live" | "Final"
-            })
-
+            games.append(parsed)
     return games
 
 
-def get_game_result(game_pk: int) -> dict | None:
-    """
-    Resultado final de un juego ya jugado. Devuelve None si el juego
-    todavía no termina (o no existe).
+def _parse_game(g: dict) -> dict | SchemaError:
+    game_pk = require(g, ["gamePk"], "schedule.game")
+    if isinstance(game_pk, SchemaError):
+        return game_pk
 
-    {"home_score": int, "away_score": int, "winner": "home"|"away", "total_runs": int}
-    """
+    away = require(g, ["teams", "away"], "schedule.game")
+    if isinstance(away, SchemaError):
+        return away
+    home = require(g, ["teams", "home"], "schedule.game")
+    if isinstance(home, SchemaError):
+        return home
+
+    away_team_id = require(away, ["team", "id"], "schedule.game.teams.away")
+    if isinstance(away_team_id, SchemaError):
+        return away_team_id
+    home_team_id = require(home, ["team", "id"], "schedule.game.teams.home")
+    if isinstance(home_team_id, SchemaError):
+        return home_team_id
+
+    detailed_state = require(g, ["status", "detailedState"], "schedule.game")
+    if isinstance(detailed_state, SchemaError):
+        return detailed_state
+    abstract_state = require(g, ["status", "abstractGameState"], "schedule.game")
+    if isinstance(abstract_state, SchemaError):
+        return abstract_state
+
+    away_pitcher = away.get("probablePitcher")
+    home_pitcher = home.get("probablePitcher")
+
+    return {
+        "game_pk": game_pk,
+        "away_team": away.get("team", {}).get("name"),
+        "home_team": home.get("team", {}).get("name"),
+        "away_team_id": away_team_id,
+        "home_team_id": home_team_id,
+        "away_pitcher_id": away_pitcher["id"] if away_pitcher else None,
+        "away_pitcher_name": away_pitcher["fullName"] if away_pitcher else None,
+        "home_pitcher_id": home_pitcher["id"] if home_pitcher else None,
+        "home_pitcher_name": home_pitcher["fullName"] if home_pitcher else None,
+        "game_time": g.get("gameDate"),
+        "game_date_official": g.get("officialDate"),
+        "status": detailed_state,
+        "abstract_state": abstract_state,
+        # gameNumber/doubleHeader identifican juego 1 vs. juego 2 de una
+        # doble cartelera -- cada uno trae su propio game_pk DISTINTO en
+        # MLB Stats API, así que no hay forma de detectarlos por game_pk;
+        # se usan opcionalmente (.get, no require()) para no volver esto un
+        # campo obligatorio -- solo enriquecen el mensaje de descarte en
+        # main.py::analyze_today() cuando aplica.
+        "game_number": g.get("gameNumber"),
+        "double_header": g.get("doubleHeader"),
+    }
+
+def get_game_result(game_pk: int) -> dict | None:
+    """Resultado final del juego, o None si todavía no termina, se pospuso,
+    o la API falla (red, timeout, esquema) -- las tres situaciones son
+    indistinguibles para el caller, que de cualquier forma reintenta al
+    día siguiente vía get_predictions_without_result()."""
     params = {"sportId": 1, "gamePk": game_pk, "hydrate": "linescore"}
-    resp = requests.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"No se pudo obtener el resultado de game_pk={game_pk}: {e}")
+        return None
 
     dates = payload.get("dates", [])
     if not dates or not dates[0].get("games"):
@@ -111,66 +128,6 @@ def get_game_result(game_pk: int) -> dict | None:
         "winner": "home" if home_score > away_score else "away",
         "total_runs": home_score + away_score,
     }
-
-
-def get_actual_starters(game_pk: int) -> dict | None:
-    """
-    Los pitchers que REALMENTE abrieron un juego ya jugado (del boxscore),
-    para detectar 'pitcher scratch': cuando el abridor probable de la mañana
-    fue reemplazado antes del juego, la predicción quedó basada en un pitcher
-    que no lanzó y no debe calificarse como acierto/fallo del modelo.
-
-    Devuelve {"away_starter_id": int|None, "home_starter_id": int|None}
-    o None si el boxscore no está disponible.
-    """
-    try:
-        resp = requests.get(
-            f"{MLB_API_BASE.replace('/v1', '/v1.1')}/game/{game_pk}/feed/live",
-            timeout=15,
-        )
-        resp.raise_for_status()
-        boxscore = resp.json()["liveData"]["boxscore"]["teams"]
-
-        def first_pitcher(side: str) -> int | None:
-            pitcher_ids = boxscore[side].get("pitchers", [])
-            return pitcher_ids[0] if pitcher_ids else None
-
-        return {
-            "away_starter_id": first_pitcher("away"),
-            "home_starter_id": first_pitcher("home"),
-        }
-    except (requests.RequestException, KeyError, IndexError, ValueError):
-        return None
-
-
-def get_actual_starters(game_pk: int) -> dict | None:
-    """
-    IDs de los pitchers que REALMENTE abrieron un juego ya jugado
-    (del boxscore). Sirve para detectar 'pitcher scratch': cuando el
-    abridor probable de la mañana fue reemplazado antes del juego.
-
-    Devuelve: {"away_starter_id": int|None, "home_starter_id": int|None}
-    o None si el boxscore no está disponible.
-    """
-    try:
-        resp = requests.get(f"{MLB_API_BASE}/game/{game_pk}/boxscore", timeout=15)
-        resp.raise_for_status()
-        box = resp.json()
-    except requests.RequestException:
-        return None
-
-    result = {"away_starter_id": None, "home_starter_id": None}
-    for side in ("away", "home"):
-        try:
-            pitcher_ids = box["teams"][side].get("pitchers", [])
-            # El primer pitcher de la lista del boxscore es el abridor
-            if pitcher_ids:
-                result[f"{side}_starter_id"] = pitcher_ids[0]
-        except (KeyError, TypeError):
-            continue
-
-    return result
-
 
 if __name__ == "__main__":
     for g in get_schedule():

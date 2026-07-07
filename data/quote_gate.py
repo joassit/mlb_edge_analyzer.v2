@@ -1,0 +1,93 @@
+"""
+Gate de validez y frescura para cuotas de mercado.
+
+Una cuota con away_price/home_price fuera de rango (esquema roto, un precio
+que llegó como string) o desactualizada (last_update viejo -- ej. después
+de un scratch de pitcher, el evento que más mueve líneas en MLB) no debe
+alimentar ni la selección de mejor cuota ni el picks engine: en
+edge-hunting, una línea vieja casi siempre "parece" tener valor, porque el
+mercado ya incorporó información que tu snapshot todavía no tiene -- es
+indistinguible de un edge real en el propio tracking si no se filtra aquí.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+
+MAX_QUOTE_AGE = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class GatedQuote:
+    book: str
+    away_price: int
+    home_price: int
+    age: timedelta | None  # None = no se pudo determinar (last_update ausente/malformado)
+    fresh: bool
+
+
+def gate_quote(price: dict, now: datetime | None = None,
+               max_age: timedelta = MAX_QUOTE_AGE) -> GatedQuote | None:
+    """
+    Valida tipo/rango de un price crudo de The Odds API y lo marca fresh/stale.
+
+    Devuelve None si el precio es inválido de raíz (tipo incorrecto, o una
+    cuota americana matemáticamente imposible -- |odds| < 100 no existe en
+    formato americano) -- no hay nada usable ahí, ni para pick ni para CLV.
+
+    Si last_update falta o no se puede parsear, se trata como fresh: no hay
+    evidencia de que esté vieja, y bookmakers reales a veces no lo reportan
+    de forma consistente -- rechazar por ausencia de dato sería más
+    agresivo que rechazar por evidencia real de que la cuota es vieja.
+    """
+    try:
+        away = int(price["away_price"])
+        home = int(price["home_price"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (100 <= abs(away) <= 10000) or not (100 <= abs(home) <= 10000):
+        return None
+
+    last_update = price.get("last_update")
+    if not last_update:
+        return GatedQuote(price.get("book", "?"), away, home, age=None, fresh=True)
+
+    try:
+        lu = datetime.fromisoformat(str(last_update).replace("Z", "+00:00"))
+        age = (now or datetime.now(timezone.utc)) - lu
+    except (TypeError, ValueError):
+        return GatedQuote(price.get("book", "?"), away, home, age=None, fresh=True)
+
+    return GatedQuote(price.get("book", "?"), away, home, age=age, fresh=age <= max_age)
+
+
+def validate_manual_american_odds(value) -> int | None:
+    """
+    Valida una cuota americana cargada A MANO (MARKET_ODDS/MARKET_SPREADS/
+    MARKET_TOTALS en main.py) con el mismo criterio de rango que gate_quote()
+    aplica a cuotas en vivo: entero o float sin parte fraccionaria, con
+    100 <= |odds| <= 10000. Devuelve el valor normalizado a int, o None si
+    es inválido -- un typo de formato decimal (1.91 en vez de -110) es el
+    error humano más común al cargar esto a mano, y es justo lo que esto
+    rechaza (1.91 no es entero, y truncado a 1 tampoco entra en rango).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    odds = int(value)
+    if not (100 <= abs(odds) <= 10000):
+        return None
+    return odds
+
+
+def validate_manual_line(value, min_line: float = 0.5, max_line: float = 30.0) -> float | None:
+    """
+    Valida una línea de Run Line/Totales cargada a mano -- número positivo
+    razonable (default 0.5-30 carreras). Devuelve el float, o None si es
+    inválido (tipo incorrecto o fuera de rango)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    line = float(value)
+    if not (min_line <= line <= max_line):
+        return None
+    return line

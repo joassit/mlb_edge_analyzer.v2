@@ -1,0 +1,218 @@
+name: daily-pipeline
+
+on:
+  schedule:
+    # 09:00 hora de Ciudad de México (UTC-6 todo el año -- México eliminó
+    # el horario de verano en 2022, así que este cron no necesita ajustarse
+    # dos veces al año) = 15:00 UTC.
+    #
+    # Ambos crons desplazados del minuto en punto (7 y 12, no 0) a
+    # propósito: GitHub documenta que `schedule` es best-effort y puede
+    # retrasarse o saltarse durante picos de carga, más probables justo
+    # en horas redondas. Confirmado con evidencia real de este proyecto:
+    # de las 3 corridas programadas que debieron dispararse en una
+    # semana (07-05, 07-06, 07-07, las 3 a las 15:00 UTC en punto), solo
+    # 1 realmente se disparó -- y lo hizo a las 2026-07-06T21:12:26Z,
+    # más de 6 horas tarde. El segundo cron (17:12 UTC, ~2h después) es
+    # un respaldo por si el principal no se disparó -- ver el step
+    # "Check if today already ran" más abajo, que evita que el respaldo
+    # vuelva a analizar el mismo día si el principal ya corrió.
+    - cron: "7 15 * * *"   # principal, ~15:00 UTC
+    - cron: "12 17 * * *"  # respaldo, ~17:12 UTC (2h después)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    # Techo defensivo: cada llamada de red individual ya tiene timeout=15s,
+    # pero sin esto un día de red muy inestable (reintentos en cascada sobre
+    # ~15 juegos) podría consumir minutos de Actions hasta el límite default
+    # de GitHub (360 min) antes de cortarse solo.
+    timeout-minutes: 20
+    # El contexto `secrets` NO está disponible dentro de `if:` a nivel de
+    # step -- GitHub Actions lo rechaza en tiempo de parseo (confirmado:
+    # "Unrecognized named-value: 'secrets'" al intentar despachar el
+    # workflow). `env:` sí es un contexto válido en `if:`, así que la
+    # decisión se resuelve UNA vez aquí y los steps de abajo solo leen
+    # env.HAS_EXTERNAL_DB.
+    env:
+      HAS_EXTERNAL_DB: ${{ secrets.DATABASE_URL != '' }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # 3.12: verificado localmente que las 6 dependencias pineadas
+          # instalan limpio y que la suite completa (168 tests) pasa sin
+          # ninguna advertencia bajo -W error::DeprecationWarning.
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Persistencia best-effort de mlb_edge.db entre corridas. Sin esto,
+      # cada run parte de una base vacía: update_results()/compute_metrics()
+      # nunca encuentran predicciones de días anteriores y el tracking de
+      # Brier Score/ROI jamás acumula histórico real -- el job reporta ✅
+      # todos los días sin que el objetivo de negocio del pipeline (medir
+      # desempeño en el tiempo) se cumpla nunca.
+      #
+      # La key incluye github.run_id (siempre única) a propósito: así el
+      # paso de guardado de abajo NUNCA choca con una key ya existente
+      # (actions/cache no permite sobreescribir una key), y este paso de
+      # restauración recupera el snapshot más reciente vía el prefijo en
+      # restore-keys. Esto crea una caché nueva por corrida -- inofensivo
+      # para un archivo SQLite de este tamaño: GitHub libera solas las
+      # cachés no tocadas en 7+ días o si se excede el límite de 10GB por
+      # repo, y aquí se toca (lee o escribe) una caché nueva cada día.
+      #
+      # Se salta por completo si configuras el secret DATABASE_URL (ej.
+      # Postgres administrado) -- en ese caso el pipeline usa esa base
+      # persistente real en vez de SQLite, y esta caché ya no hace falta.
+      - name: Restore previous mlb_edge.db (best-effort, solo sin DATABASE_URL externo)
+        if: ${{ env.HAS_EXTERNAL_DB != 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: mlb_edge.db
+          key: mlb-edge-db-${{ github.run_id }}
+          restore-keys: |
+            mlb-edge-db-
+
+      # Guarda de idempotencia SOLO para corridas por cron (schedule) --
+      # ver scripts/check_already_ran_today.py para el porqué completo
+      # (resumen: `schedule` es best-effort, confirmado con la corrida
+      # real que se disparó a las 2026-07-06T21:12:26Z en vez de las
+      # 15:00 UTC; con 2 crons, si el principal ya corrió, el respaldo no
+      # debe re-analizar el mismo día -- gastaría presupuesto de Odds API
+      # en llamadas redundantes y subiría un segundo reporte del mismo
+      # día). Nunca se salta en un workflow_dispatch manual (esta
+      # condición ni corre en ese caso): quien dispara a mano SIEMPRE
+      # quiere que corra, sin importar si ya hay datos de hoy.
+      - name: Check if today already ran (idempotency guard for backup cron)
+        id: idempotency-check
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -n "$DATABASE_URL_SECRET" ]; then
+            export DATABASE_URL="$DATABASE_URL_SECRET"
+          fi
+          ALREADY_RAN=$(python -m scripts.check_already_ran_today)
+          echo "already_ran=$ALREADY_RAN" >> "$GITHUB_OUTPUT"
+          if [ "$ALREADY_RAN" = "true" ]; then
+            echo "::notice::Ya existe al menos una predicción de hoy en game_analysis -- se asume que otra corrida (el cron principal, u otra ejecución) ya procesó el día. Esta corrida se salta para no gastar presupuesto de Odds API ni duplicar el reporte."
+          fi
+
+      - name: Run pipeline
+        id: run-pipeline
+        if: ${{ steps.idempotency-check.outputs.already_ran != 'true' }}
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # Opcional: rotación entre varias keys si la actual agota su
+          # presupuesto mensual o falla (ver config.resolve_odds_api_keys).
+          # Configura el secret ODDS_API_KEYS="key1,key2" para activarla --
+          # si el secret no existe, esta variable queda vacía y
+          # resolve_odds_api_keys() cae solo a ODDS_API_KEY (a diferencia
+          # de DATABASE_URL_SECRET abajo, acá no hace falta el condicional
+          # de shell: una cadena vacía ya es falsy en Python).
+          ODDS_API_KEYS: ${{ secrets.ODDS_API_KEYS }}
+          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+        run: |
+          # No se asigna DATABASE_URL directo desde secrets.DATABASE_URL en
+          # el bloque `env:` de arriba a propósito: si el secret no existe,
+          # GitHub lo resuelve a cadena vacía y la EXPORTARÍA igual (la
+          # variable existiría con valor ""), rompiendo el fallback a
+          # sqlite de config.py (os.getenv solo aplica el default cuando la
+          # variable está AUSENTE, no cuando está vacía). Por eso se decide
+          # aquí, en shell, si realmente hay que exportarla.
+          if [ -n "$DATABASE_URL_SECRET" ]; then
+            export DATABASE_URL="$DATABASE_URL_SECRET"
+          fi
+          python main.py
+
+      - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
+        # Se salta junto con "Run pipeline" (mismo condicional) -- si no
+        # corrió, mlb_edge.db no cambió respecto al ya restaurado, y
+        # volver a guardarlo bajo una key nueva sería una caché idéntica
+        # redundante.
+        if: ${{ always() && env.HAS_EXTERNAL_DB != 'true' && steps.idempotency-check.outputs.already_ran != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: mlb_edge.db
+          key: mlb-edge-db-${{ github.run_id }}
+
+      # Sin esto, el único rastro de lo que produjo una corrida es el log
+      # de texto plano en la pestaña Actions -- los CSV/logs generados
+      # viven dentro del runner efímero y se destruyen con él. Se salta
+      # junto con "Run pipeline": si no corrió, no hay reporte/log nuevo
+      # que subir -- evita un segundo artifact vacío/redundante del mismo día.
+      - name: Upload today's reports and logs
+        if: ${{ always() && steps.idempotency-check.outputs.already_ran != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: mlb-edge-daily-output-${{ github.run_id }}
+          path: |
+            reports/*.csv
+            logs/*.log
+            mlb_edge.db
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Verificación automática de que la corrida fue real, no un no-op
+      # silencioso: confirma que el proceso llegó a su resumen final (no
+      # solo que "run main.py" no lanzó una excepción -- main.py podría en
+      # teoría terminar temprano sin procesar nada) y expone en una
+      # anotación visible de GitHub (::warning::/::error::) los conteos de
+      # descartados/errores, en vez de que queden enterrados en el log
+      # crudo. No hace fallar el job por errores por-juego (son aislados a
+      # propósito, ver _analyze_one_game() en main.py -- un juego con datos
+      # inesperados no debe tumbar el resto del día), pero SÍ hace fallar
+      # el job si el paso "Run pipeline" falló, o si nunca llegó a imprimir
+      # el resumen final (señal de que se salió antes de completar el ciclo).
+      - name: Validate run
+        if: always()
+        run: |
+          echo "--- Validando la corrida ---"
+
+          if [ "${{ steps.idempotency-check.outputs.already_ran }}" = "true" ]; then
+            echo "✅ Corrida saltada a propósito -- ya existía una predicción de hoy (ver 'Check if today already ran' arriba). No hay nada más que validar."
+            exit 0
+          fi
+
+          if [ "${{ steps.run-pipeline.outcome }}" != "success" ]; then
+            echo "::error::El paso 'Run pipeline' terminó con outcome=${{ steps.run-pipeline.outcome }} -- ver el log de ese paso para la causa raíz exacta."
+            exit 1
+          fi
+
+          LOG_FILE=$(ls -t logs/mlb_edge_*.log 2>/dev/null | head -n 1)
+          if [ -z "$LOG_FILE" ]; then
+            echo "::error::No se generó ningún archivo logs/mlb_edge_*.log -- setup_logging() no corrió o el proceso terminó antes de tiempo."
+            exit 1
+          fi
+          echo "Log encontrado: $LOG_FILE"
+
+          SUMMARY_LINE=$(grep "run_pipeline() completo en" "$LOG_FILE" | tail -n 1)
+          if [ -z "$SUMMARY_LINE" ]; then
+            echo "::error::El log no contiene la línea de resumen final ('run_pipeline() completo en...') -- el pipeline no llegó a terminar su ciclo completo aunque el proceso haya salido con código 0."
+            exit 1
+          fi
+          echo "Resumen final encontrado: $SUMMARY_LINE"
+
+          ERRORS=$(echo "$SUMMARY_LINE" | grep -oP 'errores=\K[0-9]+' || echo "0")
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::warning::$ERRORS juego(s) tuvieron un error aislado durante el procesamiento (ver 'Error inesperado procesando' en $LOG_FILE) -- no hizo fallar el job a propósito, pero requiere revisión."
+          fi
+
+          if [ ! -f mlb_edge.db ]; then
+            echo "::error::mlb_edge.db no existe después de la corrida -- init_db() no se ejecutó o la ruta de DATABASE_URL es inválida."
+            exit 1
+          fi
+
+          echo "✅ Validación completa: el pipeline corrió de principio a fin, generó su base de datos y su resumen final."

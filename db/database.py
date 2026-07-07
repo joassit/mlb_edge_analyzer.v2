@@ -9,22 +9,72 @@ Guardamos cada análisis diario para poder ver después si el modelo
 realmente hubiera tenido edge real (tracking de resultados).
 """
 
-from datetime import datetime
+import json
+import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime
+    create_engine, event, inspect, text,
+    Column, Integer, String, Float, Boolean, DateTime, Text, UniqueConstraint, Index
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from config import DATABASE_URL, MODEL_VERSION
+
+logger = logging.getLogger("mlb_edge_analyzer")
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
 
+def _utcnow_naive() -> datetime:
+    """Reemplazo de datetime.utcnow() (deprecado desde Python 3.12,
+    eliminado en una versión futura). Devuelve el mismo tipo que el
+    original -- un datetime NAIVE en UTC -- para no cambiar el formato ya
+    almacenado en las columnas DateTime existentes (que no usan
+    timezone=True); solo cambia cómo se obtiene el valor, no su forma."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+if DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_pragmas(dbapi_connection, connection_record):
+        """
+        WAL permite que el dashboard lea mientras el cron escribe, sin
+        bloquear ninguno de los dos lados. synchronous=NORMAL es seguro en
+        modo WAL (solo arriesga la transacción más reciente ante un corte
+        de energía, nunca corrupción) y evita un fsync completo en cada
+        commit. foreign_keys=ON no tiene efecto todavía -- ningún modelo
+        declara ForeignKey() hoy -- pero lo dejamos activado para cuando
+        se agreguen relaciones reales entre tablas.
+        """
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA foreign_keys=ON;")
+        cursor.close()
+
+
 class GameAnalysis(Base):
     __tablename__ = "game_analysis"
+    __table_args__ = (
+        # Incluye model_version a propósito: si se sube MODEL_VERSION y se
+        # recalcula el mismo día, queda una fila por versión (para comparar
+        # rendimiento entre versiones, el objetivo declarado del proyecto),
+        # en vez de que la versión nueva sobreescriba a la vieja. El upsert
+        # de save_analysis() sigue siendo idempotente dentro de la MISMA
+        # versión — correr el pipeline dos veces con el mismo código no
+        # duplica filas.
+        UniqueConstraint("game_pk", "game_date", "model_version", name="uq_pred"),
+        # uq_pred es un índice único, pero su columna izquierda es game_pk,
+        # no game_date -- no sirve para acelerar queries que filtran SOLO
+        # por game_date (compute_metrics, get_predictions_without_result),
+        # que sin esto hacen full table scan. Ver db/migrate_v07.py para
+        # bases de datos existentes creadas antes de este índice.
+        Index("ix_game_date_pk", "game_date", "game_pk"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     game_pk = Column(Integer, nullable=False)
@@ -33,8 +83,6 @@ class GameAnalysis(Base):
     home_team = Column(String, nullable=False)
     away_pitcher = Column(String)
     home_pitcher = Column(String)
-    away_pitcher_id = Column(Integer, nullable=True)
-    home_pitcher_id = Column(Integer, nullable=True)
     away_bullpen_era = Column(Float, nullable=True)
     home_bullpen_era = Column(Float, nullable=True)
     away_k_pct = Column(Float, nullable=True)
@@ -50,22 +98,37 @@ class GameAnalysis(Base):
     home_proj_runs = Column(Float, nullable=True)
     away_skellam_prob = Column(Float, nullable=True)
     home_skellam_prob = Column(Float, nullable=True)
+    away_negbin_prob = Column(Float, nullable=True)
+    home_negbin_prob = Column(Float, nullable=True)
     home_covers_rl_prob = Column(Float, nullable=True)
     away_covers_rl_prob = Column(Float, nullable=True)
     fair_total_runs = Column(Float, nullable=True)
     away_market_prob = Column(Float, nullable=True)
     home_market_prob = Column(Float, nullable=True)
+    away_market_no_vig_prob = Column(Float, nullable=True)
+    home_market_no_vig_prob = Column(Float, nullable=True)
+    # Momio crudo (americano) y su procedencia -- away/home_market_prob ya
+    # son la probabilidad implícita DERIVADA de esto, pero el momio real
+    # nunca quedaba expuesto para auditar el reporte (ver auditoría de
+    # momios en reportes). market_captured_at es None para cuotas
+    # manuales (MARKET_ODDS no trae timestamp de captura).
+    away_odds = Column(Float, nullable=True)
+    home_odds = Column(Float, nullable=True)
+    market_price_source = Column(String, nullable=True)  # api_live / api_cache / api_stale_cache / manual
+    market_captured_at = Column(DateTime, nullable=True)
+    market_favorite_team = Column(String, nullable=True)
+    market_favorite_side = Column(String, nullable=True)  # "home" / "away" / None si pick'em
+    market_favorite_prob = Column(Float, nullable=True)
+    model_edge_vs_market_favorite = Column(Float, nullable=True)
     away_edge = Column(Float, nullable=True)
     home_edge = Column(Float, nullable=True)
-    away_edge_novig = Column(Float, nullable=True)
-    home_edge_novig = Column(Float, nullable=True)
     away_ev = Column(Float, nullable=True)
     home_ev = Column(Float, nullable=True)
-    odds_source = Column(String, nullable=True)
+    flag_review = Column(Boolean, nullable=True, default=False)
     decision = Column(String, nullable=True)  # tu decisión final, texto libre
     model_version = Column(String, default=MODEL_VERSION)
     git_commit = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
 
 
 class ActualResult(Base):
@@ -78,7 +141,7 @@ class ActualResult(Base):
     away_score = Column(Integer, nullable=False)
     winner = Column(String, nullable=False)  # "home" o "away"
     total_runs = Column(Integer, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=_utcnow_naive)
 
 
 class Bet(Base):
@@ -98,34 +161,379 @@ class Bet(Base):
     model_prob = Column(Float, nullable=False)
     expected_value = Column(Float, nullable=True)  # EV por unidad, calculado al momento de apostar
     stake = Column(Float, nullable=False)
-    placed_at = Column(DateTime, default=datetime.utcnow)
+    placed_at = Column(DateTime, default=_utcnow_naive)
     result = Column(String, default="pending")  # pending, win, loss
     profit = Column(Float, nullable=True)  # se llena al liquidar
+    closing_odds = Column(Float, nullable=True)  # cuota del mismo lado cerca del inicio del juego
+    clv = Column(Float, nullable=True)  # closing line value, en probabilidad (ver record_closing_odds)
+
+
+class Pick(Base):
+    """
+    Recomendación generada POR EL SISTEMA — separada de Bet a propósito,
+    igual que Bet está separada de GameAnalysis: un Pick es lo que el
+    modelo recomienda (unidades nocionales, 1u pareja por pick); Bet es el
+    dinero real que decidiste apostar. No todo Pick se convierte en Bet, y
+    liquidar Picks no debe tocar el ROI real de Bet.
+
+    Hasta 3 por partido (uno por mercado: moneyline, run_line, totals).
+    `forced=True` marca los picks generados sin edge real, solo para
+    cumplir la regla de "siempre al menos 1 pick por partido" — las
+    métricas de desempeño los mantienen separados de los picks reales.
+    """
+    __tablename__ = "picks"
+    __table_args__ = (
+        UniqueConstraint("game_pk", "game_date", "market", "selection",
+                         name="uq_pick_game_market_selection"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    game_pk = Column(Integer, nullable=False)
+    game_date = Column(String, nullable=False)
+    market = Column(String, nullable=False)      # "moneyline" | "run_line" | "totals"
+    selection = Column(String, nullable=False)   # "home"/"away" (ML, RL) o "over"/"under" (totales)
+    line = Column(Float, nullable=True)          # null en ML; -1.5/+1.5 en RL; ej. 8.5 en totales
+    # Solo aplica a run_line: "home" o "away", quién es el favorito real del
+    # mercado (da -line) -- None en ML/totales. Nullable para compatibilidad
+    # con picks viejos (se asume "home" al leer, ver _resolve_pick_outcome()).
+    favorite_side = Column(String, nullable=True)
+    model_prob = Column(Float, nullable=False)
+    market_prob = Column(Float, nullable=True)
+    edge = Column(Float, nullable=True)
+    ev = Column(Float, nullable=True)
+    odds_used = Column(Float, nullable=True)
+    forced = Column(Boolean, nullable=False, default=False)
+    # Qué modelo alimentó model_prob para este pick ("heuristic"/"skellam"/
+    # "negbin", ver config.PICK_PROBABILITY_SOURCE y model/picks.py) --
+    # trazabilidad: si se recalibra o se cambia la fuente en el futuro, un
+    # pick viejo sigue diciendo con qué modelo se generó de verdad.
+    prob_source = Column(String, nullable=True)
+    # True cuando el modelo que generó este pick (prob_source) favorece un
+    # lado distinto al que favorece el heurístico -- una señal de que el
+    # cambio de fuente de probabilidad realmente movió la recomendación,
+    # no solo el número. None cuando no aplica (run_line/totals nunca
+    # tuvieron una versión heurística que comparar).
+    directional_discrepancy = Column(Boolean, nullable=True)
+    # True si este pick se generó con menos de
+    # config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION picks liquidados con
+    # cuota de mercado real en la base (no juegos con resultado final --
+    # ver tracking.results_tracker.count_liquidated_picks_with_market_odds():
+    # un juego sin cuota real nunca puso a prueba ningún edge) -- con una
+    # muestra tan chica, un "edge" del heurístico probablemente es
+    # ruido/error del modelo sin calibrar, no ineficiencia real de
+    # mercado. No bloquea la generación del pick (se sigue guardando
+    # igual, para acumular historial) -- solo lo marca para que el
+    # reporte y cualquier análisis de ROI futuro puedan excluirlo de
+    # "señal apostable real".
+    calibration_phase = Column(Boolean, nullable=False, default=False)
+    result = Column(String, default="pending")   # pending / win / loss / push
+    profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)
+    model_version = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+
+class FeatureSnapshot(Base):
+    """
+    Insumos crudos (ERA, OPS, bullpen, parque, clima, cuotas) usados para
+    generar una predicción, congelados con su fecha de captura.
+
+    Sin esto, "recalcular un juego histórico" significaría volver a
+    consultar la MLB Stats API por sus stats de temporada *actuales* —que
+    ya incluyen partidos posteriores al que se está recalculando— y
+    contaminar el backtest con información del futuro (data leakage). Todo
+    recálculo histórico debe leer de aquí, nunca volver a golpear la API en
+    vivo.
+    """
+    __tablename__ = "feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint("game_pk", "game_date", name="uq_feature_snapshot_game_pk_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    game_pk = Column(Integer, nullable=False)
+    game_date = Column(String, nullable=False)
+    captured_at = Column(DateTime, default=_utcnow_naive)
+    model_version = Column(String, default=MODEL_VERSION)
+    raw_inputs_json = Column(Text, nullable=False)  # dict serializado — ver save_feature_snapshot
+
+    # Congelados aparte del blob de arriba (que ya los incluye) para que se
+    # puedan auditar/consultar sin deserializar JSON. Sin esto, si
+    # PARK_FACTOR_WEIGHT/WEATHER_CORRECTION cambian en config.py después de
+    # esta fecha, recalcular este juego con model.predictor leería los
+    # valores NUEVOS en vez de los que realmente se usaron -- rompiendo la
+    # reproducibilidad exacta que este Store existe para garantizar.
+    park_factor_weight = Column(Float, nullable=True)
+    weather_correction = Column(Float, nullable=True)
+    starter_weight = Column(Float, nullable=True)
+    home_field_advantage = Column(Float, nullable=True)
+
+
+def _auto_add_missing_columns():
+    """
+    SQLAlchemy `create_all()` solo crea tablas que no existen — nunca altera
+    una tabla ya presente en el archivo `.db` del usuario. Como este
+    proyecto todavía no tiene un framework de migraciones (Alembic queda
+    para cuando el esquema esté más estable), cada columna nueva que se
+    agrega a un modelo existente rompería el primer INSERT contra una base
+    de datos creada con una versión anterior del código.
+
+    Este helper es una salvaguarda mínima y segura: solo AGREGA columnas
+    nullable que falten, nunca borra ni altera columnas existentes. Correr
+    dos veces es inofensivo (ALTER TABLE ADD COLUMN falla si ya existe, y
+    ese error se ignora a propósito).
+    """
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue
+            existing_columns = {col["name"] for col in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing_columns:
+                    continue
+                col_type = column.type.compile(engine.dialect)
+                try:
+                    conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}"))
+                except Exception as e:
+                    # Ya existe, o el dialecto no soporta ALTER simple — no es fatal.
+                    logger.debug(f"No se pudo agregar {table.name}.{column.name}: {e}")
 
 
 def init_db():
-    """Crea las tablas si no existen. Llamar una vez al arrancar el proyecto."""
+    """Crea las tablas que falten y agrega columnas nuevas a las que ya
+    existan. Llamar una vez al arrancar el proyecto."""
     Base.metadata.create_all(engine)
+    _auto_add_missing_columns()
+
+
+def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> None:
+    """Congela los insumos crudos de una predicción. Upsert por
+    (game_pk, game_date), igual que save_analysis — re-ejecutar el pipeline
+    el mismo día actualiza el snapshot, no lo duplica.
+
+    Un solo reintento si dos corridas concurrentes insertan la misma fila
+    entre la búsqueda y el commit (IntegrityError sobre
+    uq_feature_snapshot_game_pk_date) -- el reintento vuelve a buscar y
+    esta vez sí encuentra la fila (ya insertada por la otra corrida) y
+    actualiza en vez de insertar. No protege contra una segunda colisión
+    en la misma ventana -- eso ya no es una carrera real, es un bug aparte."""
+    payload = json.dumps(raw_inputs, default=str)
+    frozen_config = {
+        "park_factor_weight": raw_inputs.get("park_factor_weight"),
+        "weather_correction": raw_inputs.get("weather_correction"),
+        "starter_weight": raw_inputs.get("starter_weight"),
+        "home_field_advantage": raw_inputs.get("home_field_advantage"),
+    }
+
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            existing = (
+                session.query(FeatureSnapshot)
+                .filter_by(game_pk=game_pk, game_date=game_date)
+                .one_or_none()
+            )
+            if existing:
+                existing.raw_inputs_json = payload
+                existing.captured_at = _utcnow_naive()
+                existing.model_version = MODEL_VERSION
+                for key, value in frozen_config.items():
+                    setattr(existing, key, value)
+            else:
+                session.add(FeatureSnapshot(
+                    game_pk=game_pk, game_date=game_date,
+                    raw_inputs_json=payload, model_version=MODEL_VERSION,
+                    **frozen_config,
+                ))
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
+
+
+def get_feature_snapshot(game_pk: int, game_date: str) -> dict | None:
+    """Recupera los insumos crudos congelados de una predicción, para
+    recalcularla con un modelo nuevo sin volver a golpear ninguna API."""
+    session = SessionLocal()
+    try:
+        snap = (
+            session.query(FeatureSnapshot)
+            .filter_by(game_pk=game_pk, game_date=game_date)
+            .one_or_none()
+        )
+        if snap is None:
+            return None
+        return {
+            "raw_inputs": json.loads(snap.raw_inputs_json),
+            "captured_at": snap.captured_at,
+            "model_version": snap.model_version,
+        }
+    finally:
+        session.close()
 
 
 def save_analysis(row: dict) -> None:
-    """Guarda o ACTUALIZA la predicción (idempotente por game_pk + fecha).
-    Correr main.py varias veces el mismo día ya no duplica filas
-    ni contamina el Brier Score."""
+    """Upsert por (game_pk, game_date, model_version): re-ejecutar el
+    pipeline el mismo día CON LA MISMA VERSIÓN DE MODELO actualiza la fila
+    en vez de duplicarla. Si cambia model_version, se guarda como fila
+    nueva a propósito (permite comparar versiones del modelo entre sí) —
+    ver el comentario del UniqueConstraint en GameAnalysis.
+
+    Resuelve model_version explícitamente a MODEL_VERSION si el caller no
+    lo pasó: la columna tiene default=MODEL_VERSION a nivel de SQLAlchemy,
+    pero ese default solo se aplica al insertar — si la búsqueda del upsert
+    comparara contra None en vez del valor que realmente va a quedar
+    grabado, nunca encontraría la fila existente y duplicaría el insert.
+
+    Un solo reintento si dos corridas concurrentes insertan la misma fila
+    entre la búsqueda y el commit (IntegrityError sobre uq_pred) -- ver el
+    mismo criterio en save_feature_snapshot()."""
+    model_version = row.get("model_version") or MODEL_VERSION
+    row = {**row, "model_version": model_version}
+
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            existing = (
+                session.query(GameAnalysis)
+                .filter_by(game_pk=row["game_pk"], game_date=row["game_date"],
+                           model_version=model_version)
+                .one_or_none()
+            )
+            if existing:
+                for key, value in row.items():
+                    setattr(existing, key, value)
+            else:
+                session.add(GameAnalysis(**row))
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
+
+
+def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: str) -> None:
+    """
+    Upsert por (game_pk, game_date, market, selection): re-ejecutar el
+    pipeline el mismo día actualiza los picks existentes en vez de
+    duplicarlos — mismo principio de idempotencia que save_analysis().
+
+    Un solo reintento de TODA la tanda si el commit choca con
+    uq_pick_game_market_selection (otra corrida concurrente insertó alguno
+    de estos picks primero) -- el reintento vuelve a buscar cada pick y
+    esta vez sí encuentra los que ya existen, actualizándolos en vez de
+    intentar insertarlos de nuevo.
+    """
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            for p in picks:
+                existing = (
+                    session.query(Pick)
+                    .filter_by(game_pk=game_pk, game_date=game_date,
+                               market=p["market"], selection=p["selection"])
+                    .one_or_none()
+                )
+                fields = {
+                    "line": p.get("line"),
+                    "favorite_side": p.get("favorite_side"),
+                    "model_prob": p["model_prob"],
+                    "market_prob": p.get("market_prob"),
+                    "edge": p.get("edge"),
+                    "ev": p.get("ev"),
+                    "odds_used": p.get("odds_used"),
+                    "forced": p.get("forced", False),
+                    "prob_source": p.get("prob_source"),
+                    "directional_discrepancy": p.get("directional_discrepancy"),
+                    "calibration_phase": p.get("calibration_phase", False),
+                    "model_version": model_version,
+                }
+                if existing:
+                    for key, value in fields.items():
+                        setattr(existing, key, value)
+                else:
+                    session.add(Pick(game_pk=game_pk, game_date=game_date,
+                                      market=p["market"], selection=p["selection"], **fields))
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
+
+
+def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
+    """Determina win/loss/push de un Pick contra el resultado real del
+    juego. `result` es el mismo dict que usa save_result / settle_bets_for_game
+    (home_score, away_score, winner, total_runs)."""
+    if pick.market == "moneyline":
+        return "win" if pick.selection == result["winner"] else "loss"
+
+    if pick.market == "run_line":
+        # Antes esto estaba hardcodeado a diff>=2 / diff<=1 (el umbral fijo
+        # de la línea -1.5/+1.5 estándar de MLB), ignorando pick.line por
+        # completo -- daba el resultado correcto solo porque hasta ahora
+        # MARKET_SPREADS nunca cargó una línea distinta a 1.5. El día que
+        # se cargue una línea alterna (-2.5, +0.5, etc.) esto liquidaba mal
+        # el pick en silencio. model/markets.py::run_line_prob() ya
+        # generalizaba correctamente sobre `line` para la PROBABILIDAD;
+        # aquí se hace lo mismo para la LIQUIDACIÓN real del pick. A su vez,
+        # esto asumía que el LOCAL siempre era el favorito (da -line) --
+        # favorite_side generaliza también ese supuesto (ver C1).
+        diff = result["home_score"] - result["away_score"]
+        line = pick.line if pick.line is not None else 1.5
+        favorite_side = pick.favorite_side if pick.favorite_side is not None else "home"
+        home_spread = -line if favorite_side == "home" else line
+        home_margin = diff + home_spread
+        margin = home_margin if pick.selection == "home" else -home_margin
+        if margin == 0:
+            return "push"  # solo alcanzable con una línea entera (X.0), no con el X.5 estándar
+        return "win" if margin > 0 else "loss"
+
+    if pick.market == "totals":
+        if result["total_runs"] == pick.line:
+            return "push"
+        over_hit = result["total_runs"] > pick.line
+        if pick.selection == "over":
+            return "win" if over_hit else "loss"
+        return "win" if not over_hit else "loss"
+
+    raise ValueError(f"Mercado desconocido en Pick: {pick.market}")
+
+
+def settle_picks_for_game(game_pk: int, result: dict) -> int:
+    """
+    Liquida TODOS los picks pendientes de un juego ya terminado (moneyline,
+    run_line, totals), calculando profit_unit en unidades nocionales (1u
+    pareja por pick) — separado del profit/stake real de Bet.
+    """
     session = SessionLocal()
     try:
-        existing = (
-            session.query(GameAnalysis)
-            .filter(GameAnalysis.game_pk == row["game_pk"],
-                    GameAnalysis.game_date == row["game_date"])
-            .first()
+        picks = (
+            session.query(Pick)
+            .filter(Pick.game_pk == game_pk, Pick.result == "pending")
+            .all()
         )
-        if existing:
-            for key, value in row.items():
-                setattr(existing, key, value)
-        else:
-            session.add(GameAnalysis(**row))
+        for p in picks:
+            outcome = _resolve_pick_outcome(p, result)
+            p.result = outcome
+            if outcome == "push":
+                p.profit_unit = 0.0
+            elif outcome == "win":
+                p.profit_unit = (100 / abs(p.odds_used)) if p.odds_used < 0 else (p.odds_used / 100)
+            else:
+                p.profit_unit = -1.0
         session.commit()
+        return len(picks)
     finally:
         session.close()
 
@@ -183,32 +591,64 @@ def settle_bets_for_game(game_pk: int, winner: str) -> int:
         session.close()
 
 
-def get_prediction_by_game_pk(game_pk: int, game_date: str) -> dict | None:
-    """Busca la predicción ya guardada de un juego específico (para auditoría same-day)."""
+def record_closing_odds(game_pk: int, side: str, closing_odds: float) -> int:
+    """
+    Registra la cuota de cierre para las apuestas pendientes/liquidadas de
+    un juego y lado dados, y calcula el CLV en espacio de probabilidad:
+
+        clv = implied_prob(closing_odds) - implied_prob(tu cuota al apostar)
+
+    Positivo = el mercado se movió hacia tu lado después de que apostaste
+    (bateaste la línea de cierre) — el indicador que la industria usa para
+    separar skill real de varianza favorable en muestra chica.
+
+    Nota: "cierre" aquí depende de CUÁNDO se llame esta función. Capturar
+    la cuota exacta al inicio del juego requiere un scheduler corriendo a
+    esa hora exacta (Orchestration Engine, fuera del alcance de esta fase)
+    — hoy es responsabilidad de quien invoque esta función llamarla lo más
+    cerca posible del inicio real del partido.
+    """
+    from model.edge import implied_prob
+
     session = SessionLocal()
     try:
-        pred = (
-            session.query(GameAnalysis)
-            .filter(GameAnalysis.game_pk == game_pk, GameAnalysis.game_date == game_date)
-            .order_by(GameAnalysis.created_at.desc())
-            .first()
+        bets = (
+            session.query(Bet)
+            .filter(Bet.game_pk == game_pk, Bet.side == side, Bet.market == "moneyline")
+            .all()
         )
-        if pred is None:
-            return None
-        return {
-            "away_team": pred.away_team, "home_team": pred.home_team,
-            "away_pitcher": pred.away_pitcher, "home_pitcher": pred.home_pitcher,
-            "away_pitcher_id": pred.away_pitcher_id, "home_pitcher_id": pred.home_pitcher_id,
-            "away_model_prob": pred.away_model_prob, "home_model_prob": pred.home_model_prob,
-            "away_skellam_prob": pred.away_skellam_prob, "home_skellam_prob": pred.home_skellam_prob,
-            "fair_total_runs": pred.fair_total_runs,
-        }
+        for bet in bets:
+            bet.closing_odds = closing_odds
+            bet.clv = implied_prob(closing_odds) - implied_prob(bet.odds)
+        session.commit()
+        return len(bets)
+    finally:
+        session.close()
+
+
+def get_pending_moneyline_bets(game_date: str) -> list[dict]:
+    """Apuestas moneyline de una fecha dada que todavía no tienen cuota de
+    cierre registrada — para que scripts/capture_closing_lines.py sepa
+    cuáles buscar sin tener que consultar la tabla completa cada vez."""
+    session = SessionLocal()
+    try:
+        bets = (
+            session.query(Bet)
+            .filter(Bet.game_date == game_date, Bet.market == "moneyline", Bet.closing_odds.is_(None))
+            .all()
+        )
+        return [{"game_pk": b.game_pk, "side": b.side} for b in bets]
     finally:
         session.close()
 
 
 def get_predictions_without_result(days_back: int = 5) -> list[dict]:
-    """Predicciones de los últimos N días que todavía no tienen resultado guardado."""
+    """Predicciones de los últimos N días que todavía no tienen resultado
+    guardado. Deduplicado por game_pk: como GameAnalysis ahora puede tener
+    más de una fila por juego (una por model_version, ver UniqueConstraint
+    uq_pred), sin este dedup un mismo juego se procesaría dos veces en
+    update_results() -- llamadas duplicadas a la API de resultados y un
+    contador de "actualizados" inflado."""
     from datetime import date, timedelta
 
     cutoff = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
@@ -220,13 +660,18 @@ def get_predictions_without_result(days_back: int = 5) -> list[dict]:
         predictions = (
             session.query(GameAnalysis)
             .filter(GameAnalysis.game_date >= cutoff, GameAnalysis.game_date <= yesterday)
+            .order_by(GameAnalysis.id.desc())
             .all()
         )
-        return [
-            {"game_pk": p.game_pk, "game_date": p.game_date,
-             "away_team": p.away_team, "home_team": p.home_team}
-            for p in predictions if p.game_pk not in existing_pks
-        ]
+        seen_pks = set()
+        result = []
+        for p in predictions:
+            if p.game_pk in existing_pks or p.game_pk in seen_pks:
+                continue
+            seen_pks.add(p.game_pk)
+            result.append({"game_pk": p.game_pk, "game_date": p.game_date,
+                            "away_team": p.away_team, "home_team": p.home_team})
+        return result
     finally:
         session.close()
 
