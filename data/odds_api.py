@@ -84,10 +84,29 @@ def _read_cache(ignore_ttl: bool = False) -> list | None:
         return None
 
 
+def _atomic_write_json(path: str, data) -> None:
+    """
+    Escribe JSON de forma atómica: a un archivo temporal en el mismo
+    directorio, luego os.replace() (atómico en POSIX) sobre el destino
+    final -- open(path, "w") directo trunca el archivo ANTES de escribir
+    nada, así que un crash/excepción a mitad de la escritura deja el
+    archivo real vacío/corrupto. Con esto, una escritura fallida nunca
+    toca el archivo existente -- el temporal corrupto se descarta solo.
+
+    NO es multi-proceso-seguro: dos procesos escribiendo al mismo tiempo
+    pueden pisarse (el último os.replace() gana) -- un lock inter-proceso
+    (ej. fcntl) queda fuera de alcance, esto solo evita corrupción por
+    escritura parcial, no condiciones de carrera entre procesos.
+    """
+    tmp_path = f"{path}.tmp{os.getpid()}"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_path, path)
+
+
 def _write_cache(payload: list) -> None:
     try:
-        with open(_cache_file(), "w") as f:
-            json.dump({"fetched_at": time.time(), "payload": payload}, f)
+        _atomic_write_json(_cache_file(), {"fetched_at": time.time(), "payload": payload})
     except OSError as e:
         logger.warning(f"No se pudo escribir el caché de odds: {e}")
 
@@ -133,8 +152,7 @@ def _record_budget_usage() -> None:
     used = counts.get(month_key, 0)
     counts[month_key] = used + 1
     try:
-        with open(path, "w") as f:
-            json.dump(counts, f)
+        _atomic_write_json(path, counts)
     except OSError as e:
         logger.warning(f"No se pudo actualizar el contador de presupuesto de odds: {e}")
 

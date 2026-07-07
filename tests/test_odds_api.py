@@ -363,3 +363,66 @@ def test_fetch_moneyline_odds_sanitizes_api_key_from_error_log(monkeypatch, capl
     assert "SECRETO123" not in log_text
     assert "api.the-odds-api.com" in log_text
     assert "403" in log_text
+
+
+# --- M2: escritura atómica de caché/presupuesto (temp file + os.replace) ---
+# open(path, "w") directo trunca el archivo ANTES de escribir nada -- un
+# fallo a mitad de la escritura (crash, excepción) deja el archivo real
+# vacío/corrupto. _atomic_write_json() escribe a un temporal y solo
+# reemplaza el destino si la escritura completa tuvo éxito.
+
+def test_atomic_write_json_writes_correct_content(tmp_path):
+    path = str(tmp_path / "data.json")
+    odds_api._atomic_write_json(path, {"a": 1, "b": [1, 2, 3]})
+
+    import json
+    with open(path) as f:
+        assert json.load(f) == {"a": 1, "b": [1, 2, 3]}
+
+
+def test_atomic_write_json_leaves_original_file_intact_on_mid_write_failure(tmp_path, monkeypatch):
+    import json
+    path = str(tmp_path / "cache.json")
+    original = {"fetched_at": 123, "payload": ["datos", "reales", "importantes"]}
+    with open(path, "w") as f:
+        json.dump(original, f)
+
+    def fail_dump(*a, **k):
+        raise RuntimeError("simula un crash a mitad de la escritura")
+
+    monkeypatch.setattr(odds_api.json, "dump", fail_dump)
+
+    try:
+        odds_api._atomic_write_json(path, {"fetched_at": 456, "payload": ["nuevo"]})
+    except RuntimeError:
+        pass
+
+    with open(path) as f:
+        assert json.load(f) == original  # el archivo real NUNCA se tocó
+
+
+def test_atomic_write_json_does_not_leave_temp_file_behind_on_success(tmp_path):
+    import os
+    path = str(tmp_path / "cache.json")
+    odds_api._atomic_write_json(path, {"x": 1})
+
+    leftover = [f for f in os.listdir(tmp_path) if f != "cache.json"]
+    assert leftover == []
+
+
+def test_write_cache_uses_atomic_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(odds_api, "ODDS_CACHE_DIR", str(tmp_path))
+    odds_api._write_cache([{"book": "draftkings"}])
+
+    cached = odds_api._read_cache(ignore_ttl=True)
+    assert cached == [{"book": "draftkings"}]
+
+
+def test_record_budget_usage_uses_atomic_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(odds_api, "ODDS_CACHE_DIR", str(tmp_path))
+    odds_api._record_budget_usage()
+    odds_api._record_budget_usage()
+
+    from datetime import date
+    month_key = date.today().strftime("%Y-%m")
+    assert odds_api._read_budget_counts()[month_key] == 2
