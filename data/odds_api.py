@@ -23,6 +23,7 @@ lleva dos protecciones adicionales:
 import json
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timedelta
 
@@ -35,6 +36,20 @@ from data.quote_gate import gate_quote
 logger = logging.getLogger("mlb_edge_analyzer")
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+
+# Enmascara el VALOR de cualquier parámetro de query cuyo nombre contenga
+# "key" o "token" (case-insensitive) -- requests.RequestException incluye
+# la URL completa (con apiKey=<valor real> en el query string) en su propio
+# str(), y esos logs se suben como artifact de GitHub Actions (retención 30
+# días, repo público). Conserva host/status/todo lo demás intacto.
+_SENSITIVE_PARAM_RE = re.compile(r"(?i)([?&][^?&=\s]*(?:key|token)[^?&=\s]*=)[^&\s]+")
+
+
+def _sanitize(exc_or_text) -> str:
+    """Versión segura-de-loggear de una excepción o texto que pueda traer
+    una URL con credenciales -- aplicar en TODO punto de log de este módulo
+    que pueda incluir la excepción cruda de una llamada HTTP."""
+    return _SENSITIVE_PARAM_RE.sub(r"\1***", str(exc_or_text))
 
 
 def _normalize_team_name(name: str) -> str:
@@ -225,7 +240,7 @@ def fetch_moneyline_odds() -> list[dict]:
         resp.raise_for_status()
         payload = resp.json()
     except requests.RequestException as e:
-        logger.warning(f"No se pudo obtener cuotas de The Odds API: {e}")
+        logger.warning(f"No se pudo obtener cuotas de The Odds API: {_sanitize(e)}")
         stale = _read_cache(ignore_ttl=True)
         if stale is not None:
             logger.warning("Usando el último caché de odds conocido (vencido) tras un fallo de red.")

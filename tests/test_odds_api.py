@@ -306,3 +306,60 @@ def test_budget_guard_falls_back_to_stale_cache_when_exhausted(monkeypatch, tmp_
     events = odds_api.fetch_moneyline_odds()
     # Se degrada al caché vencido en vez de quedarse sin nada.
     assert len(events) == 1
+
+
+# --- C3: no filtrar ODDS_API_KEY a los logs ---
+# requests.RequestException incluye la URL completa (con apiKey=<valor
+# real> en el query string) en su propio str() -- esos logs se suben como
+# artifact de GitHub Actions (retención 30 días, repo público).
+
+def test_sanitize_masks_api_key_in_url():
+    text = ".../odds?apiKey=SECRETO123&regions=us"
+    sanitized = odds_api._sanitize(text)
+    assert "SECRETO123" not in sanitized
+    assert "apiKey=***" in sanitized
+
+
+def test_sanitize_preserves_host_and_status_code():
+    text = ("HTTPSConnectionPool(host='api.the-odds-api.com', port=443): Max retries exceeded "
+            "with url: /v4/sports/baseball_mlb/odds?apiKey=SECRETO123 (403 Forbidden)")
+    sanitized = odds_api._sanitize(text)
+    assert "api.the-odds-api.com" in sanitized
+    assert "403" in sanitized
+    assert "SECRETO123" not in sanitized
+
+
+def test_sanitize_masks_token_param_case_insensitive():
+    sanitized = odds_api._sanitize("...?Token=abc123&other=1")
+    assert "abc123" not in sanitized
+
+
+def test_sanitize_handles_exception_objects_directly():
+    exc = ValueError("fallo en .../odds?apiKey=SECRETO123")
+    sanitized = odds_api._sanitize(exc)
+    assert "SECRETO123" not in sanitized
+
+
+def test_fetch_moneyline_odds_sanitizes_api_key_from_error_log(monkeypatch, caplog):
+    import logging
+    import requests as real_requests
+
+    monkeypatch.setenv("ODDS_API_KEY", "SECRETO123")
+    monkeypatch.setattr(odds_api, "ODDS_API_MONTHLY_BUDGET", 5)
+
+    def fail(*a, **k):
+        raise real_requests.ConnectionError(
+            "HTTPSConnectionPool(host='api.the-odds-api.com', port=443): Max retries exceeded with url: "
+            "/v4/sports/baseball_mlb/odds?apiKey=SECRETO123&regions=us (403 Forbidden)"
+        )
+
+    monkeypatch.setattr(odds_api.requests, "get", fail)
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        events = odds_api.fetch_moneyline_odds()
+
+    assert events == []
+    log_text = " ".join(r.message for r in caplog.records)
+    assert "SECRETO123" not in log_text
+    assert "api.the-odds-api.com" in log_text
+    assert "403" in log_text
