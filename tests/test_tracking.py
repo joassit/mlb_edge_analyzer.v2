@@ -148,6 +148,94 @@ def test_compute_metrics_market_brier_is_none_without_market_data(tmp_path, monk
     assert metrics["market_brier_score"] is None
 
 
+# --- count_evaluated_games_all_time(): fase de calibración (config.MIN_GAMES_FOR_CALIBRATED_PICKS) ---
+
+def _add_evaluated_game(session, game_pk, game_date, away_model_prob=0.4, home_model_prob=0.6, model_version=None):
+    session.add(database.GameAnalysis(
+        game_pk=game_pk, game_date=game_date, away_team="A", home_team="B",
+        away_model_prob=away_model_prob, home_model_prob=home_model_prob,
+        model_version=model_version,
+    ))
+    session.add(database.ActualResult(
+        game_pk=game_pk, game_date=game_date, home_score=5, away_score=2, winner="home", total_runs=7,
+    ))
+
+
+def test_count_evaluated_games_all_time_is_zero_with_empty_db(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_empty_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", sessionmaker(bind=temp_engine))
+
+    assert results_tracker.count_evaluated_games_all_time() == 0
+
+
+def test_count_evaluated_games_all_time_counts_distinct_games(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_games_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    for pk in (1, 2, 3):
+        _add_evaluated_game(session, pk, "2026-01-01")
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_evaluated_games_all_time() == 3
+
+
+def test_count_evaluated_games_all_time_ignores_date_window():
+    # A diferencia de compute_metrics(days=N), esto NO tiene ventana de
+    # días -- un juego de hace un año debe contar igual, porque lo que
+    # importa es el histórico TOTAL acumulado, no uno reciente.
+    import inspect
+    sig = inspect.signature(results_tracker.count_evaluated_games_all_time)
+    assert "days" not in sig.parameters
+
+
+def test_count_evaluated_games_all_time_dedups_by_game_pk(tmp_path, monkeypatch):
+    # Mismo juego recalculado con dos model_version distintos -- dos filas
+    # de GameAnalysis para el mismo game_pk (ver UniqueConstraint uq_pred,
+    # que incluye model_version), pero un solo ActualResult (game_pk es
+    # único ahí) -- no debe contarse doble.
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_dedup_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    session.add(database.GameAnalysis(
+        game_pk=1, game_date="2026-01-01", away_team="A", home_team="B",
+        away_model_prob=0.4, home_model_prob=0.6, model_version="v1",
+    ))
+    session.add(database.GameAnalysis(
+        game_pk=1, game_date="2026-01-01", away_team="A", home_team="B",
+        away_model_prob=0.4, home_model_prob=0.6, model_version="v2",
+    ))
+    session.add(database.ActualResult(
+        game_pk=1, game_date="2026-01-01", home_score=5, away_score=2, winner="home", total_runs=7,
+    ))
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_evaluated_games_all_time() == 1
+
+
+def test_count_evaluated_games_all_time_excludes_invalid_probabilities(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_invalid_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    _add_evaluated_game(session, 1, "2026-01-01", away_model_prob=0.4, home_model_prob=0.4)  # no suma 1.0
+    _add_evaluated_game(session, 2, "2026-01-01", away_model_prob=0.4, home_model_prob=0.6)  # válido
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_evaluated_games_all_time() == 1
+
+
 def test_compute_pick_performance_separates_real_from_forced_picks(tmp_path, monkeypatch):
     temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_perf_test.db")
     database.Base.metadata.create_all(temp_engine)

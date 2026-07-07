@@ -528,3 +528,111 @@ def test_analyze_today_populates_discarded_games_with_detailed_message(monkeypat
     assert "A @ B" in message
     assert "ya estaba en curso" in message
     assert "estado: In Progress" in message
+
+
+# --- Exclusión de juegos ya "Final" (contaminación de métricas) ---
+# get_pitcher_era_ip()/get_team_ops() piden stats de TEMPORADA acumuladas en
+# el momento de la corrida, sin corte "as of date" -- si un juego ya
+# terminó, esas stats ya incluyen su propio resultado. Antes, "Final" se
+# aceptaba junto con "Preview" y se le generaba una "predicción" retroactiva
+# contaminada. Ahora se descarta igual que cualquier otro estado no-Preview.
+
+def test_discard_reason_phrase_for_final_state():
+    assert main._discard_reason_phrase("Final") == "ya terminó (Final) antes de correr el pipeline"
+
+
+def test_build_discard_message_for_final_game():
+    final_game = {
+        "away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+        "status": "Final", "game_time": "2026-07-06T15:03:00Z", "game_number": 1,
+    }
+    msg = main._build_discard_message(final_game, other_games_same_matchup=[])
+    assert "Philadelphia Phillies @ Kansas City Royals" in msg
+    assert "ya terminó (Final) antes de correr el pipeline" in msg
+    assert "estado: Final" in msg
+
+
+def test_analyze_today_discards_final_games_instead_of_processing_them(monkeypatch):
+    """El bug real: un juego que ya terminó (Final) al momento de correr el
+    pipeline no debe generar una predicción -- generarla usaría stats de
+    temporada que ya incluyen el resultado de ese mismo juego."""
+    def _fake_schedule_with_final_game(target_date=None):
+        games = _fake_get_schedule_two_games(target_date)
+        games[0]["abstract_state"] = "Final"
+        games[0]["status"] = "Final"
+        return games
+
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "get_schedule", _fake_schedule_with_final_game)
+    monkeypatch.setattr(main, "get_pitcher_era_ip", lambda pid, season=None: {30: (3.5, 100.0), 40: (4.0, 90.0)}[pid])
+    monkeypatch.setattr(main, "get_team_ops", lambda tid, season=None: {3: 0.760, 4: 0.750}[tid])
+    _clear_manual_markets(monkeypatch)
+
+    results = main.analyze_today()
+
+    # Solo el juego C@D (Preview) se procesa -- A@B (Final) se descarta.
+    assert len(results) == 1
+    assert results[0]["game_pk"] == 222
+
+    stats = main.analyze_today.last_run_stats
+    assert stats["discarded"] == 1
+    message = stats["discarded_games"][0]["message"]
+    assert "ya terminó (Final) antes de correr el pipeline" in message
+
+
+def test_build_discard_message_doubleheader_sibling_final_also_not_processed():
+    # Juego 1 pospuesto; juego 2 del mismo matchup ya es Final -- desde el
+    # fix, Final tampoco cuenta como "procesado", así que el mensaje debe
+    # decir "tampoco se procesó", no "sí se procesó".
+    game_1_postponed = {
+        "away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+        "status": "Postponed", "game_time": "2026-07-06T15:03:00Z", "game_number": 1,
+    }
+    game_2_final = {
+        "away_team": "Philadelphia Phillies", "home_team": "Kansas City Royals",
+        "status": "Final", "abstract_state": "Final",
+        "game_time": "2026-07-06T20:05:00Z", "game_number": 2,
+    }
+
+    msg = main._build_discard_message(game_1_postponed, other_games_same_matchup=[game_2_final])
+
+    assert "juego 1 de doble cartelera" in msg
+    assert "pospuesto" in msg
+    assert "juego 2 tampoco se procesó" in msg
+    assert "ya terminó (Final) antes de correr el pipeline" in msg
+    assert "sí se procesó" not in msg
+
+
+# --- _sqlite_persistence_risk_warning: visibilidad del riesgo de persistencia ---
+# mlb_edge.db sobre SQLite + actions/cache puede perderse en silencio
+# (evicción a los 7+ días, o límite de 10GB del repo) -- el aviso no
+# resuelve el riesgo (eso requiere un Postgres externo real, algo que solo
+# el dueño del proyecto puede provisionar), pero lo hace visible en cada
+# corrida en vez de quedar como un comentario que nadie lee.
+
+def test_sqlite_persistence_risk_warning_fires_for_sqlite_url():
+    warning = main._sqlite_persistence_risk_warning("sqlite:///mlb_edge.db")
+    assert warning is not None
+    assert "SQLite" in warning
+    assert "DATABASE_URL" in warning
+
+
+def test_sqlite_persistence_risk_warning_silent_for_external_database_url():
+    warning = main._sqlite_persistence_risk_warning("postgresql://user:pass@host:5432/db")
+    assert warning is None
+
+
+# --- _calibration_phase_note: heurístico sin calibrar con muestra chica ---
+# Con menos de config.MIN_GAMES_FOR_CALIBRATED_PICKS juegos evaluados, un
+# "edge" del heurístico probablemente es ruido, no señal de mercado real.
+
+def test_calibration_phase_note_fires_below_threshold():
+    note = main._calibration_phase_note(n_evaluated=34, min_games=200)
+    assert note is not None
+    assert "34/200" in note
+    assert "🧪" in note
+
+
+def test_calibration_phase_note_silent_at_or_above_threshold():
+    assert main._calibration_phase_note(n_evaluated=200, min_games=200) is None
+    assert main._calibration_phase_note(n_evaluated=500, min_games=200) is None

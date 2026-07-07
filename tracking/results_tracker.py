@@ -259,6 +259,40 @@ def compute_metrics(days: int = 30) -> dict:
     }
 
 
+def count_evaluated_games_all_time() -> int:
+    """
+    Cuenta cuántos juegos tienen predicción Y resultado real registrados,
+    SIN ventana de días (a diferencia de compute_metrics(days=N)) -- para
+    decidir si el histórico acumulado ya alcanza
+    config.MIN_GAMES_FOR_CALIBRATED_PICKS o el modelo heurístico todavía
+    está en fase de calibración (ver Pick.calibration_phase en
+    db/database.py). Mismo dedup por game_pk (una fila por model_version
+    distinto no debe contarse dos veces) y mismo filtro
+    validate_probabilities() que compute_metrics(), para no inflar el
+    conteo con una fila corrupta o un recálculo del mismo juego.
+    """
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(GameAnalysis, ActualResult)
+            .join(ActualResult, GameAnalysis.game_pk == ActualResult.game_pk)
+            .order_by(GameAnalysis.id.desc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    seen_pks = set()
+    count = 0
+    for pred, _result in rows:
+        if pred.game_pk in seen_pks:
+            continue
+        seen_pks.add(pred.game_pk)
+        if validate_probabilities(pred):
+            count += 1
+    return count
+
+
 # Rango [low, high) de confianza en el favorito declarado -- confidence =
 # max(prob, 1-prob) siempre cae en [0.5, 1.0], así que el último bucket usa
 # 1.01 como tope para incluir el caso límite confidence == 1.0 sin un

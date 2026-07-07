@@ -197,6 +197,15 @@ class Pick(Base):
     # no solo el número. None cuando no aplica (run_line/totals nunca
     # tuvieron una versión heurística que comparar).
     directional_discrepancy = Column(Boolean, nullable=True)
+    # True si este pick se generó con menos de config.MIN_GAMES_FOR_CALIBRATED_PICKS
+    # juegos evaluados con resultado real en la base -- con una muestra tan
+    # chica, un "edge" del heurístico probablemente es ruido/error del
+    # modelo sin calibrar, no ineficiencia real de mercado (ver
+    # tracking.results_tracker.count_evaluated_games_all_time()). No
+    # bloquea la generación del pick (se sigue guardando igual, para
+    # acumular historial) -- solo lo marca para que el reporte y cualquier
+    # análisis de ROI futuro puedan excluirlo de "señal apostable real".
+    calibration_phase = Column(Boolean, nullable=False, default=False)
     result = Column(String, default="pending")   # pending / win / loss / push
     profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)
     model_version = Column(String, nullable=True)
@@ -391,6 +400,7 @@ def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: s
                 "forced": p.get("forced", False),
                 "prob_source": p.get("prob_source"),
                 "directional_discrepancy": p.get("directional_discrepancy"),
+                "calibration_phase": p.get("calibration_phase", False),
                 "model_version": model_version,
             }
             if existing:
@@ -412,10 +422,20 @@ def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
         return "win" if pick.selection == result["winner"] else "loss"
 
     if pick.market == "run_line":
+        # Antes esto estaba hardcodeado a diff>=2 / diff<=1 (el umbral fijo
+        # de la línea -1.5/+1.5 estándar de MLB), ignorando pick.line por
+        # completo -- daba el resultado correcto solo porque hasta ahora
+        # MARKET_SPREADS nunca cargó una línea distinta a 1.5. El día que
+        # se cargue una línea alterna (-2.5, +0.5, etc.) esto liquidaba mal
+        # el pick en silencio. model/markets.py::run_line_prob() ya
+        # generalizaba correctamente sobre `line` para la PROBABILIDAD;
+        # aquí se hace lo mismo para la LIQUIDACIÓN real del pick.
         diff = result["home_score"] - result["away_score"]
-        if pick.selection == "home":
-            return "win" if diff >= 2 else "loss"
-        return "win" if diff <= 1 else "loss"  # visitante cubre +1.5: pierde por 1 o gana
+        line = pick.line if pick.line is not None else 1.5
+        margin = (diff - line) if pick.selection == "home" else (line - diff)
+        if margin == 0:
+            return "push"  # solo alcanzable con una línea entera (X.0), no con el X.5 estándar
+        return "win" if margin > 0 else "loss"
 
     if pick.market == "totals":
         if result["total_runs"] == pick.line:

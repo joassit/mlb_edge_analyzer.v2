@@ -211,8 +211,9 @@ def print_yesterday_review(review: dict | None) -> None:
 
 
 def print_report(rows: list[dict], picks_by_game: dict | None = None,
-                  discarded_games: list[dict] | None = None) -> None:
-    if not rows and not discarded_games:
+                  discarded_games: list[dict] | None = None,
+                  calibration_note: str | None = None) -> None:
+    if not rows and not discarded_games and not calibration_note:
         print("No hay juegos analizados hoy.")
         return
 
@@ -235,6 +236,14 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
             print(f"⏱️ {n} juegos no procesados:")
             for d in discarded_games:
                 print(f"  - {d['message']}")
+        print()
+
+    # Nota única (no por pick -- calibration_phase es el mismo valor para
+    # todos los picks de una corrida, repetirla en cada uno sería ruido)
+    # de que el histórico acumulado todavía no alcanza
+    # config.MIN_GAMES_FOR_CALIBRATED_PICKS -- ver main.py::_calibration_phase_note().
+    if calibration_note:
+        print(calibration_note)
         print()
 
     if not rows:

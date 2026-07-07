@@ -1,6 +1,14 @@
 """
-MLB EDGE ANALYZER — Versión 0.6.0
+MLB EDGE ANALYZER
 Orquestador: Realiza auditoría del día anterior y proyecciones del día actual.
+
+La versión del modelo NO se declara aquí -- ver config.MODEL_VERSION, la
+única fuente real: es parte literal de la clave de idempotencia de
+game_analysis/feature_snapshots (UniqueConstraint en db/database.py).
+Antes este docstring decía "Versión 0.6.0" mientras config.MODEL_VERSION
+decía "0.5.0-reconectado" al mismo tiempo -- dos números de versión
+distintos y desincronizados, y solo uno de los dos afectaba de verdad la
+idempotencia. Bump la versión SOLO en config.MODEL_VERSION.
 """
 
 import logging
@@ -23,11 +31,13 @@ from db.database import init_db, save_analysis, save_feature_snapshot, save_pick
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
 from tracking.results_tracker import (
     update_results, print_performance_report, print_calibration_report, audit_totals, compute_daily_review,
+    count_evaluated_games_all_time,
 )
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
-    PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION,
+    PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION, DATABASE_URL,
+    MIN_GAMES_FOR_CALIBRATED_PICKS,
 )
 from version_info import get_git_commit
 
@@ -61,6 +71,8 @@ def _discard_reason_phrase(detailed_state: str | None) -> str:
     quien lee el reporte (ver CAMBIO 1 de la auditoría de visibilidad de
     descartes)."""
     s = (detailed_state or "").lower()
+    if s == "final":
+        return "ya terminó (Final) antes de correr el pipeline"
     if "in progress" in s or s == "live":
         return "ya estaba en curso"
     if "postponed" in s:
@@ -86,8 +98,10 @@ def _format_game_time(iso_str: str | None) -> str | None:
 
 
 def _build_discard_message(game: dict, other_games_same_matchup: list[dict]) -> str:
-    """Mensaje legible de por qué se descartó `game` por estado fuera de
-    Preview/Final. Si `other_games_same_matchup` no está vacío (mismo
+    """Mensaje legible de por qué se descartó `game` por estado distinto de
+    "Preview" (incluye "Final" -- ver el comentario en analyze_today() sobre
+    por qué un juego ya terminado también se descarta, no solo uno en
+    curso/pospuesto/suspendido). Si `other_games_same_matchup` no está vacío (mismo
     away_team_id/home_team_id -- MLB Stats API le da un game_pk DISTINTO a
     cada juego de una doble cartelera, así que la única forma de
     detectarlos es por matchup + gameNumber, nunca por game_pk), identifica
@@ -106,10 +120,12 @@ def _build_discard_message(game: dict, other_games_same_matchup: list[dict]) -> 
     own_num = game.get("game_number") or "?"
     sibling_num = sibling.get("game_number") or "?"
     sibling_abstract = sibling.get("abstract_state")
+    # "Final" ya NO cuenta como procesado (ver CAMBIO de exclusión de
+    # juegos terminados en analyze_today()) -- solo "Preview" sí se
+    # procesa; cualquier otro estado, incluido Final, cae al mismo mensaje
+    # de "tampoco se procesó" que cualquier otro descarte.
     if sibling_abstract == "Preview":
         sibling_desc = f"juego {sibling_num} sigue en Preview y sí se procesó"
-    elif sibling_abstract == "Final":
-        sibling_desc = f"juego {sibling_num} ya terminó (Final) y sí se procesó"
     else:
         sibling_reason = _discard_reason_phrase(sibling.get("status"))
         sibling_desc = f"juego {sibling_num} tampoco se procesó ({sibling_reason}, estado: {sibling.get('status')})"
@@ -136,7 +152,19 @@ def analyze_today() -> list[dict]:
         games_by_matchup.setdefault((g["away_team_id"], g["home_team_id"]), []).append(g)
 
     for g in games:
-        if g.get("abstract_state") not in ["Preview", "Final"]:
+        # Solo "Preview" genera predicción. "Final" se descarta A PROPÓSITO
+        # (antes se aceptaba junto con Preview): get_pitcher_era_ip()/
+        # get_team_ops()/get_bullpen_era() (data/stats.py) piden stats
+        # acumuladas de TEMPORADA en el momento de la corrida
+        # (params={"stats": "season", ...}), sin ningún corte "as of
+        # date" -- si el juego ya es Final cuando corre el pipeline, esas
+        # stats YA incluyen el resultado de ese mismo juego (MLB Stats API
+        # las actualiza casi en vivo). Generar una "predicción" en ese
+        # momento no es una proyección ciega: es un cálculo retroactivo
+        # contaminado con el propio resultado que se intenta predecir, y
+        # ensucia el histórico de compute_metrics()/calibración con una
+        # fila que no representa una predicción real hecha antes del juego.
+        if g.get("abstract_state") != "Preview":
             siblings = [
                 s for s in games_by_matchup[(g["away_team_id"], g["home_team_id"])]
                 if s["game_pk"] != g["game_pk"]
@@ -474,10 +502,60 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
 
 
 
+def _sqlite_persistence_risk_warning(database_url: str) -> str | None:
+    """Si `database_url` es SQLite (sin DATABASE_URL externo configurado),
+    devuelve el aviso de riesgo de persistencia -- None si no aplica.
+
+    En GitHub Actions, un mlb_edge.db SQLite solo sobrevive entre corridas
+    vía actions/cache (ver .github/workflows/daily_pipeline.yml), que el
+    propio workflow documenta como "best-effort": GitHub libera las cachés
+    no tocadas en 7+ días, o si se excede el límite de 10GB del repo. Si
+    eso pasa, el histórico completo (game_analysis/picks/feature_snapshots)
+    desaparece EN SILENCIO -- el pipeline simplemente arranca de cero sin
+    ningún error, y nada en el log lo distingue de un primer uso legítimo.
+    Este aviso no soluciona el riesgo (eso requiere un Postgres real
+    externo, ej. Neon/Supabase gratuito, vía el secret DATABASE_URL -- una
+    cuenta que solo el dueño del proyecto puede crear), pero lo saca de la
+    invisibilidad: aparece en CADA corrida mientras no haya un
+    DATABASE_URL externo, en vez de quedar como un riesgo documentado solo
+    en un comentario que nadie más lee."""
+    if not database_url.startswith("sqlite"):
+        return None
+    return (
+        "Corriendo sobre SQLite local sin DATABASE_URL externo configurado -- la persistencia "
+        "del histórico entre corridas depende de actions/cache (best-effort: GitHub puede "
+        "liberarla en silencio a los 7+ días de inactividad, o si se excede el límite de 10GB "
+        "del repo). Para persistencia real, configura el secret DATABASE_URL con un Postgres "
+        "gratuito (ej. Neon, Supabase) -- ver .github/workflows/daily_pipeline.yml."
+    )
+
+
+def _calibration_phase_note(n_evaluated: int, min_games: int) -> str | None:
+    """Nota de fase de calibración si el histórico acumulado (n_evaluated,
+    ver tracking.results_tracker.count_evaluated_games_all_time()) todavía
+    no alcanza min_games (config.MIN_GAMES_FOR_CALIBRATED_PICKS) -- None si
+    ya se alcanzó el umbral (los picks de hoy sí cuentan como señal real,
+    no solo recolección de datos). Ver Pick.calibration_phase en
+    db/database.py: el mismo booleano que esta nota resume se guarda por
+    pick, para poder excluirlos de un análisis de ROI futuro."""
+    if n_evaluated >= min_games:
+        return None
+    return (
+        f"🧪 Fase de calibración: {n_evaluated}/{min_games} juegos evaluados con resultado real -- "
+        f"con esta muestra, los edges/EV del heurístico probablemente reflejan error del modelo sin "
+        f"calibrar, no ineficiencia real de mercado. Los picks de hoy se generan y guardan igual (para "
+        f"acumular historial), pero no deberían tratarse como señal apostable todavía."
+    )
+
+
 def run_pipeline():
     start_time = time.monotonic()
     setup_logging()
     init_db()
+
+    persistence_warning = _sqlite_persistence_risk_warning(DATABASE_URL)
+    if persistence_warning:
+        logger.warning(persistence_warning)
 
     git_commit = get_git_commit()
     logger.info(f"Iniciando run_pipeline() -- model_version={MODEL_VERSION} git_commit={git_commit}")
@@ -522,6 +600,10 @@ def run_pipeline():
         "discarded_games": [],
     }
 
+    n_evaluated_games = count_evaluated_games_all_time()
+    calibration_note = _calibration_phase_note(n_evaluated_games, MIN_GAMES_FOR_CALIBRATED_PICKS)
+    in_calibration_phase = calibration_note is not None
+
     picks_by_game = {}
     all_picks_rows = []
 
@@ -533,6 +615,8 @@ def run_pipeline():
         if snapshot is not None:
             save_feature_snapshot(r["game_pk"], r["game_date"], snapshot)
         if picks:
+            for p in picks:
+                p["calibration_phase"] = in_calibration_phase
             save_picks(r["game_pk"], r["game_date"], picks, MODEL_VERSION)
             picks_by_game[r["game_pk"]] = picks
             for p in picks:
@@ -546,7 +630,8 @@ def run_pipeline():
     # detalle de juegos descartados (ver analyze_today()) queda visible en
     # el reporte aunque todos los juegos del día se hayan descartado, en
     # vez de perderse detrás de un "no hay juegos" genérico.
-    print_report(results, picks_by_game=picks_by_game, discarded_games=stats.get("discarded_games"))
+    print_report(results, picks_by_game=picks_by_game, discarded_games=stats.get("discarded_games"),
+                 calibration_note=calibration_note)
 
     if results:
         path = export_csv(results)

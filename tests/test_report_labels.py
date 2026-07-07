@@ -218,3 +218,38 @@ def test_print_report_shows_discard_note_even_with_no_games_processed(capsys):
     out = capsys.readouterr().out
     assert "⏱️ 1 juego no procesado:" in out
     assert "No hay juegos analizados hoy." in out
+
+
+# --- Nota de fase de calibración (config.MIN_GAMES_FOR_CALIBRATED_PICKS) ---
+
+def test_print_report_shows_calibration_note_when_provided(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    print_report(rows, calibration_note="🧪 Fase de calibración: 34/200 juegos evaluados con resultado real.")
+    out = capsys.readouterr().out
+    assert "🧪 Fase de calibración: 34/200" in out
+
+
+def test_print_report_shows_calibration_note_even_with_no_games_and_no_discards(capsys):
+    # Un día sin juegos (all-star break, etc.) no debe esconder la nota de
+    # calibración -- es informativa sobre el histórico acumulado, no
+    # depende de que haya juegos hoy.
+    print_report([], calibration_note="🧪 Fase de calibración: 10/200 juegos evaluados con resultado real.")
+    out = capsys.readouterr().out
+    assert "🧪 Fase de calibración: 10/200" in out
+    assert "No hay juegos analizados hoy." in out
+
+
+def test_print_report_shows_no_calibration_note_when_none(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    print_report(rows, calibration_note=None)
+    out = capsys.readouterr().out
+    assert "🧪" not in out
+    assert "calibración" not in out

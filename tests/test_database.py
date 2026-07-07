@@ -251,6 +251,33 @@ def test_save_picks_defaults_prob_source_to_none_when_absent(isolated_db):
         session.close()
 
 
+def test_save_picks_persists_calibration_phase_true(isolated_db):
+    pick = _make_pick("moneyline", "away")
+    pick["calibration_phase"] = True
+
+    isolated_db.save_picks(1, "2026-07-05", [pick], model_version="v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        row = session.query(isolated_db.Pick).filter_by(game_pk=1, game_date="2026-07-05").one()
+        assert row.calibration_phase is True
+    finally:
+        session.close()
+
+
+def test_save_picks_defaults_calibration_phase_to_false_when_absent(isolated_db):
+    # _make_pick no manda calibration_phase -- compatibilidad con picks
+    # generados antes de que existiera este campo (ver Pick.calibration_phase).
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("moneyline", "away")], model_version="v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        row = session.query(isolated_db.Pick).filter_by(game_pk=1, game_date="2026-07-05").one()
+        assert row.calibration_phase is False
+    finally:
+        session.close()
+
+
 def test_save_picks_allows_multiple_markets_same_game(isolated_db):
     picks = [
         _make_pick("moneyline", "away"),
@@ -329,6 +356,93 @@ def test_settle_picks_for_game_run_line_away_covers_by_losing_close(isolated_db)
     try:
         pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
         assert pick.result == "win"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_home_covers_alternate_line(isolated_db):
+    # Línea alterna -2.5 (no la estándar -1.5) -- antes del fix, la
+    # liquidación estaba hardcodeada a diff>=2/diff<=1 sin importar
+    # pick.line, así que esto habría liquidado mal (local gana por 3, que
+    # SÍ cubre -1.5 pero NO cubre -2.5).
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("run_line", "home", line=2.5, odds_used=120)], "v1")
+
+    # Local gana por 3 -> cubre -2.5 (gana por más de 2.5)
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 6, "away_score": 3, "winner": "home", "total_runs": 9,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "win"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_home_fails_alternate_line(isolated_db):
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("run_line", "home", line=2.5, odds_used=120)], "v1")
+
+    # Local gana por 2 -> cubre -1.5 pero NO cubre -2.5
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 5, "away_score": 3, "winner": "home", "total_runs": 8,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "loss"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_away_covers_alternate_line(isolated_db):
+    # Visitante +2.5: pierde por 2 -> cubre +2.5 (pierde por menos de 2.5)
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("run_line", "away", line=2.5, odds_used=-140)], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 5, "away_score": 3, "winner": "home", "total_runs": 8,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "win"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_away_fails_alternate_line(isolated_db):
+    # Visitante +2.5: pierde por 3 -> NO cubre +2.5
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("run_line", "away", line=2.5, odds_used=-140)], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 6, "away_score": 3, "winner": "home", "total_runs": 9,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "loss"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_pushes_on_exact_whole_number_line(isolated_db):
+    # Línea entera (2.0, no la X.5 estándar) -- diff exacto de 2 empata la
+    # línea: debe ser push, no win/loss. Solo alcanzable con una línea
+    # entera (nunca ocurre con el -1.5/+1.5 tradicional).
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("run_line", "home", line=2.0, odds_used=120)], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 5, "away_score": 3, "winner": "home", "total_runs": 8,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "push"
+        assert pick.profit_unit == 0.0
     finally:
         session.close()
 
