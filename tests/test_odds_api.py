@@ -334,6 +334,63 @@ def test_budget_guard_falls_back_to_stale_cache_when_exhausted(monkeypatch, tmp_
     assert len(events) == 1
 
 
+# --- Auditabilidad de mercado: fuente/antigüedad de la cuota usada ---
+# get_last_fetch_meta() expone de dónde salieron las cuotas de la última
+# llamada, para que reports/generate_report.py pueda mostrar "fuente:
+# API en vivo / caché / manual" en vez de inventar ese dato.
+
+def test_get_last_fetch_meta_reports_none_without_api_key(monkeypatch):
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    odds_api.fetch_moneyline_odds()
+    meta = odds_api.get_last_fetch_meta()
+    assert meta["source"] == "none"
+    assert meta["fetched_at"] is None
+
+
+def test_get_last_fetch_meta_reports_api_live_after_fresh_call(monkeypatch):
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
+    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+
+    odds_api.fetch_moneyline_odds()
+
+    meta = odds_api.get_last_fetch_meta()
+    assert meta["source"] == "api_live"
+    assert meta["fetched_at"] is not None
+
+
+def test_get_last_fetch_meta_reports_api_cache_when_served_from_cache(monkeypatch):
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
+    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+
+    odds_api.fetch_moneyline_odds()  # primera llamada real, escribe caché
+    odds_api.fetch_moneyline_odds()  # segunda: debe venir del caché
+
+    meta = odds_api.get_last_fetch_meta()
+    assert meta["source"] == "api_cache"
+    assert meta["fetched_at"] is not None
+
+
+def test_get_last_fetch_meta_reports_api_stale_cache_when_budget_exhausted(monkeypatch):
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
+    monkeypatch.setattr(odds_api, "ODDS_API_MONTHLY_BUDGET", 1)
+    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+
+    odds_api.fetch_moneyline_odds()  # consume el único request del presupuesto
+
+    monkeypatch.setattr(odds_api, "ODDS_API_CACHE_TTL_SECONDS", 0)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("no debería intentar una llamada real sin presupuesto")
+
+    monkeypatch.setattr(odds_api.requests, "get", fail_if_called)
+
+    odds_api.fetch_moneyline_odds()
+
+    meta = odds_api.get_last_fetch_meta()
+    assert meta["source"] == "api_stale_cache"
+    assert meta["fetched_at"] is not None
+
+
 # --- C3: no filtrar ODDS_API_KEY a los logs ---
 # requests.RequestException incluye la URL completa (con apiKey=<valor
 # real> en el query string) en su propio str() -- esos logs se suben como

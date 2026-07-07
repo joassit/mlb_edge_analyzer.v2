@@ -84,6 +84,32 @@ def _read_cache(ignore_ttl: bool = False) -> list | None:
         return None
 
 
+def _cache_fetched_at() -> float | None:
+    """Timestamp UNIX del caché actual, sin aplicar TTL -- separado de
+    _read_cache() (que sí aplica TTL y solo devuelve el payload) para no
+    tocar su contrato ya cubierto por tests existentes."""
+    path = _cache_file()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)["fetched_at"]
+    except (json.JSONDecodeError, KeyError, OSError):
+        return None
+
+
+_last_fetch_meta: dict = {"source": "none", "fetched_at": None}
+
+
+def get_last_fetch_meta() -> dict:
+    """Metadata de la última llamada a fetch_moneyline_odds(): de dónde
+    salieron las cuotas ('api_live' | 'api_cache' | 'api_stale_cache' |
+    'none') y el timestamp UNIX de cuándo se capturaron (None si no
+    aplica). Para reportar fuente/antigüedad de la cuota sin adivinar --
+    ver reports/generate_report.py."""
+    return dict(_last_fetch_meta)
+
+
 def _atomic_write_json(path: str, data) -> None:
     """
     Escribe JSON de forma atómica: a un archivo temporal en el mismo
@@ -233,17 +259,21 @@ def fetch_moneyline_odds() -> list[dict]:
     api_key = os.getenv("ODDS_API_KEY")
     if not api_key:
         logger.info("ODDS_API_KEY no configurada — se omite la consulta de cuotas en vivo.")
+        _last_fetch_meta.update(source="none", fetched_at=None)
         return []
 
     cached = _read_cache()
     if cached is not None:
+        _last_fetch_meta.update(source="api_cache", fetched_at=_cache_fetched_at())
         return _parse_payload(cached)
 
     if not _check_budget_available():
         stale = _read_cache(ignore_ttl=True)
         if stale is not None:
             logger.warning("Usando el último caché de odds conocido (vencido) por falta de presupuesto.")
+            _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
             return _parse_payload(stale)
+        _last_fetch_meta.update(source="none", fetched_at=None)
         return []
 
     params = {
@@ -262,11 +292,14 @@ def fetch_moneyline_odds() -> list[dict]:
         stale = _read_cache(ignore_ttl=True)
         if stale is not None:
             logger.warning("Usando el último caché de odds conocido (vencido) tras un fallo de red.")
+            _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
             return _parse_payload(stale)
+        _last_fetch_meta.update(source="none", fetched_at=None)
         return []
 
     _record_budget_usage()  # solo aquí, con la respuesta ya confirmada exitosa
     _write_cache(payload)
+    _last_fetch_meta.update(source="api_live", fetched_at=_cache_fetched_at())
     return _parse_payload(payload)
 
 

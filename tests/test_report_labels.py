@@ -277,3 +277,107 @@ def test_print_report_labels_game_level_edge_as_heuristic_vs_vig(capsys):
     out = capsys.readouterr().out
     assert "heurístico" in out.lower()
     assert "con vig" in out.lower()
+
+
+# --- Auditabilidad de momios: momio crudo, fuente y antigüedad de la
+# cuota, tanto a nivel de partido como de cada pick recomendado, y del
+# momio de apertura en la revisión de resultados de ayer. ---
+
+def test_print_report_shows_raw_odds_source_and_capture_time_when_available(capsys):
+    from datetime import datetime
+    row = _row_with_market_edge()
+    row.update({
+        "away_odds": 130, "home_odds": -150,
+        "market_price_source": "api_live",
+        "market_captured_at": datetime(2026, 7, 7, 12, 0, 0),
+    })
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "Momio" in out
+    assert "+130" in out
+    assert "-150" in out
+    assert "API en vivo" in out
+    assert "2026-07-07 12:00" in out
+    assert "antigüedad" in out.lower()
+    assert "Dato no disponible" not in out
+
+
+def test_print_report_shows_dato_no_disponible_when_source_and_capture_missing(capsys):
+    row = _row_with_market_edge()  # sin away_odds/market_price_source/market_captured_at
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "Dato no disponible" in out
+
+
+def test_print_report_does_not_duplicate_existing_market_lines(capsys):
+    row = _row_with_market_edge()
+    row.update({"away_odds": 130, "home_odds": -150, "market_price_source": "manual"})
+    print_report([row])
+    out = capsys.readouterr().out
+    # Las líneas que ya existían siguen presentes exactamente una vez.
+    assert out.count("Mercado  ->") == 1
+    assert out.count("Edge     ->") == 1
+    assert out.count("EV       ->") == 1
+
+
+def test_print_report_pick_line_shows_odds_implied_prob_and_kelly_placeholder(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    picks_by_game = {1: [{"market": "moneyline", "selection": "home", "line": None,
+                          "edge": 0.05, "ev": 0.1, "forced": False, "odds_used": -150}]}
+    print_report(rows, picks_by_game=picks_by_game)
+    out = capsys.readouterr().out
+    assert "momio -150" in out
+    assert "prob. implícita" in out
+    assert "Kelly Dato no disponible" in out
+
+
+def test_print_report_pick_line_shows_dato_no_disponible_without_odds_used(capsys):
+    rows = [{
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.4, "home_model_prob": 0.6,
+    }]
+    picks_by_game = {1: [{"market": "moneyline", "selection": "home", "line": None,
+                          "edge": 0.05, "ev": 0.1, "forced": False}]}  # sin odds_used
+    print_report(rows, picks_by_game=picks_by_game)
+    out = capsys.readouterr().out
+    assert "momio Dato no disponible" in out
+    assert "prob. implícita Dato no disponible" in out
+
+
+def test_print_yesterday_review_shows_opening_odds_and_missing_clv_note(capsys):
+    review = {
+        "review_date": "2026-07-05",
+        "n_games": 1,
+        "games": [{
+            "away_team": "Tampa Bay Rays", "home_team": "Philadelphia Phillies",
+            "away_score": 2, "home_score": 5,
+            "actual_margin": 3, "actual_total": 7,
+            "proj_margin": 1.2, "proj_total": 8.1,
+            "picks": {
+                "moneyline": {"market": "moneyline", "selection": "home", "line": None,
+                              "model_prob": 0.61, "forced": False, "result": "win",
+                              "profit_unit": 0.8, "odds_used": -150},
+                "run_line": None,
+                "totals": None,
+            },
+        }],
+        "by_market": {
+            "moneyline": {"real": {"n_picks": 1, "win_rate": 1.0, "roi": 0.8},
+                          "forced": {"n_picks": 0, "win_rate": None, "roi": None}},
+            "run_line": {"real": {"n_picks": 0, "win_rate": None, "roi": None},
+                         "forced": {"n_picks": 0, "win_rate": None, "roi": None}},
+            "totals": {"real": {"n_picks": 0, "win_rate": None, "roi": None},
+                       "forced": {"n_picks": 0, "win_rate": None, "roi": None}},
+        },
+        "brier_score": 0.15,
+    }
+    print_yesterday_review(review)
+    out = capsys.readouterr().out
+    assert "momio apertura -150" in out
+    assert "Dato no disponible" in out  # nota única de cierre/CLV/movimiento
+    assert out.count("Cierre / CLV / movimiento de mercado") == 1

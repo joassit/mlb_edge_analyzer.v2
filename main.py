@@ -13,7 +13,7 @@ idempotencia. Bump la versión SOLO en config.MODEL_VERSION.
 
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from logging_config import setup_logging
 from data.mlb_api import get_schedule
 from data.stats import (
@@ -27,7 +27,7 @@ from model.edge import implied_prob, edge, expected_value, market_favorite, no_v
 from model.picks import generate_pick_candidates, select_picks_for_game
 from data.odds_api import (
     fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price,
-    consensus_power_devig_prob,
+    consensus_power_devig_prob, get_last_fetch_meta,
 )
 from data.quote_gate import validate_manual_american_odds, validate_manual_line
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
@@ -152,6 +152,10 @@ def analyze_today() -> list[dict]:
     games = get_schedule(date.today())
     weather_by_team = preload_weather(games, get_park_info)
     odds_events = fetch_moneyline_odds()
+    # Fuente/momento de captura de las cuotas de esta corrida -- para poder
+    # auditar en el reporte de dónde salió el momio usado (API en vivo,
+    # caché, o manual), no solo la probabilidad ya derivada de él.
+    odds_fetch_meta = get_last_fetch_meta()
     results = []
     discarded_games = []
     n_discarded = 0
@@ -218,6 +222,7 @@ def analyze_today() -> list[dict]:
                 g, league_ops, weather_by_team, odds_events,
                 away_era_ip, home_era_ip, away_ops, home_ops,
                 league_era=league_era, league_runs_per_game=league_runs_per_game,
+                odds_fetch_meta=odds_fetch_meta,
             )
             results.append(row)
         except Exception as e:
@@ -328,7 +333,8 @@ def _validated_manual_market(game_pk: int, market_label: str, raw: dict | None,
 
 def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
                        away_era_ip, home_era_ip, away_ops, home_ops,
-                       league_era: float, league_runs_per_game: float) -> dict:
+                       league_era: float, league_runs_per_game: float,
+                       odds_fetch_meta: dict | None = None) -> dict:
     """Cuerpo de análisis de un solo juego, extraído de analyze_today() para
     que el try/except de aislamiento de errores por juego (un juego con un
     dato inesperado no debe tumbar el resto del día) tenga un límite claro,
@@ -357,6 +363,25 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
     manual_price = _validated_manual_market(g["game_pk"], "moneyline", MARKET_ODDS.get(g["game_pk"]),
                                              ("home", "away"))
     price = live_price or manual_price
+
+    # Procedencia del momio usado -- para auditar el reporte contra la
+    # cuota real, no solo la probabilidad ya derivada de ella. MARKET_ODDS
+    # (manual) no trae timestamp de captura, así que market_captured_at
+    # queda None a propósito en ese caso (no se inventa un valor).
+    odds_fetch_meta = odds_fetch_meta or {}
+    if live_price is not None:
+        market_price_source = odds_fetch_meta.get("source")
+        fetched_at_unix = odds_fetch_meta.get("fetched_at")
+        market_captured_at = (
+            datetime.fromtimestamp(fetched_at_unix, tz=timezone.utc).replace(tzinfo=None)
+            if fetched_at_unix is not None else None
+        )
+    elif manual_price is not None:
+        market_price_source = "manual"
+        market_captured_at = None
+    else:
+        market_price_source = None
+        market_captured_at = None
 
     # Run Line y Totales: solo cuotas manuales por ahora (ver
     # MARKET_SPREADS/MARKET_TOTALS arriba) — se calcula su no-vig igual
@@ -542,6 +567,10 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "home_market_prob": home_market_prob,
         "away_market_no_vig_prob": away_market_no_vig_prob,
         "home_market_no_vig_prob": home_market_no_vig_prob,
+        "away_odds": price["away"] if price else None,
+        "home_odds": price["home"] if price else None,
+        "market_price_source": market_price_source,
+        "market_captured_at": market_captured_at,
         "market_favorite_team": fav["team"] if fav else None,
         "market_favorite_side": fav["side"] if fav else None,
         "market_favorite_prob": fav["prob"] if fav else None,

@@ -107,6 +107,15 @@ class GameAnalysis(Base):
     home_market_prob = Column(Float, nullable=True)
     away_market_no_vig_prob = Column(Float, nullable=True)
     home_market_no_vig_prob = Column(Float, nullable=True)
+    # Momio crudo (americano) y su procedencia -- away/home_market_prob ya
+    # son la probabilidad implícita DERIVADA de esto, pero el momio real
+    # nunca quedaba expuesto para auditar el reporte (ver auditoría de
+    # momios en reportes). market_captured_at es None para cuotas
+    # manuales (MARKET_ODDS no trae timestamp de captura).
+    away_odds = Column(Float, nullable=True)
+    home_odds = Column(Float, nullable=True)
+    market_price_source = Column(String, nullable=True)  # api_live / api_cache / api_stale_cache / manual
+    market_captured_at = Column(DateTime, nullable=True)
     market_favorite_team = Column(String, nullable=True)
     market_favorite_side = Column(String, nullable=True)  # "home" / "away" / None si pick'em
     market_favorite_prob = Column(Float, nullable=True)

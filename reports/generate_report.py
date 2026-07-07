@@ -11,9 +11,33 @@ sin juegos, o el tracking aún no tiene resultado real), imprime un mensaje
 explícito en vez de saltarse la sección.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 import csv
 import os
+
+from model.edge import implied_prob
+
+_DATO_NO_DISPONIBLE = "Dato no disponible"
+
+_MARKET_SOURCE_LABELS = {
+    "api_live": "API en vivo",
+    "api_cache": "API (caché)",
+    "api_stale_cache": "API (caché vencido)",
+    "manual": "Manual",
+}
+
+
+def _format_odds(value: float | None) -> str:
+    return f"{value:+.0f}" if value is not None else _DATO_NO_DISPONIBLE
+
+
+def _format_age(captured_at: datetime | None) -> str:
+    if captured_at is None:
+        return _DATO_NO_DISPONIBLE
+    seconds = (datetime.now(timezone.utc).replace(tzinfo=None) - captured_at).total_seconds()
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
 
 
 # Mascota corta de cada equipo de MLB (30 equipos), para el formato de
@@ -137,7 +161,9 @@ def _print_market_review_line(label: str, game: dict, market: str) -> None:
     label_txt = team_label(pick, game)
     outcome = _OUTCOME_LABELS.get(pick["result"], pick["result"])
     forced_tag = "  (forzado, sin edge real)" if pick.get("forced") else ""
-    conf = f"  (confianza {pick['model_prob']:.1%})" if pick.get("model_prob") is not None else ""
+    odds_txt = _format_odds(pick.get("odds_used"))
+    conf = (f"  (confianza {pick['model_prob']:.1%}, momio apertura {odds_txt})"
+            if pick.get("model_prob") is not None else "")
 
     line = f"{prefix} {label_txt}{conf}{forced_tag}  ->  {outcome}"
     if extra:
@@ -192,6 +218,15 @@ def print_yesterday_review(review: dict | None) -> None:
         print("Sin datos de ayer para revisar (sin juegos, feriado, o el tracking "
               "todavía no tiene resultado real para esas predicciones).\n")
         return
+
+    # Nota única (no por pick -- aplica igual a todos, repetirla sería
+    # ruido, mismo criterio que calibration_note en print_report()): el
+    # Pick del sistema solo guarda el momio de apertura (odds_used, arriba
+    # en "confianza"). Cierre/CLV/movimiento de mercado NUNCA se capturan
+    # para Picks -- eso existe solo para Bet (apuestas reales, ver la
+    # sección "Closing Line Value (CLV)" de print_performance_report()).
+    print(f"Cierre / CLV / movimiento de mercado por pick: {_DATO_NO_DISPONIBLE} "
+          f"(no se capturan para picks del sistema, solo para apuestas reales registradas).\n")
 
     for g in review["games"]:
         if g["actual_margin"] > 0:
@@ -301,6 +336,13 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
         if r.get("away_market_prob") is not None:
             print(f"  Mercado  -> visitante: {r['away_market_prob']:.3f}   local: {r['home_market_prob']:.3f}"
                   f"  (implícita, con vig)")
+            print(f"  Momio    -> visitante: {_format_odds(r.get('away_odds'))}   "
+                  f"local: {_format_odds(r.get('home_odds'))}")
+            source_txt = _MARKET_SOURCE_LABELS.get(r.get("market_price_source"), _DATO_NO_DISPONIBLE)
+            captured_at = r.get("market_captured_at")
+            captured_txt = f"{captured_at:%Y-%m-%d %H:%M} UTC" if captured_at is not None else _DATO_NO_DISPONIBLE
+            print(f"  Cuota    -> fuente: {source_txt}   capturada: {captured_txt}   "
+                  f"antigüedad: {_format_age(captured_at)}")
             if r.get("away_market_no_vig_prob") is not None:
                 print(f"  Sin vig  -> visitante: {r['away_market_no_vig_prob']:.3f}   "
                       f"local: {r['home_market_no_vig_prob']:.3f}  (consenso, sin margen de casa)")
@@ -328,8 +370,12 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
                 source = p.get("prob_source")
                 source_tag = f"  [fuente: {_PROB_SOURCE_LABELS.get(source, source)}]" if source else ""
                 discrepancy_tag = "  ⚡ discrepancia direccional vs. heurístico" if p.get("directional_discrepancy") else ""
+                odds_used = p.get("odds_used")
+                implied_txt = f"{implied_prob(odds_used):.1%}" if odds_used is not None else _DATO_NO_DISPONIBLE
                 print(f"    • {team_label(p, r):<18}  "
-                      f"(edge {p['edge']:+.1%}, EV {p['ev']:+.2f}){tag}{source_tag}{discrepancy_tag}")
+                      f"(momio {_format_odds(odds_used)}, prob. implícita {implied_txt}, "
+                      f"edge {p['edge']:+.1%}, EV {p['ev']:+.2f}, Kelly {_DATO_NO_DISPONIBLE})"
+                      f"{tag}{source_tag}{discrepancy_tag}")
 
         print("-" * 70)
 

@@ -141,6 +141,61 @@ def test_analyze_today_prefers_live_odds_over_manual_market_odds(monkeypatch):
     assert abs((row["away_market_no_vig_prob"] + row["home_market_no_vig_prob"]) - 1.0) < 1e-9
 
 
+# --- Auditabilidad de momios: el reporte necesita saber el momio crudo
+# usado y de dónde salió (API en vivo/caché/manual), no solo la
+# probabilidad ya derivada -- ver reports/generate_report.py. ---
+
+def test_analyze_today_records_raw_odds_and_live_source_when_odds_api_used(monkeypatch):
+    import datetime as dt
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    live_event = {
+        "away_team": "Away Team", "home_team": "Home Team", "commence_time": None,
+        "prices": [{"book": "fakebook", "away_price": -140, "home_price": 120, "last_update": None}],
+    }
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [live_event])
+    fetched_at = dt.datetime(2026, 7, 7, 12, 0, tzinfo=dt.timezone.utc).timestamp()
+    monkeypatch.setattr(main, "get_last_fetch_meta", lambda: {"source": "api_live", "fetched_at": fetched_at})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["away_odds"] == -140
+    assert row["home_odds"] == 120
+    assert row["market_price_source"] == "api_live"
+    assert row["market_captured_at"] == dt.datetime(2026, 7, 7, 12, 0)
+
+
+def test_analyze_today_marks_source_as_manual_when_no_live_odds_match(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": -150, "home": 130}})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+    monkeypatch.setattr(main, "get_last_fetch_meta", lambda: {"source": "none", "fetched_at": None})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["away_odds"] == -150
+    assert row["home_odds"] == 130
+    assert row["market_price_source"] == "manual"
+    assert row["market_captured_at"] is None  # MARKET_ODDS no trae timestamp de captura
+
+
+def test_analyze_today_market_odds_metadata_is_none_without_any_price(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [])
+    monkeypatch.setattr(main, "get_last_fetch_meta", lambda: {"source": "none", "fetched_at": None})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    assert row["away_odds"] is None
+    assert row["home_odds"] is None
+    assert row["market_price_source"] is None
+    assert row["market_captured_at"] is None
+
+
 def test_analyze_today_freezes_power_devig_reference_in_snapshot_without_using_it_for_edge(monkeypatch):
     # M4: market_no_vig_power es una referencia secundaria congelada en el
     # snapshot -- no debe alimentar away_market_prob/away_edge (esos

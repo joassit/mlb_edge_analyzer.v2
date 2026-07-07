@@ -516,6 +516,7 @@ def _pick_to_dict(pick: "Pick | None") -> dict | None:
         "forced": pick.forced,
         "result": pick.result,
         "profit_unit": pick.profit_unit,
+        "odds_used": pick.odds_used,
     }
 
 
