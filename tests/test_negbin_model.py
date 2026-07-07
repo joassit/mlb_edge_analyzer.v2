@@ -119,3 +119,24 @@ def test_large_k_totals_converge_to_poisson():
     over_poisson = 1.0 - poisson.cdf(8, mu_total)
 
     assert abs(over_negbin - over_poisson) < 1e-3
+
+
+# --- A3: push en totales con línea ENTERA bajo NB2 ---
+
+def test_negbin_totals_integer_line_excludes_push_from_over_and_under():
+    mu_home, mu_away, k, line = 4.0, 4.5, 7.0, 8.0
+    over, under = negbin_totals_prob(mu_home, mu_away, k, line)
+    assert abs((over + under) - 1.0) < 1e-9
+
+    # Sin la exclusión del push, under incluiría P(total==8) -- confirma
+    # que de verdad cambió respecto al cálculo crudo sin renormalizar.
+    from model.negbin_model import _run_pmf
+    import numpy as np
+    pmf_total = np.convolve(_run_pmf(mu_home, k), _run_pmf(mu_away, k))
+    naive_under = float(np.sum(pmf_total[:9]))  # incluye índice 8 (el push)
+    assert under < naive_under
+
+
+def test_negbin_totals_half_point_line_unaffected_by_push_exclusion():
+    over, under = negbin_totals_prob(mu_home=4.5, mu_away=3.8, k=7.0, line=8.5)
+    assert abs((over + under) - 1.0) < 1e-9

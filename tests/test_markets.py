@@ -81,6 +81,41 @@ def test_totals_high_line_favors_under():
     assert under > 0.9
 
 
+# --- A3: push en totales con línea ENTERA (total == line) ---
+# Antes, under_prob = poisson.cdf(floor(line), mu_total) incluía P(total ==
+# line) como si fuera "under" -- con línea 8.0, ese empate es un push real
+# (Pick._resolve_pick_outcome ya lo trata como push), no under.
+
+def test_totals_integer_line_excludes_push_from_over_and_under():
+    from scipy.stats import poisson
+    mu_home, mu_away = 4.0, 4.5
+    mu_total = mu_home + mu_away
+    line = 8.0
+
+    over, under = totals_prob(mu_home, mu_away, line)
+
+    push_prob = poisson.pmf(int(line), mu_total)
+    under_raw = poisson.cdf(int(line) - 1, mu_total)  # P(total < line), sin el empate
+    over_raw = 1.0 - poisson.cdf(int(line), mu_total)  # P(total > line)
+    remaining = 1.0 - push_prob
+
+    assert abs(under - (under_raw / remaining)) < 1e-9
+    assert abs(over - (over_raw / remaining)) < 1e-9
+    assert abs((over + under) - 1.0) < 1e-9
+
+
+def test_totals_half_point_line_unaffected_by_push_exclusion():
+    # Con línea X.5 el empate es matemáticamente imposible -- debe dar
+    # exactamente lo mismo que antes del fix de A3.
+    over, under = totals_prob(mu_home=4.5, mu_away=3.8, line=8.5)
+    assert abs((over + under) - 1.0) < 1e-9
+
+    from scipy.stats import poisson
+    mu_total = 4.5 + 3.8
+    expected_under = poisson.cdf(8, mu_total)
+    assert abs(under - expected_under) < 1e-9
+
+
 def test_fair_total_line_equals_sum_of_projections():
     assert fair_total_line(4.5, 3.8) == 8.3
 

@@ -127,10 +127,24 @@ def negbin_totals_prob(mu_home: float, mu_away: float, k: float, line: float,
     dos Poisson es otra Poisson con tasa sumada, ver model.markets.totals_prob),
     la suma de dos Binomiales Negativas independientes no tiene forma cerrada
     simple -- se obtiene convolucionando las dos PMF truncadas.
+
+    Con línea ENTERA, total == line es un push real -- se excluye esa masa
+    y se renormaliza sobre el resto (mismo criterio que
+    model.markets.totals_prob). Con línea X.5 el comportamiento no cambia.
     """
     pmf_home = _run_pmf(mu_home, k, max_runs)
     pmf_away = _run_pmf(mu_away, k, max_runs)
     pmf_total = np.convolve(pmf_home, pmf_away)  # índice 0..2*max_runs
+
+    if line == int(line):
+        line_int = int(line)
+        push_prob = float(pmf_total[line_int]) if line_int < len(pmf_total) else 0.0
+        remaining = 1.0 - push_prob
+        threshold = min(line_int - 1, len(pmf_total) - 1)
+        under_raw = float(np.sum(pmf_total[: threshold + 1])) if threshold >= 0 else 0.0
+        under_prob = (under_raw / remaining) if remaining > 0 else 0.5
+        over_prob = 1.0 - under_prob
+        return over_prob, under_prob
 
     threshold = min(math.floor(line), len(pmf_total) - 1)
     under_prob = float(np.sum(pmf_total[: threshold + 1]))

@@ -46,8 +46,23 @@ def totals_prob(mu_home: float, mu_away: float, line: float) -> tuple[float, flo
     Probabilidad de Over/Under sobre el total de carreras del juego.
     La suma de carreras de dos Poisson independientes es otra Poisson,
     con tasa = mu_home + mu_away.
+
+    Con línea ENTERA (ej. 8.0, no la X.5 estándar), total == line es un
+    push real (se devuelve la apuesta) -- se excluye esa masa y se
+    renormaliza sobre el resto para que over+under=1 sin que ninguno de
+    los dos la incluya. Con línea X.5 el empate es imposible y el
+    comportamiento no cambia.
     """
     mu_total = mu_home + mu_away
+
+    if line == int(line):
+        line_int = int(line)
+        push_prob = poisson.pmf(line_int, mu_total)
+        remaining = 1.0 - push_prob
+        under_prob = (poisson.cdf(line_int - 1, mu_total) / remaining) if remaining > 0 else 0.5
+        over_prob = 1.0 - under_prob
+        return over_prob, under_prob
+
     threshold = math.floor(line)  # ej. línea 8.5 -> 8
     under_prob = poisson.cdf(threshold, mu_total)
     over_prob = 1.0 - under_prob
