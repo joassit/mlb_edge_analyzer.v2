@@ -5,7 +5,20 @@ on:
     # 09:00 hora de Ciudad de México (UTC-6 todo el año -- México eliminó
     # el horario de verano en 2022, así que este cron no necesita ajustarse
     # dos veces al año) = 15:00 UTC.
-    - cron: "0 15 * * *"
+    #
+    # Ambos crons desplazados del minuto en punto (7 y 12, no 0) a
+    # propósito: GitHub documenta que `schedule` es best-effort y puede
+    # retrasarse o saltarse durante picos de carga, más probables justo
+    # en horas redondas. Confirmado con evidencia real de este proyecto:
+    # de las 3 corridas programadas que debieron dispararse en una
+    # semana (07-05, 07-06, 07-07, las 3 a las 15:00 UTC en punto), solo
+    # 1 realmente se disparó -- y lo hizo a las 2026-07-06T21:12:26Z,
+    # más de 6 horas tarde. El segundo cron (17:12 UTC, ~2h después) es
+    # un respaldo por si el principal no se disparó -- ver el step
+    # "Check if today already ran" más abajo, que evita que el respaldo
+    # vuelva a analizar el mismo día si el principal ya corrió.
+    - cron: "7 15 * * *"   # principal, ~15:00 UTC
+    - cron: "12 17 * * *"  # respaldo, ~17:12 UTC (2h después)
   workflow_dispatch:
 
 permissions:
@@ -72,8 +85,34 @@ jobs:
           restore-keys: |
             mlb-edge-db-
 
+      # Guarda de idempotencia SOLO para corridas por cron (schedule) --
+      # ver scripts/check_already_ran_today.py para el porqué completo
+      # (resumen: `schedule` es best-effort, confirmado con la corrida
+      # real que se disparó a las 2026-07-06T21:12:26Z en vez de las
+      # 15:00 UTC; con 2 crons, si el principal ya corrió, el respaldo no
+      # debe re-analizar el mismo día -- gastaría presupuesto de Odds API
+      # en llamadas redundantes y subiría un segundo reporte del mismo
+      # día). Nunca se salta en un workflow_dispatch manual (esta
+      # condición ni corre en ese caso): quien dispara a mano SIEMPRE
+      # quiere que corra, sin importar si ya hay datos de hoy.
+      - name: Check if today already ran (idempotency guard for backup cron)
+        id: idempotency-check
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -n "$DATABASE_URL_SECRET" ]; then
+            export DATABASE_URL="$DATABASE_URL_SECRET"
+          fi
+          ALREADY_RAN=$(python -m scripts.check_already_ran_today)
+          echo "already_ran=$ALREADY_RAN" >> "$GITHUB_OUTPUT"
+          if [ "$ALREADY_RAN" = "true" ]; then
+            echo "::notice::Ya existe al menos una predicción de hoy en game_analysis -- se asume que otra corrida (el cron principal, u otra ejecución) ya procesó el día. Esta corrida se salta para no gastar presupuesto de Odds API ni duplicar el reporte."
+          fi
+
       - name: Run pipeline
         id: run-pipeline
+        if: ${{ steps.idempotency-check.outputs.already_ran != 'true' }}
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           # Opcional: rotación entre varias keys si la actual agota su
@@ -99,7 +138,11 @@ jobs:
           python main.py
 
       - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
-        if: ${{ always() && env.HAS_EXTERNAL_DB != 'true' }}
+        # Se salta junto con "Run pipeline" (mismo condicional) -- si no
+        # corrió, mlb_edge.db no cambió respecto al ya restaurado, y
+        # volver a guardarlo bajo una key nueva sería una caché idéntica
+        # redundante.
+        if: ${{ always() && env.HAS_EXTERNAL_DB != 'true' && steps.idempotency-check.outputs.already_ran != 'true' }}
         uses: actions/cache/save@v6
         with:
           path: mlb_edge.db
@@ -107,9 +150,11 @@ jobs:
 
       # Sin esto, el único rastro de lo que produjo una corrida es el log
       # de texto plano en la pestaña Actions -- los CSV/logs generados
-      # viven dentro del runner efímero y se destruyen con él.
+      # viven dentro del runner efímero y se destruyen con él. Se salta
+      # junto con "Run pipeline": si no corrió, no hay reporte/log nuevo
+      # que subir -- evita un segundo artifact vacío/redundante del mismo día.
       - name: Upload today's reports and logs
-        if: always()
+        if: ${{ always() && steps.idempotency-check.outputs.already_ran != 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: mlb-edge-daily-output-${{ github.run_id }}
@@ -135,6 +180,11 @@ jobs:
         if: always()
         run: |
           echo "--- Validando la corrida ---"
+
+          if [ "${{ steps.idempotency-check.outputs.already_ran }}" = "true" ]; then
+            echo "✅ Corrida saltada a propósito -- ya existía una predicción de hoy (ver 'Check if today already ran' arriba). No hay nada más que validar."
+            exit 0
+          fi
 
           if [ "${{ steps.run-pipeline.outcome }}" != "success" ]; then
             echo "::error::El paso 'Run pipeline' terminó con outcome=${{ steps.run-pipeline.outcome }} -- ver el log de ese paso para la causa raíz exacta."
