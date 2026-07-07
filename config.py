@@ -98,6 +98,13 @@ ODDS_CACHE_DIR = os.getenv("ODDS_CACHE_DIR", ".cache/odds")
 # reales (heurístico vs. familia mu Skellam+NB2, que comparten el mismo
 # mu proyectado y casi nunca discrepan entre sí) coinciden en el favorito.
 # Es una preselección para que decidas tú, nunca una apuesta automática.
+#
+# Ojo: este umbral se compara contra GameAnalysis.away_edge/home_edge
+# (heurístico vs. la MEJOR cuota disponible, CON vig) -- NO contra
+# Pick.edge (la fuente configurada en PICK_PROBABILITY_SOURCE vs. el
+# consenso SIN vig, ver model/picks.py). Son dos cálculos de "edge"
+# distintos que conviven en el mismo reporte; flag_review solo mira el
+# primero.
 REVIEW_EDGE_THRESHOLD = float(os.getenv("REVIEW_EDGE_THRESHOLD", "0.03"))
 
 # --- Picks recomendados (moneyline / run_line / totals) ---

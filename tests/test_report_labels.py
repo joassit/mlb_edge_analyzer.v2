@@ -253,3 +253,27 @@ def test_print_report_shows_no_calibration_note_when_none(capsys):
     out = capsys.readouterr().out
     assert "🧪" not in out
     assert "calibración" not in out
+
+
+# --- A1: rotular la semántica del edge de GameAnalysis en el reporte ---
+# GameAnalysis.away_edge/home_edge = heurístico vs. mejor cuota CON vig;
+# Pick.edge (mostrado por pick abajo) = fuente configurada vs. consenso
+# SIN vig -- dos cálculos distintos que comparten el nombre "edge", sin
+# ninguna aclaración en el reporte de cuál es cuál.
+
+def _row_with_market_edge():
+    return {
+        "game_pk": 1, "away_team": "A", "home_team": "B",
+        "away_pitcher": None, "home_pitcher": None,
+        "away_model_prob": 0.55, "home_model_prob": 0.45,
+        "away_market_prob": 0.50, "home_market_prob": 0.52,
+        "away_edge": 0.05, "home_edge": -0.07,
+        "away_ev": 0.10, "home_ev": -0.12,
+    }
+
+
+def test_print_report_labels_game_level_edge_as_heuristic_vs_vig(capsys):
+    print_report([_row_with_market_edge()])
+    out = capsys.readouterr().out
+    assert "heurístico" in out.lower()
+    assert "con vig" in out.lower()

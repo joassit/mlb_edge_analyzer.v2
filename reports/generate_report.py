@@ -310,7 +310,9 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
             elif r.get("market_favorite_prob") is not None:
                 print(f"  Favorito del mercado -> pick'em, sin favorito claro (~{r['market_favorite_prob']:.1%})")
 
-            print(f"  Edge     -> visitante: {r['away_edge']:+.3f}   local: {r['home_edge']:+.3f}")
+            print(f"  Edge     -> visitante: {r['away_edge']:+.3f}   local: {r['home_edge']:+.3f}"
+                  f"  (heurístico vs. mejor cuota, CON vig -- el edge de cada pick abajo usa otra"
+                  f" fuente/base, ver 'fuente' de cada uno)")
             print(f"  EV       -> visitante: {r['away_ev']:+.3f}   local: {r['home_ev']:+.3f}  (por unidad apostada)")
 
             if r.get("flag_review"):
