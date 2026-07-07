@@ -1,6 +1,6 @@
 import pytest
 
-from model.edge import implied_prob, fair_odds, edge, kelly_fraction, expected_value
+from model.edge import implied_prob, fair_odds, edge, kelly_fraction, expected_value, no_vig_probs
 
 
 def test_implied_prob_favorite():
@@ -53,3 +53,21 @@ def test_expected_value_zero_at_fair_price():
     # si el modelo coincide exactamente con la cuota justa, EV ~ 0
     fair = fair_odds(0.60)
     assert abs(expected_value(model_p=0.60, odds=fair)) < 0.01
+
+
+def test_no_vig_probs_sum_to_exactly_one():
+    p_a, p_b = no_vig_probs(-135, +115)
+    assert abs((p_a + p_b) - 1.0) < 1e-9
+
+
+def test_no_vig_probs_are_lower_than_raw_implied():
+    # Al quitar el vig, cada probabilidad renormalizada debe ser MENOR
+    # que la implícita cruda (el vig infla ambas artificialmente)
+    p_a_novig, p_b_novig = no_vig_probs(-135, +115)
+    assert p_a_novig < implied_prob(-135)
+    assert p_b_novig < implied_prob(+115)
+
+
+def test_no_vig_preserves_favorite():
+    p_fav, p_dog = no_vig_probs(-200, +170)
+    assert p_fav > p_dog

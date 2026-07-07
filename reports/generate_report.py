@@ -2,7 +2,7 @@
 Genera el reporte diario en consola y opcionalmente lo exporta a CSV.
 """
 
-from datetime import date
+from datetime import date, datetime
 import csv
 import os
 
@@ -36,7 +36,7 @@ def print_report(rows: list[dict]) -> None:
 
             fav_a = r["away_model_prob"] > 0.5
             fav_b = r["away_skellam_prob"] > 0.5
-            agree = "✅ ambos modelos coinciden en el favorito" if fav_a == fav_b else "⚠️  los modelos DISCREPAN en el favorito"
+            agree = "[OK] ambos modelos coinciden en el favorito" if fav_a == fav_b else "[!] los modelos DISCREPAN en el favorito"
             print(f"  {agree}")
 
         if r.get("home_covers_rl_prob") is not None:
@@ -46,12 +46,29 @@ def print_report(rows: list[dict]) -> None:
             print(f"  Total    -> línea justa del modelo: {r['fair_total_runs']:.1f} carreras "
                   f"(compárala contra la línea real de tu casa de apuestas)")
         if r.get("away_market_prob") is not None:
-            print(f"  Mercado  -> visitante: {r['away_market_prob']:.3f}   local: {r['home_market_prob']:.3f}")
-            print(f"  Edge     -> visitante: {r['away_edge']:+.3f}   local: {r['home_edge']:+.3f}")
+            source = f" [{r['odds_source']}]" if r.get("odds_source") else ""
+            print(f"  Mercado  -> visitante: {r['away_market_prob']:.3f}   local: {r['home_market_prob']:.3f}{source}")
+            print(f"  Edge     -> visitante: {r['away_edge']:+.3f}   local: {r['home_edge']:+.3f}  (vs. cuota con vig)")
+            if r.get("away_edge_novig") is not None:
+                print(f"  Edge s/v -> visitante: {r['away_edge_novig']:+.3f}   local: {r['home_edge_novig']:+.3f}  (vs. consenso sin vig)")
             print(f"  EV       -> visitante: {r['away_ev']:+.3f}   local: {r['home_ev']:+.3f}  (por unidad apostada)")
         else:
             print("  Mercado  -> (sin cuotas cargadas todavía)")
         print("-" * 70)
+
+
+def _write_csv_rows(path: str, rows: list[dict]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        # Unión de las llaves de TODAS las filas (algunas tienen cuotas/EV
+        # y otras no) — con solo las de la primera fila, DictWriter truena.
+        fieldnames = list(rows[0].keys())
+        for r in rows[1:]:
+            for key in r.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def export_csv(rows: list[dict], path: str = None) -> str:
@@ -63,9 +80,17 @@ def export_csv(rows: list[dict], path: str = None) -> str:
     if not rows:
         return path
 
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    try:
+        _write_csv_rows(path, rows)
+    except PermissionError:
+        # El archivo del día ya existe y algo lo tiene abierto (típicamente
+        # Excel, que bloquea el archivo en exclusiva). No tiene sentido
+        # tumbar una corrida desatendida (Task Scheduler) por esto — se
+        # guarda con un sufijo de hora para no perder el reporte del día.
+        alt_path = path.replace(".csv", f"_{datetime.now().strftime('%H%M%S')}.csv")
+        print(f"[!] No se pudo escribir {path} (¿archivo abierto en otro programa?). "
+              f"Guardando como {alt_path} en su lugar.")
+        _write_csv_rows(alt_path, rows)
+        return alt_path
 
     return path

@@ -17,11 +17,12 @@ logger = logging.getLogger("mlb_edge_analyzer")
 
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1/forecast"
 
-# Sesión con reintentos automáticos — antes cada timeout mataba esa consulta
-# de una vez; ahora reintenta con backoff antes de rendirse.
+# Sesión con reintentos automáticos. Si tu red tiene problemas persistentes
+# para llegar a Open-Meteo (firewall, antivirus, ISP), esto no lo arregla —
+# solo evita esperar de más: falla rápido y el modelo sigue sin el clima.
 _session = requests.Session()
 _session.mount("https://", HTTPAdapter(max_retries=Retry(
-    total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504]
+    total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504]
 )))
 
 
@@ -55,7 +56,7 @@ def get_game_weather(lat: float, lon: float, game_datetime_iso: str) -> dict:
     }
 
     try:
-        resp = _session.get(OPEN_METEO_BASE, params=params, timeout=15)
+        resp = _session.get(OPEN_METEO_BASE, params=params, timeout=6)
         resp.raise_for_status()
         data = resp.json()
 

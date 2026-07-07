@@ -2,6 +2,8 @@ from model.markets import run_line_prob, totals_prob, fair_total_line
 from model.runs_projection import project_f5_runs
 
 
+# --- Criterios de aceptación: rango válido y complementariedad exacta ---
+
 def test_run_line_probabilities_sum_to_exactly_one():
     home, away = run_line_prob(mu_home=4.5, mu_away=3.8)
     assert abs((home + away) - 1.0) < 1e-9
@@ -30,6 +32,8 @@ def test_totals_probabilities_in_valid_range():
 
 
 def test_totals_low_line_favors_over():
+    # una linea muy baja (ej. 3.5 cuando se esperan 8+ carreras) casi
+    # seguro termina en Over
     over, _ = totals_prob(mu_home=4.5, mu_away=3.8, line=3.5)
     assert over > 0.9
 
@@ -45,7 +49,7 @@ def test_fair_total_line_equals_sum_of_projections():
 
 def test_f5_runs_are_less_than_full_game_runs():
     f5 = project_f5_runs(team_ops=0.750, opp_starter_era=4.0, league_ops=0.750)
-    assert 0 < f5 < 5.0
+    assert 0 < f5 < 5.0  # deben ser menos que un juego completo (~9 entradas)
 
 
 def test_f5_runs_floor_prevents_zero():

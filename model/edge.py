@@ -45,6 +45,18 @@ def expected_value(model_p: float, odds: float) -> float:
     return model_p * b - (1 - model_p)
 
 
+def no_vig_probs(odds_a: float, odds_b: float) -> tuple[float, float]:
+    """Probabilidades del mercado SIN el margen de la casa.
+    implied_prob(-135) + implied_prob(+115) suma más de 1.0 — ese exceso
+    es el vig. Renormalizar revela lo que el mercado 'realmente cree'.
+    Edge vs. no-vig = discrepancia con el consenso.
+    Edge vs. con-vig (el actual) = si la apuesta paga tras el peaje.
+    Ambas medidas sirven; son preguntas distintas."""
+    p_a, p_b = implied_prob(odds_a), implied_prob(odds_b)
+    total = p_a + p_b
+    return p_a / total, p_b / total
+
+
 def kelly_fraction(model_p: float, odds: float, fraction: float = 0.25) -> float:
     """
     Tamaño de apuesta sugerido como fracción del bankroll, usando Kelly

@@ -38,13 +38,3 @@ FALLBACK_BULLPEN_ERA = 4.30
 # OPS de liga: mínimo de turnos al bate para considerar a un bateador "calificado"
 # al calcular el promedio de liga (evita que bateadores con 3 turnos distorsionen el promedio)
 MIN_PA_FOR_LEAGUE_OPS = 100
-# --- AJUSTES DE PRECISIÓN DE MODELO ---
-
-# Multiplicador para el factor de parque.
-# 1.0 es el valor neutral que viene de la API.
-# > 1.0 amplifica el efecto (ej. 1.15 = 15% más impacto del estadio en el score).
-PARK_FACTOR_WEIGHT = 1.15
-
-# Factor de corrección por clima (temp_f > 85°F).
-# Ayuda a mitigar errores en días de calor extremo donde la bola viaja más.
-WEATHER_CORRECTION = 0.05

@@ -87,6 +87,15 @@ def compute_metrics(days: int = 30) -> dict:
     if not rows:
         return {"n_games": 0, "accuracy": None, "brier_score": None}
 
+    # Defensa contra predicciones duplicadas históricas (versiones previas
+    # de save_analysis no eran idempotentes): solo la más reciente por juego.
+    latest_by_pk = {}
+    for pred, result in rows:
+        prev = latest_by_pk.get(pred.game_pk)
+        if prev is None or pred.created_at > prev[0].created_at:
+            latest_by_pk[pred.game_pk] = (pred, result)
+    rows = list(latest_by_pk.values())
+
     correct = 0
     brier_sum = 0.0
     log_loss_sum = 0.0

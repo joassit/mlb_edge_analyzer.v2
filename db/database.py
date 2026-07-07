@@ -33,6 +33,8 @@ class GameAnalysis(Base):
     home_team = Column(String, nullable=False)
     away_pitcher = Column(String)
     home_pitcher = Column(String)
+    away_pitcher_id = Column(Integer, nullable=True)
+    home_pitcher_id = Column(Integer, nullable=True)
     away_bullpen_era = Column(Float, nullable=True)
     home_bullpen_era = Column(Float, nullable=True)
     away_k_pct = Column(Float, nullable=True)
@@ -55,8 +57,11 @@ class GameAnalysis(Base):
     home_market_prob = Column(Float, nullable=True)
     away_edge = Column(Float, nullable=True)
     home_edge = Column(Float, nullable=True)
+    away_edge_novig = Column(Float, nullable=True)
+    home_edge_novig = Column(Float, nullable=True)
     away_ev = Column(Float, nullable=True)
     home_ev = Column(Float, nullable=True)
+    odds_source = Column(String, nullable=True)
     decision = Column(String, nullable=True)  # tu decisión final, texto libre
     model_version = Column(String, default=MODEL_VERSION)
     git_commit = Column(String, nullable=True)
@@ -104,9 +109,22 @@ def init_db():
 
 
 def save_analysis(row: dict) -> None:
+    """Guarda o ACTUALIZA la predicción (idempotente por game_pk + fecha).
+    Correr main.py varias veces el mismo día ya no duplica filas
+    ni contamina el Brier Score."""
     session = SessionLocal()
     try:
-        session.add(GameAnalysis(**row))
+        existing = (
+            session.query(GameAnalysis)
+            .filter(GameAnalysis.game_pk == row["game_pk"],
+                    GameAnalysis.game_date == row["game_date"])
+            .first()
+        )
+        if existing:
+            for key, value in row.items():
+                setattr(existing, key, value)
+        else:
+            session.add(GameAnalysis(**row))
         session.commit()
     finally:
         session.close()
@@ -161,6 +179,30 @@ def settle_bets_for_game(game_pk: int, winner: str) -> int:
                 bet.profit = -bet.stake
         session.commit()
         return len(pending)
+    finally:
+        session.close()
+
+
+def get_prediction_by_game_pk(game_pk: int, game_date: str) -> dict | None:
+    """Busca la predicción ya guardada de un juego específico (para auditoría same-day)."""
+    session = SessionLocal()
+    try:
+        pred = (
+            session.query(GameAnalysis)
+            .filter(GameAnalysis.game_pk == game_pk, GameAnalysis.game_date == game_date)
+            .order_by(GameAnalysis.created_at.desc())
+            .first()
+        )
+        if pred is None:
+            return None
+        return {
+            "away_team": pred.away_team, "home_team": pred.home_team,
+            "away_pitcher": pred.away_pitcher, "home_pitcher": pred.home_pitcher,
+            "away_pitcher_id": pred.away_pitcher_id, "home_pitcher_id": pred.home_pitcher_id,
+            "away_model_prob": pred.away_model_prob, "home_model_prob": pred.home_model_prob,
+            "away_skellam_prob": pred.away_skellam_prob, "home_skellam_prob": pred.home_skellam_prob,
+            "fair_total_runs": pred.fair_total_runs,
+        }
     finally:
         session.close()
 
