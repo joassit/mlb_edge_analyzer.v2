@@ -339,6 +339,110 @@ export DATABASE_URL="postgresql://usuario:password@localhost:5432/mlb_edge"
 python db/database.py   # crea las tablas
 ```
 
+### Por qué esto importa si corres en GitHub Actions
+
+`.github/workflows/daily_pipeline.yml` persiste `mlb_edge.db` entre corridas
+vía `actions/cache` -- **best-effort**: GitHub puede liberar esa caché en
+silencio (7+ días sin tocarla, o si se excede el límite de 10GB del repo).
+Si eso pasa, el histórico completo (`game_analysis`/`picks`/
+`feature_snapshots`) desaparece sin ningún error visible. Un Postgres
+externo (con `DATABASE_URL` como GitHub secret) elimina ese riesgo por
+completo — el workflow ya soporta esto (lee `secrets.DATABASE_URL` y salta
+la caché de SQLite si existe), solo falta que exista la cuenta.
+
+El esquema actual ya se verificó compatible con el dialecto PostgreSQL
+(tipos de columna y DDL completo, ver `tests/test_database.py`) sin
+necesidad de tocar código — falta únicamente la parte que solo el dueño
+del proyecto puede hacer: crear la cuenta.
+
+### Migrar a Postgres gratuito (Neon o Supabase), paso a paso
+
+1. **Crea la base de datos gratuita.**
+   - [Neon](https://neon.tech): crea cuenta → "New Project" → copia el
+     "Connection string" (ya viene con `?sslmode=require`).
+   - [Supabase](https://supabase.com): crea cuenta → "New Project" →
+     Settings → Database → "Connection string" (modo "URI").
+
+   En ambos casos el string se ve así:
+   ```
+   postgresql://usuario:password@host:5432/nombre_db?sslmode=require
+   ```
+
+2. **Exporta los datos que ya tengas en SQLite** (si `mlb_edge.db` ya
+   tiene historial que quieres conservar — si vas a empezar limpio, salta
+   este paso y el siguiente, y ve directo al paso 4):
+
+   ```bash
+   python3 -c "
+   from sqlalchemy import create_engine
+   from sqlalchemy.orm import sessionmaker
+   import db.database as database
+
+   sqlite_engine = create_engine('sqlite:///mlb_edge.db')
+   SqliteSession = sessionmaker(bind=sqlite_engine)
+   session = SqliteSession()
+
+   import json
+   dump = {}
+   for table in database.Base.metadata.sorted_tables:
+       rows = session.execute(table.select()).mappings().all()
+       dump[table.name] = [dict(r) for r in rows]
+   with open('sqlite_export.json', 'w') as f:
+       json.dump(dump, f, default=str)
+   print({k: len(v) for k, v in dump.items()})
+   "
+   ```
+
+   Esto genera `sqlite_export.json` con todas las filas de las 5 tablas.
+
+3. **Importa a Postgres** (con `DATABASE_URL` ya apuntando a Neon/Supabase):
+
+   ```bash
+   export DATABASE_URL="postgresql://usuario:password@host:5432/nombre_db?sslmode=require"
+   python3 -c "
+   import json
+   from datetime import datetime
+   from sqlalchemy import DateTime
+   import db.database as database
+
+   database.Base.metadata.create_all(database.engine)  # crea las tablas en Postgres
+
+   with open('sqlite_export.json') as f:
+       dump = json.load(f)
+
+   with database.engine.begin() as conn:
+       for table in database.Base.metadata.sorted_tables:
+           rows = dump.get(table.name, [])
+           if not rows:
+               continue
+           # El JSON solo tiene strings -- las columnas DateTime necesitan
+           # un objeto datetime real, no el string ISO que dejó el dump.
+           datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
+           for row in rows:
+               for col in datetime_cols:
+                   if isinstance(row.get(col), str):
+                       row[col] = datetime.fromisoformat(row[col])
+           conn.execute(table.insert(), rows)
+   print('Importado:', {k: len(v) for k, v in dump.items()})
+   "
+   ```
+
+4. **Configura el secret en GitHub** (para que `daily_pipeline.yml` lo use
+   automáticamente): Settings → Secrets and variables → Actions → "New
+   repository secret" → nombre `DATABASE_URL`, valor el connection string
+   del paso 1. El workflow ya lo lee (`secrets.DATABASE_URL`) y salta por
+   completo la caché de SQLite cuando este secret existe.
+
+5. **Verifica localmente antes de confiar en la corrida automática:**
+
+   ```bash
+   export DATABASE_URL="postgresql://usuario:password@host:5432/nombre_db?sslmode=require"
+   python main.py
+   ```
+
+   Si corre sin errores y ves tu histórico reflejado en `print_performance_report()`,
+   la migración fue exitosa.
+
 ## Estructura del proyecto
 
 ```

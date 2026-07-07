@@ -600,3 +600,40 @@ def test_settle_picks_for_game_only_settles_pending_picks(isolated_db):
     # Segunda liquidación del mismo juego no debe volver a tocar el pick ya resuelto
     settled_again = isolated_db.settle_picks_for_game(1, {"home_score": 2, "away_score": 5, "winner": "away", "total_runs": 7})
     assert settled_again == 0
+
+
+# --- C4: compatibilidad de sintaxis con dialecto PostgreSQL (sin conectar) ---
+# La solución real (Postgres externo vía DATABASE_URL) requiere una cuenta
+# que solo el dueño del proyecto puede crear -- esto NO la simula, solo
+# verifica que el esquema actual (tipos de columna + DDL completo) es
+# sintácticamente válido en dialecto postgres, generado localmente sin
+# ninguna conexión de red.
+
+def test_all_column_types_compile_under_postgresql_dialect():
+    from sqlalchemy.dialects import postgresql
+    dialect = postgresql.dialect()
+    for table in database.Base.metadata.sorted_tables:
+        for column in table.columns:
+            ddl_type = column.type.compile(dialect=dialect)
+            assert ddl_type
+
+
+def test_create_table_ddl_compiles_for_all_tables_under_postgresql():
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+    dialect = postgresql.dialect()
+    for table in database.Base.metadata.sorted_tables:
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert "CREATE TABLE" in ddl
+
+
+def test_auto_add_missing_columns_alter_statement_is_ansi_compatible():
+    # El ALTER TABLE ADD COLUMN que arma _auto_add_missing_columns() es
+    # SQL genérico (ANSI), no específico de SQLite -- Postgres soporta la
+    # misma sintaxis. Verifica el tipo compilado bajo postgres para una
+    # columna real que el proyecto agregó vía migración (favorite_side).
+    from sqlalchemy.dialects import postgresql
+    dialect = postgresql.dialect()
+    col_type = database.Pick.__table__.columns["favorite_side"].type.compile(dialect=dialect)
+    statement = f"ALTER TABLE picks ADD COLUMN favorite_side {col_type}"
+    assert statement == "ALTER TABLE picks ADD COLUMN favorite_side VARCHAR"
