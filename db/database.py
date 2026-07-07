@@ -197,14 +197,17 @@ class Pick(Base):
     # no solo el número. None cuando no aplica (run_line/totals nunca
     # tuvieron una versión heurística que comparar).
     directional_discrepancy = Column(Boolean, nullable=True)
-    # True si este pick se generó con menos de config.MIN_GAMES_FOR_CALIBRATED_PICKS
-    # juegos evaluados con resultado real en la base -- con una muestra tan
-    # chica, un "edge" del heurístico probablemente es ruido/error del
-    # modelo sin calibrar, no ineficiencia real de mercado (ver
-    # tracking.results_tracker.count_evaluated_games_all_time()). No
-    # bloquea la generación del pick (se sigue guardando igual, para
-    # acumular historial) -- solo lo marca para que el reporte y cualquier
-    # análisis de ROI futuro puedan excluirlo de "señal apostable real".
+    # True si este pick se generó con menos de
+    # config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION picks liquidados con
+    # cuota de mercado real en la base (no juegos con resultado final --
+    # ver tracking.results_tracker.count_liquidated_picks_with_market_odds():
+    # un juego sin cuota real nunca puso a prueba ningún edge) -- con una
+    # muestra tan chica, un "edge" del heurístico probablemente es
+    # ruido/error del modelo sin calibrar, no ineficiencia real de
+    # mercado. No bloquea la generación del pick (se sigue guardando
+    # igual, para acumular historial) -- solo lo marca para que el
+    # reporte y cualquier análisis de ROI futuro puedan excluirlo de
+    # "señal apostable real".
     calibration_phase = Column(Boolean, nullable=False, default=False)
     result = Column(String, default="pending")   # pending / win / loss / push
     profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)

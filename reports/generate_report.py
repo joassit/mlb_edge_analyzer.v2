@@ -240,8 +240,9 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
 
     # Nota única (no por pick -- calibration_phase es el mismo valor para
     # todos los picks de una corrida, repetirla en cada uno sería ruido)
-    # de que el histórico acumulado todavía no alcanza
-    # config.MIN_GAMES_FOR_CALIBRATED_PICKS -- ver main.py::_calibration_phase_note().
+    # de que el histórico de picks liquidados con cuota real todavía no
+    # alcanza config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION -- ver
+    # main.py::_calibration_phase_note().
     if calibration_note:
         print(calibration_note)
         print()

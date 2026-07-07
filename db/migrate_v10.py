@@ -1,9 +1,9 @@
 """
 Migración v0.10: agrega calibration_phase a `picks` (marca si el pick se
-generó con menos de config.MIN_GAMES_FOR_CALIBRATED_PICKS juegos evaluados
-con resultado real en la base -- ver el comentario de
+generó con menos de config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION picks
+liquidados con cuota de mercado real en la base -- ver el comentario de
 Pick.calibration_phase en db/database.py y
-tracking.results_tracker.count_evaluated_games_all_time()).
+tracking.results_tracker.count_liquidated_picks_with_market_odds()).
 
 Es una columna nullable nueva -- el mismo caso que ya cubre
 _auto_add_missing_columns() en db/database.py (corre automáticamente en

@@ -623,16 +623,17 @@ def test_sqlite_persistence_risk_warning_silent_for_external_database_url():
 
 
 # --- _calibration_phase_note: heurístico sin calibrar con muestra chica ---
-# Con menos de config.MIN_GAMES_FOR_CALIBRATED_PICKS juegos evaluados, un
-# "edge" del heurístico probablemente es ruido, no señal de mercado real.
+# Con menos de config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION picks
+# liquidados con cuota real, un "edge" del heurístico probablemente es
+# ruido, no señal de mercado real.
 
 def test_calibration_phase_note_fires_below_threshold():
-    note = main._calibration_phase_note(n_evaluated=34, min_games=200)
+    note = main._calibration_phase_note(n_liquidated_picks=34, min_liquidated_picks=200)
     assert note is not None
     assert "34/200" in note
     assert "🧪" in note
 
 
 def test_calibration_phase_note_silent_at_or_above_threshold():
-    assert main._calibration_phase_note(n_evaluated=200, min_games=200) is None
-    assert main._calibration_phase_note(n_evaluated=500, min_games=200) is None
+    assert main._calibration_phase_note(n_liquidated_picks=200, min_liquidated_picks=200) is None
+    assert main._calibration_phase_note(n_liquidated_picks=500, min_liquidated_picks=200) is None

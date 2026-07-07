@@ -31,13 +31,13 @@ from db.database import init_db, save_analysis, save_feature_snapshot, save_pick
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
 from tracking.results_tracker import (
     update_results, print_performance_report, print_calibration_report, audit_totals, compute_daily_review,
-    count_evaluated_games_all_time,
+    count_liquidated_picks_with_market_odds,
 )
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
     PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION, DATABASE_URL,
-    MIN_GAMES_FOR_CALIBRATED_PICKS,
+    MIN_LIQUIDATED_PICKS_FOR_CALIBRATION,
 )
 from version_info import get_git_commit
 
@@ -530,21 +530,26 @@ def _sqlite_persistence_risk_warning(database_url: str) -> str | None:
     )
 
 
-def _calibration_phase_note(n_evaluated: int, min_games: int) -> str | None:
-    """Nota de fase de calibración si el histórico acumulado (n_evaluated,
-    ver tracking.results_tracker.count_evaluated_games_all_time()) todavía
-    no alcanza min_games (config.MIN_GAMES_FOR_CALIBRATED_PICKS) -- None si
-    ya se alcanzó el umbral (los picks de hoy sí cuentan como señal real,
-    no solo recolección de datos). Ver Pick.calibration_phase en
+def _calibration_phase_note(n_liquidated_picks: int, min_liquidated_picks: int) -> str | None:
+    """Nota de fase de calibración si el histórico de EDGES REALMENTE
+    PROBADOS (n_liquidated_picks, ver
+    tracking.results_tracker.count_liquidated_picks_with_market_odds())
+    todavía no alcanza min_liquidated_picks
+    (config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION) -- None si ya se alcanzó
+    el umbral (los picks de hoy sí cuentan como señal real, no solo
+    recolección de datos). Cuenta PICKS liquidados con cuota de mercado
+    real, no juegos con resultado final -- esa es la pregunta que ya
+    responde print_calibration_report() (calibración de la probabilidad
+    cruda del modelo, no del edge). Ver Pick.calibration_phase en
     db/database.py: el mismo booleano que esta nota resume se guarda por
     pick, para poder excluirlos de un análisis de ROI futuro."""
-    if n_evaluated >= min_games:
+    if n_liquidated_picks >= min_liquidated_picks:
         return None
     return (
-        f"🧪 Fase de calibración: {n_evaluated}/{min_games} juegos evaluados con resultado real -- "
-        f"con esta muestra, los edges/EV del heurístico probablemente reflejan error del modelo sin "
-        f"calibrar, no ineficiencia real de mercado. Los picks de hoy se generan y guardan igual (para "
-        f"acumular historial), pero no deberían tratarse como señal apostable todavía."
+        f"🧪 Fase de calibración: {n_liquidated_picks}/{min_liquidated_picks} picks liquidados con cuota "
+        f"de mercado real -- con esta muestra, los edges/EV del heurístico probablemente reflejan error "
+        f"del modelo sin calibrar, no ineficiencia real de mercado. Los picks de hoy se generan y "
+        f"guardan igual (para acumular historial), pero no deberían tratarse como señal apostable todavía."
     )
 
 
@@ -600,8 +605,8 @@ def run_pipeline():
         "discarded_games": [],
     }
 
-    n_evaluated_games = count_evaluated_games_all_time()
-    calibration_note = _calibration_phase_note(n_evaluated_games, MIN_GAMES_FOR_CALIBRATED_PICKS)
+    n_liquidated_picks = count_liquidated_picks_with_market_odds()
+    calibration_note = _calibration_phase_note(n_liquidated_picks, MIN_LIQUIDATED_PICKS_FOR_CALIBRATION)
     in_calibration_phase = calibration_note is not None
 
     picks_by_game = {}

@@ -111,14 +111,20 @@ FORCE_AT_LEAST_ONE_PICK = os.getenv("FORCE_AT_LEAST_ONE_PICK", "true").lower() =
 MAX_PICKS_PER_GAME = int(os.getenv("MAX_PICKS_PER_GAME", "3"))
 
 # Con MIN_PICK_EV/MIN_PICK_EDGE tan bajos (5%/4%) sobre un modelo heurístico
-# TODAVÍA SIN CALIBRAR (0 juegos con resultado real al momento de fijar
-# estos umbrales), casi cualquier "edge" temprano es ruido/error del propio
-# modelo, no ineficiencia real de mercado -- 200 es el orden de magnitud
-# mínimo razonable para empezar a confiar en que un edge sostenido es señal
-# y no varianza de muestra chica. Mientras el histórico acumulado (ver
-# tracking.results_tracker.count_evaluated_games_all_time()) esté por
-# debajo de este número, los picks se marcan con calibration_phase=True
+# TODAVÍA SIN CALIBRAR (0 picks liquidados contra cuota real al momento de
+# fijar estos umbrales), casi cualquier "edge" temprano es ruido/error del
+# propio modelo, no ineficiencia real de mercado -- 200 es el orden de
+# magnitud mínimo razonable para empezar a confiar en que un edge sostenido
+# es señal y no varianza de muestra chica.
+#
+# Cuenta PICKS liquidados con cuota de mercado real (ver
+# tracking.results_tracker.count_liquidated_picks_with_market_odds()), NO
+# juegos con resultado final -- un juego sin cuota de mercado nunca puso a
+# prueba ningún edge, así que no cuenta aquí aunque sí tenga resultado real
+# (esa es la pregunta que ya responde print_calibration_report(), sobre la
+# probabilidad cruda del modelo, no sobre el edge). Mientras el conteo esté
+# por debajo de este número, los picks se marcan con calibration_phase=True
 # (ver Pick.calibration_phase en db/database.py) -- se siguen generando y
 # guardando igual, para poder acumular ese historial, pero no deberían
 # tratarse como señal apostable todavía.
-MIN_GAMES_FOR_CALIBRATED_PICKS = int(os.getenv("MIN_GAMES_FOR_CALIBRATED_PICKS", "200"))
+MIN_LIQUIDATED_PICKS_FOR_CALIBRATION = int(os.getenv("MIN_LIQUIDATED_PICKS_FOR_CALIBRATION", "200"))

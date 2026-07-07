@@ -148,92 +148,108 @@ def test_compute_metrics_market_brier_is_none_without_market_data(tmp_path, monk
     assert metrics["market_brier_score"] is None
 
 
-# --- count_evaluated_games_all_time(): fase de calibración (config.MIN_GAMES_FOR_CALIBRATED_PICKS) ---
+# --- count_liquidated_picks_with_market_odds(): fase de calibración del
+# EDGE apostable (config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION) -- distinto
+# de compute_metrics()/compute_calibration(), que miden si la PROBABILIDAD
+# cruda del modelo está bien calibrada, sin importar si hubo cuota real.
 
-def _add_evaluated_game(session, game_pk, game_date, away_model_prob=0.4, home_model_prob=0.6, model_version=None):
-    session.add(database.GameAnalysis(
-        game_pk=game_pk, game_date=game_date, away_team="A", home_team="B",
-        away_model_prob=away_model_prob, home_model_prob=home_model_prob,
-        model_version=model_version,
+def _add_pick(session, game_pk, odds_used=None, result="pending",
+              market="moneyline", selection="away", game_date="2026-01-01"):
+    session.add(database.Pick(
+        game_pk=game_pk, game_date=game_date, market=market, selection=selection,
+        model_prob=0.6, odds_used=odds_used, result=result,
     ))
-    session.add(database.ActualResult(
-        game_pk=game_pk, game_date=game_date, home_score=5, away_score=2, winner="home", total_runs=7,
-    ))
 
 
-def test_count_evaluated_games_all_time_is_zero_with_empty_db(tmp_path, monkeypatch):
+def test_count_liquidated_picks_is_zero_with_empty_db(tmp_path, monkeypatch):
     temp_engine = create_engine(f"sqlite:///{tmp_path}/count_empty_test.db")
     database.Base.metadata.create_all(temp_engine)
     monkeypatch.setattr(results_tracker, "SessionLocal", sessionmaker(bind=temp_engine))
 
-    assert results_tracker.count_evaluated_games_all_time() == 0
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 0
 
 
-def test_count_evaluated_games_all_time_counts_distinct_games(tmp_path, monkeypatch):
-    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_games_test.db")
-    database.Base.metadata.create_all(temp_engine)
-    TempSession = sessionmaker(bind=temp_engine)
-    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
-
-    session = TempSession()
-    for pk in (1, 2, 3):
-        _add_evaluated_game(session, pk, "2026-01-01")
-    session.commit()
-    session.close()
-
-    assert results_tracker.count_evaluated_games_all_time() == 3
-
-
-def test_count_evaluated_games_all_time_ignores_date_window():
-    # A diferencia de compute_metrics(days=N), esto NO tiene ventana de
-    # días -- un juego de hace un año debe contar igual, porque lo que
-    # importa es el histórico TOTAL acumulado, no uno reciente.
-    import inspect
-    sig = inspect.signature(results_tracker.count_evaluated_games_all_time)
-    assert "days" not in sig.parameters
-
-
-def test_count_evaluated_games_all_time_dedups_by_game_pk(tmp_path, monkeypatch):
-    # Mismo juego recalculado con dos model_version distintos -- dos filas
-    # de GameAnalysis para el mismo game_pk (ver UniqueConstraint uq_pred,
-    # que incluye model_version), pero un solo ActualResult (game_pk es
-    # único ahí) -- no debe contarse doble.
-    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_dedup_test.db")
+def test_count_liquidated_picks_ignores_game_with_final_result_but_no_market_odds(tmp_path, monkeypatch):
+    # El caso real de los 13 juegos del 2026-07-05: resultado final
+    # registrado, pero CERO cuotas de mercado cargadas para ningún
+    # mercado -- nunca hubo un edge real que poner a prueba, así que no
+    # debe contar hacia esta calibración (aunque sí cuenta para
+    # print_calibration_report()/compute_calibration(), que miden algo
+    # distinto: la probabilidad cruda, no el edge).
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_no_odds_test.db")
     database.Base.metadata.create_all(temp_engine)
     TempSession = sessionmaker(bind=temp_engine)
     monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
 
     session = TempSession()
     session.add(database.GameAnalysis(
-        game_pk=1, game_date="2026-01-01", away_team="A", home_team="B",
-        away_model_prob=0.4, home_model_prob=0.6, model_version="v1",
-    ))
-    session.add(database.GameAnalysis(
-        game_pk=1, game_date="2026-01-01", away_team="A", home_team="B",
-        away_model_prob=0.4, home_model_prob=0.6, model_version="v2",
+        game_pk=1, game_date="2026-07-05", away_team="A", home_team="B",
+        away_model_prob=0.4, home_model_prob=0.6,
     ))
     session.add(database.ActualResult(
-        game_pk=1, game_date="2026-01-01", home_score=5, away_score=2, winner="home", total_runs=7,
+        game_pk=1, game_date="2026-07-05", home_score=5, away_score=2, winner="home", total_runs=7,
     ))
+    _add_pick(session, 1, odds_used=None, result="pending")  # "sin cuotas cargadas para este mercado"
     session.commit()
     session.close()
 
-    assert results_tracker.count_evaluated_games_all_time() == 1
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 0
 
 
-def test_count_evaluated_games_all_time_excludes_invalid_probabilities(tmp_path, monkeypatch):
-    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_invalid_test.db")
+def test_count_liquidated_picks_excludes_pending_picks_even_with_real_odds(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_pending_test.db")
     database.Base.metadata.create_all(temp_engine)
     TempSession = sessionmaker(bind=temp_engine)
     monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
 
     session = TempSession()
-    _add_evaluated_game(session, 1, "2026-01-01", away_model_prob=0.4, home_model_prob=0.4)  # no suma 1.0
-    _add_evaluated_game(session, 2, "2026-01-01", away_model_prob=0.4, home_model_prob=0.6)  # válido
+    _add_pick(session, 1, odds_used=-150, result="pending")  # cuota real, pero el juego no ha terminado
     session.commit()
     session.close()
 
-    assert results_tracker.count_evaluated_games_all_time() == 1
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 0
+
+
+def test_count_liquidated_picks_counts_settled_pick_with_real_odds(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_settled_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    _add_pick(session, 1, odds_used=-150, result="win")
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 1
+
+
+def test_count_liquidated_picks_counts_each_settled_pick_separately(tmp_path, monkeypatch):
+    # Un mismo juego puede tener hasta 3 picks (ML/RL/Totales) -- cada uno
+    # es un edge distinto puesto a prueba contra su propia cuota, así que
+    # cuentan por separado (a diferencia del criterio viejo, que
+    # deduplicaba por game_pk porque medía JUEGOS, no edges).
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_multi_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    _add_pick(session, 1, odds_used=-150, result="win", market="moneyline", selection="away")
+    _add_pick(session, 1, odds_used=120, result="loss", market="run_line", selection="home")
+    _add_pick(session, 1, odds_used=-110, result="push", market="totals", selection="over")
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 3
+
+
+def test_count_liquidated_picks_has_no_days_window_parameter():
+    # A diferencia de compute_metrics(days=N), esto no tiene ventana de
+    # días -- importa el histórico TOTAL acumulado, no uno reciente.
+    import inspect
+    sig = inspect.signature(results_tracker.count_liquidated_picks_with_market_odds)
+    assert "days" not in sig.parameters
 
 
 def test_compute_pick_performance_separates_real_from_forced_picks(tmp_path, monkeypatch):

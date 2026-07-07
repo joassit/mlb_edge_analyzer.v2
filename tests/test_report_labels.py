@@ -220,7 +220,7 @@ def test_print_report_shows_discard_note_even_with_no_games_processed(capsys):
     assert "No hay juegos analizados hoy." in out
 
 
-# --- Nota de fase de calibración (config.MIN_GAMES_FOR_CALIBRATED_PICKS) ---
+# --- Nota de fase de calibración (config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION) ---
 
 def test_print_report_shows_calibration_note_when_provided(capsys):
     rows = [{

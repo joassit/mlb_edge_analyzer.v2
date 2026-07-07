@@ -259,38 +259,39 @@ def compute_metrics(days: int = 30) -> dict:
     }
 
 
-def count_evaluated_games_all_time() -> int:
+def count_liquidated_picks_with_market_odds() -> int:
     """
-    Cuenta cuántos juegos tienen predicción Y resultado real registrados,
-    SIN ventana de días (a diferencia de compute_metrics(days=N)) -- para
-    decidir si el histórico acumulado ya alcanza
-    config.MIN_GAMES_FOR_CALIBRATED_PICKS o el modelo heurístico todavía
+    Cuenta cuántos PICKS están liquidados (result != "pending") Y tuvieron
+    una cuota de mercado real (odds_used is not None) -- para decidir si
+    el histórico de EDGES REALMENTE PROBADOS ya alcanza
+    config.MIN_LIQUIDATED_PICKS_FOR_CALIBRATION o el heurístico todavía
     está en fase de calibración (ver Pick.calibration_phase en
-    db/database.py). Mismo dedup por game_pk (una fila por model_version
-    distinto no debe contarse dos veces) y mismo filtro
-    validate_probabilities() que compute_metrics(), para no inflar el
-    conteo con una fila corrupta o un recálculo del mismo juego.
+    db/database.py).
+
+    Antes (count_evaluated_games_all_time()) esto contaba cualquier juego
+    con predicción + resultado final, sin importar si hubo cuota de
+    mercado -- eso mide si la PROBABILIDAD cruda del modelo está bien
+    calibrada (pregunta que ya responde print_calibration_report()/
+    compute_calibration(), sin tocar). Esta función mide algo distinto:
+    si el EDGE (model_prob vs. cuota de mercado real) que decide un pick
+    es señal o ruido -- un juego sin cuota de mercado nunca puso a prueba
+    ningún edge, así que no cuenta aquí aunque sí tenga un resultado real
+    y una probabilidad válida.
+
+    No hace falta dedup por game_pk/model_version: Pick tiene su propio
+    UniqueConstraint (game_pk, game_date, market, selection) -- un
+    recálculo del mismo día hace upsert vía save_picks(), nunca duplica
+    la fila.
     """
     session = SessionLocal()
     try:
-        rows = (
-            session.query(GameAnalysis, ActualResult)
-            .join(ActualResult, GameAnalysis.game_pk == ActualResult.game_pk)
-            .order_by(GameAnalysis.id.desc())
-            .all()
+        return (
+            session.query(Pick)
+            .filter(Pick.odds_used.isnot(None), Pick.result != "pending")
+            .count()
         )
     finally:
         session.close()
-
-    seen_pks = set()
-    count = 0
-    for pred, _result in rows:
-        if pred.game_pk in seen_pks:
-            continue
-        seen_pks.add(pred.game_pk)
-        if validate_probabilities(pred):
-            count += 1
-    return count
 
 
 # Rango [low, high) de confianza en el favorito declarado -- confidence =
