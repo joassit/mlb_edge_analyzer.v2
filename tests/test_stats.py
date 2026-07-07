@@ -1,3 +1,5 @@
+import requests
+
 import data.stats as stats
 from data.stats import _parse_innings
 
@@ -166,3 +168,125 @@ def test_get_league_runs_per_game_falls_back_to_constant_on_api_failure(monkeypa
     monkeypatch.setattr(stats, "_league_runs_per_game_cache", None)
 
     assert stats.get_league_runs_per_game(season=2026) == LEAGUE_AVG_RUNS_PER_GAME
+
+
+# --- M1: get_bullpen_era() en paralelo (ThreadPoolExecutor), no secuencial ---
+
+class _FakeBullpenResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _roster_payload(pitcher_ids):
+    return {"roster": [
+        {"person": {"id": pid}, "position": {"abbreviation": "P"}}
+        for pid in pitcher_ids
+    ]}
+
+
+def _pitcher_stats_payload(era, ip, games=50, starts=0):
+    return {"stats": [{"splits": [{"stat": {
+        "era": era, "inningsPitched": ip, "gamesPlayed": games, "gamesStarted": starts,
+    }}]}]}
+
+
+def test_get_bullpen_era_weighted_by_innings_pitched(monkeypatch):
+    stats_by_pid = {
+        101: _pitcher_stats_payload(era="3.00", ip="80.0", games=60, starts=0),
+        102: _pitcher_stats_payload(era="5.00", ip="20.0", games=40, starts=0),
+    }
+
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/roster"):
+            return _FakeBullpenResponse(_roster_payload([101, 102]))
+        pid = int(url.rstrip("/stats").rsplit("/", 1)[-1])
+        return _FakeBullpenResponse(stats_by_pid[pid])
+
+    monkeypatch.setattr(stats.session, "get", fake_get)
+    monkeypatch.setattr(stats, "_bullpen_cache", {})
+
+    result = stats.get_bullpen_era(team_id=999, season=2026)
+
+    expected = (3.00 * 80.0 + 5.00 * 20.0) / (80.0 + 20.0)
+    assert abs(result - expected) < 1e-9
+
+
+def test_get_bullpen_era_excludes_pitchers_classified_as_starters(monkeypatch):
+    stats_by_pid = {
+        201: _pitcher_stats_payload(era="3.00", ip="80.0", games=60, starts=0),   # relevista puro
+        202: _pitcher_stats_payload(era="9.00", ip="150.0", games=30, starts=30),  # abridor -- debe excluirse
+    }
+
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/roster"):
+            return _FakeBullpenResponse(_roster_payload([201, 202]))
+        pid = int(url.rstrip("/stats").rsplit("/", 1)[-1])
+        return _FakeBullpenResponse(stats_by_pid[pid])
+
+    monkeypatch.setattr(stats.session, "get", fake_get)
+    monkeypatch.setattr(stats, "_bullpen_cache", {})
+
+    result = stats.get_bullpen_era(team_id=999, season=2026)
+
+    assert abs(result - 3.00) < 1e-9  # el abridor (9.00) no debe contar
+
+
+def test_get_bullpen_era_falls_back_when_roster_fetch_fails(monkeypatch):
+    def fail(*a, **k):
+        raise requests.RequestException("red caída")
+
+    monkeypatch.setattr(stats.session, "get", fail)
+    monkeypatch.setattr(stats, "_bullpen_cache", {})
+
+    from config import FALLBACK_BULLPEN_ERA
+    assert stats.get_bullpen_era(team_id=999, season=2026) == FALLBACK_BULLPEN_ERA
+
+
+def test_get_bullpen_era_skips_pitcher_whose_individual_call_fails(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/roster"):
+            return _FakeBullpenResponse(_roster_payload([301, 302]))
+        pid = int(url.rstrip("/stats").rsplit("/", 1)[-1])
+        if pid == 301:
+            raise requests.RequestException("timeout para este pitcher")
+        return _FakeBullpenResponse(_pitcher_stats_payload(era="4.00", ip="60.0", games=50, starts=0))
+
+    monkeypatch.setattr(stats.session, "get", fake_get)
+    monkeypatch.setattr(stats, "_bullpen_cache", {})
+
+    result = stats.get_bullpen_era(team_id=999, season=2026)
+
+    # Solo el pitcher 302 cuenta -- el que falló (301) se omite sin tumbar todo.
+    assert abs(result - 4.00) < 1e-9
+
+
+def test_get_bullpen_era_fetches_pitchers_concurrently_not_sequentially(monkeypatch):
+    # Prueba de verdad de que hay paralelismo, no solo que el resultado
+    # numérico coincide: si las llamadas por pitcher fueran secuenciales,
+    # 6 pitchers x 0.2s c/u tomarían >= 1.2s; en paralelo (max_workers=8)
+    # deberían tomar apenas un poco más que 0.2s.
+    import time
+
+    pitcher_ids = list(range(401, 407))  # 6 pitchers
+
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/roster"):
+            return _FakeBullpenResponse(_roster_payload(pitcher_ids))
+        time.sleep(0.2)
+        return _FakeBullpenResponse(_pitcher_stats_payload(era="4.00", ip="60.0", games=50, starts=0))
+
+    monkeypatch.setattr(stats.session, "get", fake_get)
+    monkeypatch.setattr(stats, "_bullpen_cache", {})
+
+    start = time.monotonic()
+    stats.get_bullpen_era(team_id=999, season=2026)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.2 * len(pitcher_ids)  # mucho menos que si fuera secuencial
+    assert elapsed < 0.6  # generoso -- en paralelo debería rondar ~0.2-0.3s

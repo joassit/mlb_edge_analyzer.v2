@@ -7,6 +7,7 @@ sin bloqueos por rate limit, sin depender de que pybaseball siga funcionando).
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from config import MLB_API_BASE, SEASON, MIN_PA_FOR_LEAGUE_OPS, FALLBACK_BULLPEN_ERA
@@ -253,6 +254,47 @@ def get_league_runs_per_game(season: int = SEASON) -> float:
     return _league_runs_per_game_cache
 
 
+def _fetch_reliever_era_ip(pid: int, season: int) -> tuple[float, float] | None:
+    """
+    ERA/IP de UN pitcher si califica como relevista, o None si no aplica
+    (no es relevista, faltan datos, o la llamada falla) -- separado de
+    get_bullpen_era() para poder llamarlo en paralelo (ThreadPoolExecutor)
+    en vez de secuencial, un pitcher a la vez.
+    """
+    try:
+        resp = session.get(
+            f"{MLB_API_BASE}/people/{pid}/stats",
+            params={"stats": "season", "group": "pitching", "season": season},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+        if not splits:
+            return None
+
+        stat = splits[0]["stat"]
+        games = int(stat.get("gamesPlayed", 0))
+        starts = int(stat.get("gamesStarted", 0))
+        era = stat.get("era")
+        ip_str = stat.get("inningsPitched")
+
+        if era is None or ip_str is None or games == 0:
+            return None
+
+        is_reliever = starts == 0 or (starts / games) < 0.5
+        if not is_reliever:
+            return None
+
+        ip = _parse_innings(ip_str)
+        if ip <= 0:
+            return None
+
+        return float(era), ip
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+        logger.debug(f"Se omitió pitcher {pid} en cálculo de bullpen: {e}")
+        return None
+
+
 def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
     """
     ERA del bullpen de un equipo, calculado como el promedio ponderado por
@@ -261,6 +303,11 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
     Un jugador se clasifica como 'relevista' si tiene 0 aperturas, o si
     empezó menos del 50% de los juegos en los que apareció (long relievers
     que a veces abren).
+
+    Las ~12-15 llamadas por pitcher del roster se hacen EN PARALELO
+    (ThreadPoolExecutor, mismo patrón que data/weather.py::preload_weather())
+    en vez de secuenciales -- antes, un timeout de 15s en un solo pitcher
+    bloqueaba a los siguientes uno por uno.
     """
     cache_key = f"{team_id}-{season}"
     with _cache_lock:
@@ -289,41 +336,13 @@ def get_bullpen_era(team_id: int, season: int = SEASON) -> float:
     total_ip = 0.0
     weighted_era_sum = 0.0
 
-    for pid in pitcher_ids:
-        try:
-            resp = session.get(
-                f"{MLB_API_BASE}/people/{pid}/stats",
-                params={"stats": "season", "group": "pitching", "season": season},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            splits = resp.json()["stats"][0]["splits"]
-            if not splits:
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for result in executor.map(lambda pid: _fetch_reliever_era_ip(pid, season), pitcher_ids):
+            if result is None:
                 continue
-
-            stat = splits[0]["stat"]
-            games = int(stat.get("gamesPlayed", 0))
-            starts = int(stat.get("gamesStarted", 0))
-            era = stat.get("era")
-            ip_str = stat.get("inningsPitched")
-
-            if era is None or ip_str is None or games == 0:
-                continue
-
-            is_reliever = starts == 0 or (starts / games) < 0.5
-            if not is_reliever:
-                continue
-
-            ip = _parse_innings(ip_str)
-            if ip <= 0:
-                continue
-
-            weighted_era_sum += float(era) * ip
+            era, ip = result
+            weighted_era_sum += era * ip
             total_ip += ip
-
-        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
-            logger.debug(f"Se omitió pitcher {pid} en cálculo de bullpen: {e}")
-            continue
 
     bullpen_era = (weighted_era_sum / total_ip) if total_ip > 0 else FALLBACK_BULLPEN_ERA
     with _cache_lock:
