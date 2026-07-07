@@ -3,7 +3,7 @@ Pruebas de la lógica de Brier Score / accuracy, usando objetos simples
 que imitan la forma de GameAnalysis/ActualResult sin tocar la base de datos.
 """
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -366,6 +366,75 @@ def test_compute_metrics_excludes_rows_that_fail_probability_validation(tmp_path
     metrics = results_tracker.compute_metrics(days=30)
 
     assert metrics["n_games"] == 1
+
+
+def test_compute_pick_performance_dedupes_same_game_and_market_keeping_latest(tmp_path, monkeypatch):
+    # Caso real detectado en auditoría: el pipeline se recorrió más de una
+    # vez el mismo día y el pick de moneyline cambió de lado (selection)
+    # entre corridas -- Pick.uq_pick_game_market_selection no lo rechaza
+    # como duplicado porque selection es distinto, así que ambas filas
+    # coexisten en la tabla aunque representen la MISMA decisión de
+    # game_pk+market recalculada. Sin dedup, compute_pick_performance()
+    # cuenta el mismo juego dos veces (una por selection).
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_perf_dedup_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    # Recálculo temprano: pick en "home", perdedor.
+    session.add(database.Pick(
+        game_pk=10, game_date=today, market="moneyline", selection="home",
+        model_prob=0.55, forced=False, result="loss", profit_unit=-1.0,
+        created_at=datetime(2026, 7, 6, 0, 42, 0),
+    ))
+    # Recálculo posterior, mismo game_pk/market: pick cambió a "away", ganador.
+    session.add(database.Pick(
+        game_pk=10, game_date=today, market="moneyline", selection="away",
+        model_prob=0.60, forced=False, result="win", profit_unit=0.9,
+        created_at=datetime(2026, 7, 6, 7, 23, 0),
+    ))
+    session.commit()
+    session.close()
+
+    perf = results_tracker.compute_pick_performance(days=30)
+
+    # Solo debe contar 1 pick (el más reciente, el que ganó) -- no 2.
+    assert perf["overall_real"]["n_picks"] == 1
+    assert perf["overall_real"]["win_rate"] == 1.0
+    assert perf["by_market"]["moneyline"]["real"]["n_picks"] == 1
+
+
+def test_compute_pick_performance_keeps_distinct_markets_for_same_game(tmp_path, monkeypatch):
+    # El dedup debe ser por (game_pk, market), NO solo por game_pk -- un
+    # mismo partido puede tener hasta 3 picks legítimos y distintos
+    # (moneyline/run_line/totals) que NUNCA deben perderse.
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/pick_perf_multimarket_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    session.add(database.Pick(
+        game_pk=11, game_date=today, market="moneyline", selection="home",
+        model_prob=0.6, forced=False, result="win", profit_unit=0.8,
+        created_at=datetime(2026, 7, 6, 0, 42, 0),
+    ))
+    session.add(database.Pick(
+        game_pk=11, game_date=today, market="totals", selection="over",
+        model_prob=0.55, forced=False, result="loss", profit_unit=-1.0,
+        created_at=datetime(2026, 7, 6, 0, 42, 0),
+    ))
+    session.commit()
+    session.close()
+
+    perf = results_tracker.compute_pick_performance(days=30)
+
+    assert perf["overall_real"]["n_picks"] == 2
+    assert perf["by_market"]["moneyline"]["real"]["n_picks"] == 1
+    assert perf["by_market"]["totals"]["real"]["n_picks"] == 1
 
 
 def test_compute_pick_performance_empty_when_no_picks_settled(tmp_path, monkeypatch):

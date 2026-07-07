@@ -481,6 +481,15 @@ def compute_pick_performance(days: int = 30) -> dict:
     forzados (forced=True) para no diluir la señal real con el relleno de
     la regla "siempre al menos 1 pick por partido" — mezclarlos haría que
     un mal pick forzado (sin edge) se vea como una falla del modelo real.
+
+    Dedup por (game_pk, market), quedándose con la fila de mayor
+    created_at: uq_pick_game_market_selection NO evita que el mismo
+    game_pk+market quede duplicado si el pick cambió de `selection` entre
+    dos corridas del mismo día (el recálculo es una fila nueva, no un
+    upsert, porque selection forma parte de la unique key) — sin este
+    dedup, ese único juego se cuenta dos veces. Por market, no por
+    game_pk solo: un mismo partido puede tener hasta 3 picks legítimos y
+    distintos (moneyline/run_line/totals) que nunca deben perderse.
     """
     from datetime import date, timedelta
 
@@ -495,6 +504,14 @@ def compute_pick_performance(days: int = 30) -> dict:
         )
     finally:
         session.close()
+
+    latest_by_game_market = {}
+    for p in picks:
+        key = (p.game_pk, p.market)
+        prev = latest_by_game_market.get(key)
+        if prev is None or p.created_at > prev.created_at:
+            latest_by_game_market[key] = p
+    picks = list(latest_by_game_market.values())
 
     by_market = {}
     for market in ("moneyline", "run_line", "totals"):
@@ -542,6 +559,15 @@ def compute_daily_review(review_date: str) -> dict:
     día) y la misma validate_probabilities() que compute_metrics(), para
     que el Brier Score de este reporte no se calcule sobre una fila
     corrupta ni cuente un juego recalculado dos veces.
+
+    Los Pick también se dedupean, por (game_pk, market) quedándose con el
+    de mayor created_at -- mismo motivo que en compute_pick_performance():
+    un recálculo intradía que cambia `selection` no choca con
+    uq_pick_game_market_selection, así que puede haber más de una fila
+    para el mismo game_pk+market. Sin esto, tanto la ficha del partido
+    (picks_by_game) como by_market podían mostrar/contar una fila
+    arbitraria (la última en el orden de iteración, no necesariamente la
+    más reciente) o contar el mismo juego dos veces.
     """
     session = SessionLocal()
     try:
@@ -570,6 +596,14 @@ def compute_daily_review(review_date: str) -> dict:
             continue
         seen_pks.add(pred.game_pk)
         deduped_analysis.append(pred)
+
+    latest_by_game_market = {}
+    for p in picks:
+        key = (p.game_pk, p.market)
+        prev = latest_by_game_market.get(key)
+        if prev is None or p.created_at > prev.created_at:
+            latest_by_game_market[key] = p
+    picks = list(latest_by_game_market.values())
 
     picks_by_game = {}
     for p in picks:
