@@ -119,3 +119,18 @@ def test_predict_from_raw_inputs_falls_back_to_league_avg_runs_per_game_constant
     explicit_result = predict_from_raw_inputs(raw_with_explicit_constant)
 
     assert old_result == explicit_result
+
+
+def test_predict_from_raw_inputs_unaffected_by_market_no_vig_power():
+    # M4: market_no_vig_power es una clave NUEVA, puramente informativa --
+    # predict_from_raw_inputs() nunca debe leerla. Un snapshot viejo (sin
+    # ella) debe recalcular EXACTAMENTE igual que uno nuevo que sí la trae.
+    raw_old_snapshot = _base_raw_inputs()
+    assert "market_no_vig_power" not in raw_old_snapshot
+
+    raw_with_power_devig = _base_raw_inputs(market_no_vig_power=(0.71, 0.29))
+
+    old_result = predict_from_raw_inputs(raw_old_snapshot)
+    new_result = predict_from_raw_inputs(raw_with_power_devig)
+
+    assert old_result == new_result

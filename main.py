@@ -25,7 +25,10 @@ from data.weather import preload_weather
 from model.predictor import predict_from_raw_inputs
 from model.edge import implied_prob, edge, expected_value, market_favorite, no_vig_probs
 from model.picks import generate_pick_candidates, select_picks_for_game
-from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
+from data.odds_api import (
+    fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price,
+    consensus_power_devig_prob,
+)
 from data.quote_gate import validate_manual_american_odds, validate_manual_line
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
@@ -348,6 +351,9 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
                                      game_datetime_iso=g.get("game_time"))
     live_price = best_available_price(odds_event) if odds_event else None
     no_vig = consensus_no_vig_prob(odds_event) if odds_event else None
+    # M4: referencia secundaria, congelada en el snapshot para comparar a
+    # futuro -- no alimenta edge/EV/picks (esos siguen usando `no_vig`).
+    no_vig_power = consensus_power_devig_prob(odds_event) if odds_event else None
     manual_price = _validated_manual_market(g["game_pk"], "moneyline", MARKET_ODDS.get(g["game_pk"]),
                                              ("home", "away"))
     price = live_price or manual_price
@@ -389,7 +395,7 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "park_factor": park["park_factor"], "park_name": park["name"],
         "temp_f": weather.get("temp_f"), "wind_mph": weather.get("wind_mph"),
         "wind_direction_deg": weather.get("wind_direction_deg"),
-        "market_price": price, "market_no_vig": no_vig,
+        "market_price": price, "market_no_vig": no_vig, "market_no_vig_power": no_vig_power,
         "market_run_line": manual_rl, "market_totals": manual_totals,
         "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
         "park_factor_weight": PARK_FACTOR_WEIGHT, "weather_correction": WEATHER_CORRECTION,

@@ -2,6 +2,7 @@ import pytest
 
 from model.edge import (
     implied_prob, fair_odds, edge, kelly_fraction, expected_value, no_vig_probs, market_favorite,
+    power_devig,
 )
 
 
@@ -74,6 +75,38 @@ def test_no_vig_probs_symmetric_regardless_of_order():
     home_p2, away_p2 = no_vig_probs(130, -150)
     assert abs(away_p - away_p2) < 1e-9
     assert abs(home_p - home_p2) < 1e-9
+
+
+# --- M4: power_devig() -- referencia secundaria, no reemplaza a no_vig_probs ---
+
+def test_power_devig_sums_to_one():
+    fav, dog = power_devig(-250, 210)
+    assert abs((fav + dog) - 1.0) < 1e-9
+
+
+def test_power_devig_matches_proportional_on_symmetric_market():
+    # -110/-110: ambos lados con la misma cuota -- power y proporcional
+    # deben coincidir (no hay asimetría que el método power corrija).
+    power_a, power_b = power_devig(-110, -110)
+    prop_a, prop_b = no_vig_probs(-110, -110)
+    assert abs(power_a - prop_a) < 1e-6
+    assert abs(power_b - prop_b) < 1e-6
+
+
+def test_power_devig_assigns_less_probability_to_underdog_than_proportional():
+    # -250 favorito / +210 underdog: el método power debe asignarle MENOS
+    # probabilidad al underdog que el reparto proporcional de no_vig_probs.
+    power_fav, power_dog = power_devig(-250, 210)
+    prop_fav, prop_dog = no_vig_probs(-250, 210)
+    assert power_dog < prop_dog
+    assert power_fav > prop_fav
+
+
+def test_power_devig_returns_pickem_when_market_has_no_real_vig():
+    # p_a + p_b <= 1 (cuotas sin margen real, ej. de prueba) -- nada que quitar.
+    fav, dog = power_devig(100, 100)  # implied_prob(100)=0.5 c/u, suma exacta 1.0
+    assert abs(fav - 0.5) < 1e-9
+    assert abs(dog - 0.5) < 1e-9
 
 
 def test_market_favorite_picks_the_higher_probability_side():

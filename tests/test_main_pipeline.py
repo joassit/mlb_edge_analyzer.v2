@@ -141,6 +141,32 @@ def test_analyze_today_prefers_live_odds_over_manual_market_odds(monkeypatch):
     assert abs((row["away_market_no_vig_prob"] + row["home_market_no_vig_prob"]) - 1.0) < 1e-9
 
 
+def test_analyze_today_freezes_power_devig_reference_in_snapshot_without_using_it_for_edge(monkeypatch):
+    # M4: market_no_vig_power es una referencia secundaria congelada en el
+    # snapshot -- no debe alimentar away_market_prob/away_edge (esos
+    # siguen viniendo del consenso proporcional, no_vig_probs).
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    live_event = {
+        "away_team": "Away Team", "home_team": "Home Team", "commence_time": None,
+        "prices": [{"book": "fakebook", "away_price": -250, "home_price": 210, "last_update": None}],
+    }
+    monkeypatch.setattr(main, "fetch_moneyline_odds", lambda: [live_event])
+
+    results = main.analyze_today()
+    row = results[0]
+    snapshot = row["_feature_snapshot"]
+
+    assert snapshot["market_no_vig_power"] is not None
+    away_power, home_power = snapshot["market_no_vig_power"]
+    assert abs((away_power + home_power) - 1.0) < 1e-9
+
+    # Distinto del consenso proporcional que sí decide el edge -- si
+    # fueran iguales, esta prueba no protegería nada (podría estar
+    # llamando a la función equivocada por coincidencia).
+    assert abs(away_power - row["away_market_no_vig_prob"]) > 1e-6
+
+
 def test_analyze_today_disambiguates_doubleheader_odds_by_game_time(monkeypatch):
     """
     Dos eventos de cuotas con los mismos equipos (doubleheader) -- sin

@@ -259,6 +259,32 @@ def test_consensus_no_vig_prob_none_without_prices():
     assert odds_api.consensus_no_vig_prob({"prices": []}) is None
 
 
+def test_consensus_power_devig_prob_averages_across_books():
+    event = {
+        "prices": [
+            {"book": "draftkings", "away_price": 130, "home_price": -150},
+            {"book": "fanduel", "away_price": 125, "home_price": -145},
+        ]
+    }
+    away_p, home_p = odds_api.consensus_power_devig_prob(event)
+    assert abs((away_p + home_p) - 1.0) < 1e-9
+    assert 0 < away_p < home_p < 1
+
+
+def test_consensus_power_devig_prob_none_without_prices():
+    assert odds_api.consensus_power_devig_prob({"prices": []}) is None
+
+
+def test_consensus_power_devig_prob_differs_from_proportional_consensus():
+    # Si diera lo mismo que consensus_no_vig_prob(), esta prueba (y la
+    # función misma) no protegerían nada -- confirma que de verdad usa
+    # power_devig, no no_vig_probs por error de copiar/pegar.
+    event = {"prices": [{"book": "fakebook", "away_price": -250, "home_price": 210}]}
+    away_power, _ = odds_api.consensus_power_devig_prob(event)
+    away_prop, _ = odds_api.consensus_no_vig_prob(event)
+    assert abs(away_power - away_prop) > 1e-6
+
+
 def test_fetch_moneyline_odds_uses_cache_instead_of_a_second_call(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
     calls = {"n": 0}

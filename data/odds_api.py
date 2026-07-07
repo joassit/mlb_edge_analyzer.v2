@@ -347,6 +347,31 @@ def consensus_no_vig_prob(event: dict) -> tuple[float, float] | None:
     return sum(away_probs) / len(away_probs), sum(home_probs) / len(home_probs)
 
 
+def consensus_power_devig_prob(event: dict) -> tuple[float, float] | None:
+    """
+    M4: mismo consenso que consensus_no_vig_prob(), pero con el método de
+    devig "power" (model.edge.power_devig) en vez del proporcional --
+    referencia SECUNDARIA para comparación futura, congelada en el
+    snapshot (market_no_vig_power). No reemplaza a consensus_no_vig_prob()
+    en ninguna decisión real del pipeline (CLV/edge/picks siguen usando
+    el consenso proporcional). None si ningún bookmaker trajo datos
+    usables y frescos para este evento.
+    """
+    from model.edge import power_devig
+
+    fresh = _fresh_prices(event)
+    if not fresh:
+        return None
+
+    away_probs, home_probs = [], []
+    for p in fresh:
+        away_p, home_p = power_devig(p["away_price"], p["home_price"])
+        away_probs.append(away_p)
+        home_probs.append(home_p)
+
+    return sum(away_probs) / len(away_probs), sum(home_probs) / len(home_probs)
+
+
 def best_available_price(event: dict) -> dict | None:
     """
     La mejor cuota tomable por lado, entre las frescas (la que de verdad
