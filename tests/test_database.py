@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker, Session as OrmSession
 
 import db.database as database
 
@@ -74,6 +75,53 @@ def test_save_analysis_upserts_instead_of_duplicating(isolated_db):
     finally:
         session.close()
     assert count == 1
+
+
+def test_save_analysis_retries_once_and_succeeds_after_integrity_error(isolated_db, monkeypatch):
+    # B1: dos corridas concurrentes pueden insertar la misma fila entre la
+    # búsqueda y el commit -- el primer IntegrityError debe reintentarse una
+    # vez (segunda búsqueda encuentra la fila ya insertada) en vez de
+    # propagar el error.
+    original_commit = OrmSession.commit
+    call_count = {"n": 0}
+
+    def flaky_commit(self):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError("stmt", "params", Exception("uq_pred"))
+        return original_commit(self)
+
+    monkeypatch.setattr(OrmSession, "commit", flaky_commit)
+
+    row = {
+        "game_pk": 1, "game_date": "2026-07-05", "away_team": "A", "home_team": "B",
+        "away_model_prob": 0.6, "home_model_prob": 0.4,
+    }
+    isolated_db.save_analysis(row)
+
+    assert call_count["n"] == 2
+    session = isolated_db.SessionLocal()
+    try:
+        count = session.query(isolated_db.GameAnalysis).count()
+    finally:
+        session.close()
+    assert count == 1
+
+
+def test_save_analysis_raises_if_integrity_error_persists_after_retry(isolated_db, monkeypatch):
+    # Si el segundo intento TAMBIÉN choca, el error no debe tragarse en
+    # silencio -- debe propagar después de agotar el único reintento.
+    def always_fails(self):
+        raise IntegrityError("stmt", "params", Exception("uq_pred"))
+
+    monkeypatch.setattr(OrmSession, "commit", always_fails)
+
+    row = {
+        "game_pk": 2, "game_date": "2026-07-05", "away_team": "A", "home_team": "B",
+        "away_model_prob": 0.6, "home_model_prob": 0.4,
+    }
+    with pytest.raises(IntegrityError):
+        isolated_db.save_analysis(row)
 
 
 def test_feature_snapshot_round_trip(isolated_db):

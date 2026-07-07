@@ -16,6 +16,7 @@ from sqlalchemy import (
     create_engine, event, inspect, text,
     Column, Integer, String, Float, Boolean, DateTime, Text, UniqueConstraint, Index
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from config import DATABASE_URL, MODEL_VERSION
@@ -296,36 +297,50 @@ def init_db():
 def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> None:
     """Congela los insumos crudos de una predicción. Upsert por
     (game_pk, game_date), igual que save_analysis — re-ejecutar el pipeline
-    el mismo día actualiza el snapshot, no lo duplica."""
-    session = SessionLocal()
-    try:
-        existing = (
-            session.query(FeatureSnapshot)
-            .filter_by(game_pk=game_pk, game_date=game_date)
-            .one_or_none()
-        )
-        payload = json.dumps(raw_inputs, default=str)
-        frozen_config = {
-            "park_factor_weight": raw_inputs.get("park_factor_weight"),
-            "weather_correction": raw_inputs.get("weather_correction"),
-            "starter_weight": raw_inputs.get("starter_weight"),
-            "home_field_advantage": raw_inputs.get("home_field_advantage"),
-        }
-        if existing:
-            existing.raw_inputs_json = payload
-            existing.captured_at = _utcnow_naive()
-            existing.model_version = MODEL_VERSION
-            for key, value in frozen_config.items():
-                setattr(existing, key, value)
-        else:
-            session.add(FeatureSnapshot(
-                game_pk=game_pk, game_date=game_date,
-                raw_inputs_json=payload, model_version=MODEL_VERSION,
-                **frozen_config,
-            ))
-        session.commit()
-    finally:
-        session.close()
+    el mismo día actualiza el snapshot, no lo duplica.
+
+    Un solo reintento si dos corridas concurrentes insertan la misma fila
+    entre la búsqueda y el commit (IntegrityError sobre
+    uq_feature_snapshot_game_pk_date) -- el reintento vuelve a buscar y
+    esta vez sí encuentra la fila (ya insertada por la otra corrida) y
+    actualiza en vez de insertar. No protege contra una segunda colisión
+    en la misma ventana -- eso ya no es una carrera real, es un bug aparte."""
+    payload = json.dumps(raw_inputs, default=str)
+    frozen_config = {
+        "park_factor_weight": raw_inputs.get("park_factor_weight"),
+        "weather_correction": raw_inputs.get("weather_correction"),
+        "starter_weight": raw_inputs.get("starter_weight"),
+        "home_field_advantage": raw_inputs.get("home_field_advantage"),
+    }
+
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            existing = (
+                session.query(FeatureSnapshot)
+                .filter_by(game_pk=game_pk, game_date=game_date)
+                .one_or_none()
+            )
+            if existing:
+                existing.raw_inputs_json = payload
+                existing.captured_at = _utcnow_naive()
+                existing.model_version = MODEL_VERSION
+                for key, value in frozen_config.items():
+                    setattr(existing, key, value)
+            else:
+                session.add(FeatureSnapshot(
+                    game_pk=game_pk, game_date=game_date,
+                    raw_inputs_json=payload, model_version=MODEL_VERSION,
+                    **frozen_config,
+                ))
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
 
 
 def get_feature_snapshot(game_pk: int, game_date: str) -> dict | None:
@@ -360,26 +375,36 @@ def save_analysis(row: dict) -> None:
     lo pasó: la columna tiene default=MODEL_VERSION a nivel de SQLAlchemy,
     pero ese default solo se aplica al insertar — si la búsqueda del upsert
     comparara contra None en vez del valor que realmente va a quedar
-    grabado, nunca encontraría la fila existente y duplicaría el insert."""
+    grabado, nunca encontraría la fila existente y duplicaría el insert.
+
+    Un solo reintento si dos corridas concurrentes insertan la misma fila
+    entre la búsqueda y el commit (IntegrityError sobre uq_pred) -- ver el
+    mismo criterio en save_feature_snapshot()."""
     model_version = row.get("model_version") or MODEL_VERSION
     row = {**row, "model_version": model_version}
 
-    session = SessionLocal()
-    try:
-        existing = (
-            session.query(GameAnalysis)
-            .filter_by(game_pk=row["game_pk"], game_date=row["game_date"],
-                       model_version=model_version)
-            .one_or_none()
-        )
-        if existing:
-            for key, value in row.items():
-                setattr(existing, key, value)
-        else:
-            session.add(GameAnalysis(**row))
-        session.commit()
-    finally:
-        session.close()
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            existing = (
+                session.query(GameAnalysis)
+                .filter_by(game_pk=row["game_pk"], game_date=row["game_date"],
+                           model_version=model_version)
+                .one_or_none()
+            )
+            if existing:
+                for key, value in row.items():
+                    setattr(existing, key, value)
+            else:
+                session.add(GameAnalysis(**row))
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
 
 
 def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: str) -> None:
@@ -387,39 +412,51 @@ def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: s
     Upsert por (game_pk, game_date, market, selection): re-ejecutar el
     pipeline el mismo día actualiza los picks existentes en vez de
     duplicarlos — mismo principio de idempotencia que save_analysis().
+
+    Un solo reintento de TODA la tanda si el commit choca con
+    uq_pick_game_market_selection (otra corrida concurrente insertó alguno
+    de estos picks primero) -- el reintento vuelve a buscar cada pick y
+    esta vez sí encuentra los que ya existen, actualizándolos en vez de
+    intentar insertarlos de nuevo.
     """
-    session = SessionLocal()
-    try:
-        for p in picks:
-            existing = (
-                session.query(Pick)
-                .filter_by(game_pk=game_pk, game_date=game_date,
-                           market=p["market"], selection=p["selection"])
-                .one_or_none()
-            )
-            fields = {
-                "line": p.get("line"),
-                "favorite_side": p.get("favorite_side"),
-                "model_prob": p["model_prob"],
-                "market_prob": p.get("market_prob"),
-                "edge": p.get("edge"),
-                "ev": p.get("ev"),
-                "odds_used": p.get("odds_used"),
-                "forced": p.get("forced", False),
-                "prob_source": p.get("prob_source"),
-                "directional_discrepancy": p.get("directional_discrepancy"),
-                "calibration_phase": p.get("calibration_phase", False),
-                "model_version": model_version,
-            }
-            if existing:
-                for key, value in fields.items():
-                    setattr(existing, key, value)
-            else:
-                session.add(Pick(game_pk=game_pk, game_date=game_date,
-                                  market=p["market"], selection=p["selection"], **fields))
-        session.commit()
-    finally:
-        session.close()
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            for p in picks:
+                existing = (
+                    session.query(Pick)
+                    .filter_by(game_pk=game_pk, game_date=game_date,
+                               market=p["market"], selection=p["selection"])
+                    .one_or_none()
+                )
+                fields = {
+                    "line": p.get("line"),
+                    "favorite_side": p.get("favorite_side"),
+                    "model_prob": p["model_prob"],
+                    "market_prob": p.get("market_prob"),
+                    "edge": p.get("edge"),
+                    "ev": p.get("ev"),
+                    "odds_used": p.get("odds_used"),
+                    "forced": p.get("forced", False),
+                    "prob_source": p.get("prob_source"),
+                    "directional_discrepancy": p.get("directional_discrepancy"),
+                    "calibration_phase": p.get("calibration_phase", False),
+                    "model_version": model_version,
+                }
+                if existing:
+                    for key, value in fields.items():
+                        setattr(existing, key, value)
+                else:
+                    session.add(Pick(game_pk=game_pk, game_date=game_date,
+                                      market=p["market"], selection=p["selection"], **fields))
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
 
 
 def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
