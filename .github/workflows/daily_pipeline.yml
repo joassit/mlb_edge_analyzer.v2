@@ -110,51 +110,6 @@ jobs:
             echo "::notice::Ya existe al menos una predicción de hoy en game_analysis -- se asume que otra corrida (el cron principal, u otra ejecución) ya procesó el día. Esta corrida se salta para no gastar presupuesto de Odds API ni duplicar el reporte."
           fi
 
-      # TEMPORAL -- diagnóstico de una sola vez para investigar la causa
-      # raíz del HTTP 401 de The Odds API (visto en 3 corridas de hoy con
-      # 3 keys distintas) ANTES de rotar a una key nueva a ciegas. Hace
-      # su PROPIA llamada directa (no pasa por fetch_moneyline_odds()) y
-      # captura el texto completo de la respuesta -- solo el código 401
-      # no distingue "key inválida" de "key con espacio/salto de línea
-      # pegado de más" de "IP de GitHub Actions bloqueada por el
-      # proveedor". No rota keys, no toca main.py. Se retira en un commit
-      # posterior.
-      - name: TEMP - Diagnose ODDS_API 401 root cause
-        if: always()
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-          ODDS_API_KEYS: ${{ secrets.ODDS_API_KEYS }}
-        run: |
-          python -c "
-          import os, requests
-
-          def describe(name, value):
-              if value is None:
-                  print(f'{name}: AUSENTE (variable no configurada)')
-                  return
-              print(f'{name}: longitud={len(value)} tiene_espacios_o_saltos={value != value.strip()!r} '
-                    f'primeros_2={value[:2]!r} ultimos_2={value[-2:]!r}')
-
-          key = os.getenv('ODDS_API_KEY')
-          keys_csv = os.getenv('ODDS_API_KEYS')
-          describe('ODDS_API_KEY', key)
-          describe('ODDS_API_KEYS', keys_csv)
-
-          if not key:
-              print('Sin ODDS_API_KEY -- no se puede probar la llamada directa.')
-          else:
-              from data.odds_api import _sanitize
-              url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds'
-              params = {'apiKey': key.strip(), 'regions': 'us', 'markets': 'h2h', 'oddsFormat': 'american', 'dateFormat': 'iso'}
-              try:
-                  resp = requests.get(url, params=params, timeout=15)
-                  print(f'status_code: {resp.status_code}')
-                  print(f'response_headers: {_sanitize(dict(resp.headers))}')
-                  print(f'response_body (primeros 800 chars, sanitizado): {_sanitize(resp.text[:800])}')
-              except requests.RequestException as e:
-                  print(f'RequestException (sanitizado): {_sanitize(e)}')
-          "
-
       - name: Run pipeline
         id: run-pipeline
         if: ${{ steps.idempotency-check.outputs.already_ran != 'true' }}
