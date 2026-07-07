@@ -9,4 +9,3 @@ logs/*.log
 .streamlit/secrets.toml
 .cache/
 backups/
->>>>>>> e2c033018de1e763f10d8f14a81ad62b36d47b58
