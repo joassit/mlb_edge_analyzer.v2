@@ -76,6 +76,14 @@ jobs:
         id: run-pipeline
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # Opcional: rotación entre varias keys si la actual agota su
+          # presupuesto mensual o falla (ver config.resolve_odds_api_keys).
+          # Configura el secret ODDS_API_KEYS="key1,key2" para activarla --
+          # si el secret no existe, esta variable queda vacía y
+          # resolve_odds_api_keys() cae solo a ODDS_API_KEY (a diferencia
+          # de DATABASE_URL_SECRET abajo, acá no hace falta el condicional
+          # de shell: una cadena vacía ya es falsy en Python).
+          ODDS_API_KEYS: ${{ secrets.ODDS_API_KEYS }}
           DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
         run: |
           # No se asigna DATABASE_URL directo desde secrets.DATABASE_URL en

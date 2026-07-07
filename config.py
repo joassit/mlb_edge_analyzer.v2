@@ -93,6 +93,41 @@ ODDS_API_CACHE_TTL_SECONDS = int(os.getenv("ODDS_API_CACHE_TTL_SECONDS", "900"))
 ODDS_API_MONTHLY_BUDGET = int(os.getenv("ODDS_API_MONTHLY_BUDGET", "500"))
 ODDS_CACHE_DIR = os.getenv("ODDS_CACHE_DIR", ".cache/odds")
 
+
+def resolve_odds_api_keys() -> list[str]:
+    """Lista de API keys de The Odds API a rotar, en orden. Lee la variable
+    de entorno ODDS_API_KEYS (nombres separados por coma) si está
+    configurada; si no, cae a una lista de un solo elemento con
+    ODDS_API_KEY (compatibilidad con quien ya tenía una sola key
+    configurada -- nunca se rompe por agregar esta función). [] si
+    ninguna de las dos variables está configurada.
+
+    Es una función (no una constante congelada a nivel de módulo) para que
+    data/odds_api.py la pueda llamar en cada fetch y así reflejar cambios
+    de entorno en caliente (mismo criterio que ya usaba ODDS_API_KEY antes
+    de este cambio, y que los tests dependen de poder monkeypatchear vía
+    variables de entorno).
+
+    Para activar una segunda key en producción: agrega el secret
+    ODDS_API_KEYS="key1,key2" en GitHub (Settings -> Secrets and
+    variables -> Actions) y pásalo como env: en
+    .github/workflows/daily_pipeline.yml (ya viene configurado ahí junto a
+    ODDS_API_KEY -- basta con crear el secret)."""
+    keys_csv = os.getenv("ODDS_API_KEYS")
+    if keys_csv:
+        keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
+        if keys:
+            return keys
+    single = os.getenv("ODDS_API_KEY")
+    return [single] if single else []
+
+
+# Congelada al importar el módulo -- útil para quien solo quiera inspeccionar
+# cuántas keys hay configuradas al arrancar (ej. un log de startup). El
+# fetch real (data/odds_api.py) llama a resolve_odds_api_keys() de nuevo en
+# cada corrida, no usa esta constante directamente.
+ODDS_API_KEYS = resolve_odds_api_keys()
+
 # Umbral de edge (en probabilidad) a partir del cual un juego se marca como
 # "candidato a revisión" en el reporte — solo si además los dos VOTOS
 # reales (heurístico vs. familia mu Skellam+NB2, que comparten el mismo

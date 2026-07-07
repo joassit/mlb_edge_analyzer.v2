@@ -2,24 +2,28 @@
 Integración con The Odds API (https://the-odds-api.com) para cuotas
 moneyline en tiempo real.
 
-Requiere la variable de entorno ODDS_API_KEY — nunca se hardcodea ni se
-commitea. Si falta la key, o la llamada falla, o la respuesta tiene un
-esquema inesperado: se degrada a lista vacía. `analyze_today()` cae a
-`MARKET_ODDS` manual (o a "sin cuotas") en ese caso — un problema de la API
-de odds nunca debe tumbar el análisis del día.
+Requiere la variable de entorno ODDS_API_KEY (una sola key) o ODDS_API_KEYS
+(varias, separadas por coma, ver config.resolve_odds_api_keys) — nunca se
+hardcodean ni se commitean. Si no hay ninguna key configurada, o todas las
+llamadas fallan, o la respuesta tiene un esquema inesperado: se degrada a
+lista vacía. `analyze_today()` cae a `MARKET_ODDS` manual (o a "sin
+cuotas") en ese caso — un problema de la API de odds nunca debe tumbar el
+análisis del día.
 
 Esta es la API más limitada de todas las que usa el proyecto (~500
 requests/mes en el free tier, contra MLB Stats API y Open-Meteo que no
 tienen ese techo). Por eso, a diferencia de las otras integraciones, esta
-lleva dos protecciones adicionales:
+lleva protecciones adicionales:
   1. Caché con TTL corto (ODDS_API_CACHE_TTL_SECONDS) — un refresh del
      dashboard o una corrida repetida del pipeline el mismo día no cuenta
      como una llamada nueva mientras el caché siga vigente.
-  2. Un presupuesto mensual (ODDS_API_MONTHLY_BUDGET) — si ya se usaron
-     todas las llamadas del mes, se degrada al último caché conocido
-     (aunque esté vencido) antes que quedarse sin nada.
+  2. Un presupuesto mensual POR KEY (ODDS_API_MONTHLY_BUDGET) — si la key
+     en uso ya agotó su presupuesto del mes, o responde 401/429, o falla
+     por red, se rota a la siguiente key configurada antes de degradarse
+     al último caché conocido (aunque esté vencido).
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -29,7 +33,7 @@ from datetime import date, datetime, timedelta
 
 import requests
 
-from config import ODDS_API_CACHE_TTL_SECONDS, ODDS_API_MONTHLY_BUDGET, ODDS_CACHE_DIR
+from config import ODDS_API_CACHE_TTL_SECONDS, ODDS_API_MONTHLY_BUDGET, ODDS_CACHE_DIR, resolve_odds_api_keys
 from data.contracts import require, SchemaError
 from data.quote_gate import gate_quote
 
@@ -138,6 +142,9 @@ def _write_cache(payload: list) -> None:
 
 
 def _read_budget_counts() -> dict:
+    """{"AAAA-MM": {key_hash: {"used": int, "provider_used": int|None,
+    "provider_remaining": int|None}}} -- por (mes, key), nunca la key en
+    texto plano (ver _hash_key)."""
     path = _budget_file()
     if not os.path.exists(path):
         return {}
@@ -148,44 +155,83 @@ def _read_budget_counts() -> dict:
         return {}
 
 
-def _check_budget_available() -> bool:
+def _hash_key(key: str) -> str:
+    """Hash corto (8 hex de sha256) de una API key -- identifica su
+    entrada en el JSON de presupuesto en disco SIN guardar la key
+    completa ahí (ese archivo se sube como artifact/log de GitHub
+    Actions). Nunca reversible a la key real, solo sirve para diferenciar
+    entradas entre sí."""
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
+def _check_budget_available(key: str) -> bool:
     """
-    Solo LEE el contador de llamadas reales hechas este mes -- no reserva
-    ni incrementa nada. Devuelve False si ya se agotó el presupuesto
-    mensual. Separado de _record_budget_usage() a propósito: antes, el
-    contador se incrementaba ANTES de saber si la llamada HTTP iba a tener
-    éxito, así que una llamada fallida (timeout, 500, red caída) consumía
-    presupuesto igual que una exitosa -- una fuga real de cuota en la API
-    más limitada de todas las que usa el proyecto.
+    Solo LEE el contador de llamadas reales hechas este mes PARA ESTA key
+    -- no reserva ni incrementa nada. Devuelve False si esta key ya agotó
+    su presupuesto mensual (cada key tiene su propio contador -- rotar a
+    otra key con presupuesto disponible es responsabilidad del caller,
+    ver fetch_moneyline_odds). Separado de _record_budget_usage() a
+    propósito: antes, el contador se incrementaba ANTES de saber si la
+    llamada HTTP iba a tener éxito, así que una llamada fallida (timeout,
+    500, red caída) consumía presupuesto igual que una exitosa -- una
+    fuga real de cuota en la API más limitada de todas las que usa el
+    proyecto.
     """
     month_key = date.today().strftime("%Y-%m")
-    used = _read_budget_counts().get(month_key, 0)
+    key_hash = _hash_key(key)
+    used = _read_budget_counts().get(month_key, {}).get(key_hash, {}).get("used", 0)
     if used >= ODDS_API_MONTHLY_BUDGET:
         logger.warning(
-            f"Presupuesto mensual de The Odds API agotado ({used}/{ODDS_API_MONTHLY_BUDGET} "
-            f"en {month_key}) — se omite la llamada en vivo este ciclo."
+            f"Presupuesto mensual de The Odds API agotado para la key {key_hash} "
+            f"({used}/{ODDS_API_MONTHLY_BUDGET} en {month_key}) -- se prueba la siguiente "
+            f"key configurada, si hay."
         )
         return False
     return True
 
 
-def _record_budget_usage() -> None:
-    """Incrementa el contador -- llamar SOLO después de una respuesta HTTP
-    exitosa (ver fetch_moneyline_odds)."""
+def _record_budget_usage(key: str, provider_used: int | None = None,
+                          provider_remaining: int | None = None) -> None:
+    """Incrementa el contador local de ESTA key -- llamar SOLO después de
+    una respuesta HTTP exitosa (ver fetch_moneyline_odds).
+
+    provider_used/provider_remaining: los headers reales de The Odds API
+    (x-requests-used/x-requests-remaining) si la respuesta los trajo --
+    más confiables que el conteo local (que es una aproximación, según su
+    propio criterio de diseño), se guardan junto al contador local para
+    poder auditar la diferencia, y permiten advertir cuando el PROVEEDOR
+    reporta poco margen aunque el conteo local todavía no lo refleje."""
     path = _budget_file()
     month_key = date.today().strftime("%Y-%m")
+    key_hash = _hash_key(key)
     counts = _read_budget_counts()
-    used = counts.get(month_key, 0)
-    counts[month_key] = used + 1
+    month_counts = counts.get(month_key, {})
+    entry = month_counts.get(key_hash, {})
+    used = entry.get("used", 0) + 1
+    month_counts[key_hash] = {
+        "used": used,
+        "provider_used": provider_used,
+        "provider_remaining": provider_remaining,
+    }
+    counts[month_key] = month_counts
     try:
         _atomic_write_json(path, counts)
     except OSError as e:
-        logger.warning(f"No se pudo actualizar el contador de presupuesto de odds: {e}")
+        logger.warning(f"No se pudo actualizar el contador de presupuesto de odds ({key_hash}): {e}")
 
-    if counts[month_key] >= ODDS_API_MONTHLY_BUDGET * 0.8:
+    if used >= ODDS_API_MONTHLY_BUDGET * 0.8:
         logger.warning(
-            f"Cerca del límite mensual de The Odds API: {counts[month_key]}/{ODDS_API_MONTHLY_BUDGET}."
+            f"Cerca del límite mensual de The Odds API para la key {key_hash}: "
+            f"{used}/{ODDS_API_MONTHLY_BUDGET} (conteo local)."
         )
+
+    if provider_remaining is not None:
+        provider_total = provider_remaining + (provider_used or 0)
+        if provider_total > 0 and provider_remaining <= provider_total * 0.2:
+            logger.warning(
+                f"The Odds API reporta poco margen para la key {key_hash}: "
+                f"quedan {provider_remaining} requests según el proveedor (no el conteo local)."
+            )
 
 
 def _parse_payload(payload) -> list[dict]:
@@ -247,18 +293,63 @@ def _parse_payload(payload) -> list[dict]:
     return events
 
 
+def _try_key(key: str, key_label: str) -> list | None:
+    """Un solo intento con UNA key: None si hay que probar la siguiente
+    (presupuesto agotado, 401/429, o falla de red) -- nunca lanza. El
+    caller (fetch_moneyline_odds) decide qué hacer si todas fallan."""
+    if not _check_budget_available(key):
+        return None  # ya logueado dentro de _check_budget_available
+
+    params = {
+        "apiKey": key,
+        "regions": "us",
+        "markets": "h2h",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+    }
+    try:
+        resp = requests.get(ODDS_API_BASE, params=params, timeout=15)
+        if resp.status_code in (401, 429):
+            logger.warning(
+                f"The Odds API rechazó la key {key_label} (HTTP {resp.status_code}) -- "
+                f"se prueba la siguiente key configurada, si hay."
+            )
+            return None
+        resp.raise_for_status()
+        payload = resp.json()
+    except requests.RequestException as e:
+        logger.warning(
+            f"La key {key_label} de The Odds API falló: {_sanitize(e)} -- "
+            f"se prueba la siguiente key configurada, si hay."
+        )
+        return None
+
+    provider_remaining = resp.headers.get("x-requests-remaining")
+    provider_used = resp.headers.get("x-requests-used")
+    _record_budget_usage(
+        key,
+        provider_used=int(provider_used) if provider_used and provider_used.isdigit() else None,
+        provider_remaining=int(provider_remaining) if provider_remaining and provider_remaining.isdigit() else None,
+    )
+    _write_cache(payload)
+    return payload
+
+
 def fetch_moneyline_odds() -> list[dict]:
     """
     Trae las cuotas moneyline (h2h) actuales de todos los bookmakers
     disponibles en la región US. Usa caché con TTL antes que golpear la
-    API, y respeta un presupuesto mensual — degradándose al último caché
-    conocido (aunque esté vencido) si ese presupuesto ya se agotó.
-    Devuelve [] solo si falta la API key o si no hay ningún caché previo
-    disponible cuando la llamada falla o el presupuesto está agotado.
+    API, y rota entre las keys configuradas (ver
+    config.resolve_odds_api_keys) -- cada una con su propio presupuesto
+    mensual; se prueba la siguiente si la actual ya agotó su presupuesto,
+    responde 401/429, o falla por red. Si TODAS fallan o están agotadas,
+    se degrada al último caché conocido (aunque esté vencido) antes que
+    quedarse sin nada. Devuelve [] solo si no hay ninguna key configurada,
+    o ninguna key funcionó y no hay ningún caché previo disponible.
     """
-    api_key = os.getenv("ODDS_API_KEY")
-    if not api_key:
-        logger.info("ODDS_API_KEY no configurada — se omite la consulta de cuotas en vivo.")
+    api_keys = resolve_odds_api_keys()
+    if not api_keys:
+        logger.info("ODDS_API_KEY/ODDS_API_KEYS no configuradas — se omite la consulta de cuotas en vivo.")
         _last_fetch_meta.update(source="none", fetched_at=None)
         return []
 
@@ -267,40 +358,20 @@ def fetch_moneyline_odds() -> list[dict]:
         _last_fetch_meta.update(source="api_cache", fetched_at=_cache_fetched_at())
         return _parse_payload(cached)
 
-    if not _check_budget_available():
-        stale = _read_cache(ignore_ttl=True)
-        if stale is not None:
-            logger.warning("Usando el último caché de odds conocido (vencido) por falta de presupuesto.")
-            _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
-            return _parse_payload(stale)
-        _last_fetch_meta.update(source="none", fetched_at=None)
-        return []
+    for idx, key in enumerate(api_keys):
+        key_label = f"#{idx + 1} ({_hash_key(key)})"
+        payload = _try_key(key, key_label)
+        if payload is not None:
+            _last_fetch_meta.update(source="api_live", fetched_at=_cache_fetched_at())
+            return _parse_payload(payload)
 
-    params = {
-        "apiKey": api_key,
-        "regions": "us",
-        "markets": "h2h",
-        "oddsFormat": "american",
-        "dateFormat": "iso",
-    }
-    try:
-        resp = requests.get(ODDS_API_BASE, params=params, timeout=15)
-        resp.raise_for_status()
-        payload = resp.json()
-    except requests.RequestException as e:
-        logger.warning(f"No se pudo obtener cuotas de The Odds API: {_sanitize(e)}")
-        stale = _read_cache(ignore_ttl=True)
-        if stale is not None:
-            logger.warning("Usando el último caché de odds conocido (vencido) tras un fallo de red.")
-            _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
-            return _parse_payload(stale)
-        _last_fetch_meta.update(source="none", fetched_at=None)
-        return []
-
-    _record_budget_usage()  # solo aquí, con la respuesta ya confirmada exitosa
-    _write_cache(payload)
-    _last_fetch_meta.update(source="api_live", fetched_at=_cache_fetched_at())
-    return _parse_payload(payload)
+    stale = _read_cache(ignore_ttl=True)
+    if stale is not None:
+        logger.warning("Usando el último caché de odds conocido (vencido) -- ninguna key configurada funcionó.")
+        _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
+        return _parse_payload(stale)
+    _last_fetch_meta.update(source="none", fetched_at=None)
+    return []
 
 
 def match_odds_to_game(events: list[dict], away_team: str, home_team: str,
