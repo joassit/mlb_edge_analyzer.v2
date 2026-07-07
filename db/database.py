@@ -10,6 +10,7 @@ realmente hubiera tenido edge real (tracking de resultados).
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -20,6 +21,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from config import DATABASE_URL, MODEL_VERSION
+
+logger = logging.getLogger("mlb_edge_analyzer")
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
@@ -282,9 +285,9 @@ def _auto_add_missing_columns():
                 col_type = column.type.compile(engine.dialect)
                 try:
                     conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}"))
-                except Exception:
+                except Exception as e:
                     # Ya existe, o el dialecto no soporta ALTER simple — no es fatal.
-                    pass
+                    logger.debug(f"No se pudo agregar {table.name}.{column.name}: {e}")
 
 
 def init_db():

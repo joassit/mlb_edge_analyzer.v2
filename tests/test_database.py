@@ -149,6 +149,46 @@ def test_feature_snapshot_upserts_instead_of_duplicating(isolated_db):
     assert snap["raw_inputs"] == {"v": 2}
 
 
+def test_auto_add_missing_columns_logs_debug_instead_of_silently_swallowing(tmp_path, monkeypatch, caplog):
+    # B4: si un ALTER TABLE ADD COLUMN falla (ej. ya existe, o el dialecto no
+    # lo soporta), antes se ignoraba con un `pass` silencioso -- ahora debe
+    # quedar rastro en el log a nivel DEBUG en vez de desaparecer sin dejar huella.
+    import logging
+    import sqlite3
+    from sqlalchemy.engine import Connection
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE game_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_pk INTEGER NOT NULL,
+            game_date VARCHAR NOT NULL,
+            away_team VARCHAR NOT NULL,
+            home_team VARCHAR NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    temp_engine = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(database, "engine", temp_engine)
+
+    original_execute = Connection.execute
+
+    def flaky_execute(self, statement, *args, **kwargs):
+        if "home_model_prob" in str(statement):
+            raise Exception("boom - falla simulada de ALTER TABLE")
+        return original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Connection, "execute", flaky_execute)
+
+    with caplog.at_level(logging.DEBUG, logger="mlb_edge_analyzer"):
+        database._auto_add_missing_columns()
+
+    assert any("home_model_prob" in r.message for r in caplog.records)
+
+
 def test_get_feature_snapshot_returns_none_when_missing(isolated_db):
     assert isolated_db.get_feature_snapshot(game_pk=999, game_date="2026-07-05") is None
 
