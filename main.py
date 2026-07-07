@@ -27,6 +27,7 @@ from model.predictor import predict_from_raw_inputs
 from model.edge import implied_prob, edge, expected_value, market_favorite, no_vig_probs
 from model.picks import generate_pick_candidates, select_picks_for_game
 from data.odds_api import fetch_moneyline_odds, match_odds_to_game, consensus_no_vig_prob, best_available_price
+from data.quote_gate import validate_manual_american_odds, validate_manual_line
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
 from tracking.results_tracker import (
@@ -283,6 +284,39 @@ def _heuristic_agrees_with_mu_family(away_model_prob: float, away_skellam_prob: 
     return (away_model_prob > 0.5) == (away_skellam_prob > 0.5)
 
 
+def _validated_manual_market(game_pk: int, market_label: str, raw: dict | None,
+                              odds_fields: tuple[str, ...], line_field: str | None = None) -> dict | None:
+    """
+    Valida los campos numéricos de un mercado cargado a mano (MARKET_ODDS/
+    MARKET_SPREADS/MARKET_TOTALS) con el mismo criterio de rango que
+    gate_quote() aplica a cuotas en vivo (ver data/quote_gate.py). Un valor
+    inválido (ej. 1.91 en vez de -110) descarta el mercado COMPLETO para
+    este juego -- no solo ese lado -- misma degradación que un mercado
+    nunca cargado (no genera candidato ni no-vig). Nunca aborta el juego.
+    """
+    if not raw:
+        return None
+    validated = dict(raw)
+    for field in odds_fields:
+        value = raw.get(field)
+        if value is None:
+            continue
+        checked = validate_manual_american_odds(value)
+        if checked is None:
+            logger.warning(f"game_pk={game_pk} ({market_label}): cuota manual inválida en "
+                           f"'{field}'={value!r} -- se descarta el mercado completo para este juego")
+            return None
+        validated[field] = checked
+    if line_field is not None and raw.get(line_field) is not None:
+        checked_line = validate_manual_line(raw[line_field])
+        if checked_line is None:
+            logger.warning(f"game_pk={game_pk} ({market_label}): línea manual inválida "
+                           f"'{line_field}'={raw[line_field]!r} -- se descarta el mercado completo para este juego")
+            return None
+        validated[line_field] = checked_line
+    return validated
+
+
 def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
                        away_era_ip, home_era_ip, away_ops, home_ops) -> dict:
     """Cuerpo de análisis de un solo juego, extraído de analyze_today() para
@@ -307,18 +341,22 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
                                      game_datetime_iso=g.get("game_time"))
     live_price = best_available_price(odds_event) if odds_event else None
     no_vig = consensus_no_vig_prob(odds_event) if odds_event else None
-    price = live_price or MARKET_ODDS.get(g["game_pk"])
+    manual_price = _validated_manual_market(g["game_pk"], "moneyline", MARKET_ODDS.get(g["game_pk"]),
+                                             ("home", "away"))
+    price = live_price or manual_price
 
     # Run Line y Totales: solo cuotas manuales por ahora (ver
     # MARKET_SPREADS/MARKET_TOTALS arriba) — se calcula su no-vig igual
     # que en moneyline, cuando ambos lados están cargados.
-    manual_rl = MARKET_SPREADS.get(g["game_pk"])
+    manual_rl = _validated_manual_market(g["game_pk"], "run_line", MARKET_SPREADS.get(g["game_pk"]),
+                                          ("home", "away"), line_field="line")
     if manual_rl and manual_rl.get("home") is not None and manual_rl.get("away") is not None:
         rl_home_novig, rl_away_novig = no_vig_probs(manual_rl["home"], manual_rl["away"])
     else:
         rl_home_novig = rl_away_novig = None
 
-    manual_totals = MARKET_TOTALS.get(g["game_pk"])
+    manual_totals = _validated_manual_market(g["game_pk"], "totals", MARKET_TOTALS.get(g["game_pk"]),
+                                              ("over", "under"), line_field="line")
     if manual_totals and manual_totals.get("over") is not None and manual_totals.get("under") is not None:
         totals_over_novig, totals_under_novig = no_vig_probs(manual_totals["over"], manual_totals["under"])
     else:

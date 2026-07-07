@@ -114,3 +114,71 @@ def test_analyze_today_does_not_warn_when_favorite_side_is_explicit(monkeypatch,
     assert not any("favorite_side" in r.message for r in caplog.records)
     rl_pick = next(p for p in results[0]["_picks"] if p["market"] == "run_line")
     assert rl_pick["favorite_side"] == "away"
+
+
+# --- C2: cuotas manuales inválidas se descartan (no generan edge fantasma) ---
+
+def test_analyze_today_rejects_decimal_typo_in_manual_moneyline_odds(monkeypatch, caplog):
+    # 1.91 en vez de -110 -- el typo real que describe el hallazgo C2.
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {888889: {"home": -110, "away": 1.91}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert len(results) == 1
+    assert results[0]["away_market_prob"] is None  # todo el mercado se descarta, no solo el lado inválido
+    assert results[0]["away_edge"] is None
+    assert any("cuota manual inválida" in r.message and "1.91" in r.message for r in caplog.records)
+
+
+def test_analyze_today_accepts_valid_manual_moneyline_odds(monkeypatch, caplog):
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {888889: {"home": -110, "away": 100}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert results[0]["away_market_prob"] is not None
+    assert not any("cuota manual inválida" in r.message for r in caplog.records)
+
+
+def test_analyze_today_rejects_invalid_run_line_and_pipeline_continues_with_other_markets(monkeypatch, caplog):
+    # Un solo lado inválido en run_line no debe tumbar el juego -- el
+    # mercado de moneyline (válido) debe seguir generando su pick normal.
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {888889: {"home": -110, "away": 100}})
+    monkeypatch.setattr(main, "MARKET_SPREADS", {888889: {"line": 1.5, "home": -120, "away": 1.91}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert len(results) == 1
+    picks = results[0]["_picks"]
+    assert any(p["market"] == "moneyline" for p in picks)
+    assert not any(p["market"] == "run_line" for p in picks)
+    assert any("cuota manual inválida" in r.message and "run_line" in r.message for r in caplog.records)
+
+
+def test_analyze_today_rejects_invalid_manual_totals_line(monkeypatch, caplog):
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_TOTALS", {888889: {"line": 8.5, "over": -110, "under": -110.5}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    picks = results[0]["_picks"]
+    assert not any(p["market"] == "totals" for p in picks)
+    assert any("cuota manual inválida" in r.message and "totals" in r.message for r in caplog.records)
+
+
+def test_analyze_today_rejects_absurd_manual_totals_line_value(monkeypatch, caplog):
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_TOTALS", {888889: {"line": 100.0, "over": -110, "under": -110}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    picks = results[0]["_picks"]
+    assert not any(p["market"] == "totals" for p in picks)
+    assert any("línea manual inválida" in r.message for r in caplog.records)
