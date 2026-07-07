@@ -43,37 +43,13 @@ def _parse_innings(ip_str: str) -> float:
     return int(whole) + thirds / 3
 
 
-def get_pitcher_era(pitcher_id: int, season: int = SEASON) -> float | None:
-    """ERA de temporada regular de un pitcher específico, por su MLB ID.
-    Devuelve None si la API falla (red, timeout, esquema) -- nunca propaga
-    la excepción hacia el pipeline."""
-    with _cache_lock:
-        if pitcher_id in _pitcher_stats_cache:
-            return _pitcher_stats_cache[pitcher_id].get("era")
-
-    try:
-        params = {"stats": "season", "group": "pitching", "season": season}
-        resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=15)
-        resp.raise_for_status()
-        payload = resp.json()
-        splits = payload["stats"][0]["splits"]
-        if not splits:
-            return None
-        era = float(splits[0]["stat"]["era"])
-        with _cache_lock:
-            _pitcher_stats_cache[pitcher_id] = {"era": era}
-        return era
-    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
-        logger.warning(f"No se pudo obtener ERA del pitcher {pitcher_id}: {e}")
-        return None
-
-
 def get_pitcher_era_ip(pitcher_id: int, season: int = SEASON) -> tuple[float, float] | None:
     """
     ERA e innings pitched (ya parseados a decimal real, no el formato
     '63.1'/'63.2' de la API) de un pitcher. Usado para aplicar shrinkage
     hacia el promedio de liga en muestras chicas -- ver model/adjustments.py.
-    None si no hay datos (mismo criterio que get_pitcher_era).
+    None si no hay datos (red, timeout, esquema) -- nunca propaga la
+    excepción hacia el pipeline.
     """
     cache_key = f"era-ip-{pitcher_id}-{season}"
     with _cache_lock:
@@ -425,36 +401,6 @@ def get_pitcher_rest(pitcher_id: int, season: int = SEASON) -> dict:
 
     with _cache_lock:
         _pitcher_stats_cache[cache_key] = result
-    return result
-
-
-def get_team_batting_advanced(team_id: int, season: int = SEASON) -> dict:
-    """BABIP e ISO del equipo, calculados a partir de stats crudos (sin depender de FanGraphs)."""
-    result = {"babip": None, "iso": None}
-    try:
-        params = {"stats": "season", "group": "hitting", "season": season}
-        resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
-        resp.raise_for_status()
-        splits = resp.json()["stats"][0]["splits"]
-        if not splits:
-            return result
-
-        stat = splits[0]["stat"]
-        hits = stat.get("hits")
-        hr = stat.get("homeRuns")
-        ab = stat.get("atBats")
-        so = stat.get("strikeOuts")
-        sf = stat.get("sacFlies", 0) or 0
-        avg = stat.get("avg")
-        slg = stat.get("slg")
-
-        if None not in (hits, hr, ab, so) and (ab - so - hr + sf) > 0:
-            result["babip"] = (hits - hr) / (ab - so - hr + sf)
-        if avg is not None and slg is not None:
-            result["iso"] = float(slg) - float(avg)
-    except (requests.RequestException, KeyError, IndexError, ValueError, TypeError) as e:
-        logger.warning(f"No se pudo obtener BABIP/ISO del equipo {team_id}: {e}")
-
     return result
 
 

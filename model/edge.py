@@ -89,6 +89,8 @@ def kelly_fraction(model_p: float, odds: float, fraction: float = 0.25) -> float
     Tamaño de apuesta sugerido como fracción del bankroll, usando Kelly
     fraccionado (fraction=0.25 = 1/4 Kelly, más conservador que Kelly completo).
     Devuelve 0 si no hay edge positivo.
+
+    No conectado al pipeline todavía (uso futuro declarado).
     """
     b = (100 / abs(odds)) if odds < 0 else (odds / 100)  # ganancia neta por unidad apostada
     q = 1 - model_p

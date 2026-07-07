@@ -13,7 +13,7 @@ import requests
 import data.mlb_api as mlb_api_mod
 import data.stats as stats_mod
 from data.mlb_api import get_game_result, get_schedule
-from data.stats import get_league_ops, get_pitcher_era, get_pitcher_era_ip, get_team_ops
+from data.stats import get_league_ops, get_pitcher_era_ip, get_team_ops
 
 
 def _raise(exc):
@@ -22,10 +22,14 @@ def _raise(exc):
     return _fn
 
 
-def test_get_pitcher_era_returns_none_on_timeout(monkeypatch):
+def test_get_pitcher_era_ip_returns_none_on_timeout(monkeypatch):
+    # M3: get_pitcher_era() (código muerto, sin ningún caller real) se
+    # eliminó -- este test, migrado de esa función, cubre el mismo tipo de
+    # excepción (Timeout) para get_pitcher_era_ip(), que sí está conectada
+    # al pipeline real.
     monkeypatch.setattr(stats_mod, "_pitcher_stats_cache", {})
     monkeypatch.setattr(stats_mod.session, "get", _raise(requests.Timeout()))
-    assert get_pitcher_era(999001) is None
+    assert get_pitcher_era_ip(999001) is None
 
 
 def test_get_pitcher_era_ip_returns_none_on_connection_error(monkeypatch):

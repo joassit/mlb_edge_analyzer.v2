@@ -51,6 +51,7 @@ def project_f5_runs(team_ops: float, opp_starter_era: float,
                     league_ops: float = 0.750, league_era: float = LEAGUE_AVG_ERA,
                     park_factor: float = 1.0, is_home: bool = False,
                     park_factor_weight: float = PARK_FACTOR_WEIGHT) -> float:
+    # No conectado al pipeline todavía (uso futuro declarado).
     # Nota: Aquí no aplicamos weather_correction agresiva porque F5 suele ser más corta
     # pero puedes aplicar el park_factor_weight si deseas mayor sensibilidad.
     offense_factor = _offense_factor(team_ops, league_ops)
