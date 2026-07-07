@@ -91,27 +91,32 @@ def negbin_win_prob(mu_team: float, mu_opponent: float, k: float,
 
 
 def negbin_run_line_prob(mu_home: float, mu_away: float, k: float, line: float = 1.5,
-                          max_runs: int = MAX_RUNS) -> tuple[float, float]:
+                          max_runs: int = MAX_RUNS, favorite_side: str = "home") -> tuple[float, float]:
     """
-    Probabilidad de que el LOCAL cubra -line (gane por más de `line`
-    carreras) y de que el VISITANTE cubra +line, bajo NB2 -- misma pregunta
+    Probabilidad de que el LOCAL cubra su línea y de que el VISITANTE cubra
+    la suya, bajo NB2 -- misma pregunta y misma semántica de favorite_side
     que model.markets.run_line_prob, sobre la distribución de colas gordas
     en vez de Poisson/Skellam. Con línea X.5 un empate exacto en la
     cobertura es imposible, así que ambas probabilidades ya suman 1.0 sin
     necesidad de renormalizar.
     """
+    if favorite_side not in ("home", "away"):
+        raise ValueError(f"favorite_side inválido: {favorite_side!r} (debe ser 'home' o 'away')")
     threshold = math.ceil(line)  # 1.5 -> 2 carreras de diferencia
+    fav_mu, dog_mu = (mu_home, mu_away) if favorite_side == "home" else (mu_away, mu_home)
 
-    pmf_home = _run_pmf(mu_home, k, max_runs)
-    pmf_away = _run_pmf(mu_away, k, max_runs)
-    cum_away = np.cumsum(pmf_away)
+    pmf_fav = _run_pmf(fav_mu, k, max_runs)
+    pmf_dog = _run_pmf(dog_mu, k, max_runs)
+    cum_dog = np.cumsum(pmf_dog)
 
-    home_covers = 0.0
-    for h in range(max_runs + 1):
-        a_max = h - threshold
-        if a_max >= 0:
-            home_covers += pmf_home[h] * cum_away[min(a_max, max_runs)]
-    away_covers = 1.0 - home_covers
+    fav_covers = 0.0
+    for f in range(max_runs + 1):
+        d_max = f - threshold
+        if d_max >= 0:
+            fav_covers += pmf_fav[f] * cum_dog[min(d_max, max_runs)]
+    dog_covers = 1.0 - fav_covers
+
+    home_covers, away_covers = (fav_covers, dog_covers) if favorite_side == "home" else (dog_covers, fav_covers)
     return float(home_covers), float(away_covers)
 
 

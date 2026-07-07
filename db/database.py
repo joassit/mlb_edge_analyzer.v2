@@ -180,6 +180,10 @@ class Pick(Base):
     market = Column(String, nullable=False)      # "moneyline" | "run_line" | "totals"
     selection = Column(String, nullable=False)   # "home"/"away" (ML, RL) o "over"/"under" (totales)
     line = Column(Float, nullable=True)          # null en ML; -1.5/+1.5 en RL; ej. 8.5 en totales
+    # Solo aplica a run_line: "home" o "away", quién es el favorito real del
+    # mercado (da -line) -- None en ML/totales. Nullable para compatibilidad
+    # con picks viejos (se asume "home" al leer, ver _resolve_pick_outcome()).
+    favorite_side = Column(String, nullable=True)
     model_prob = Column(Float, nullable=False)
     market_prob = Column(Float, nullable=True)
     edge = Column(Float, nullable=True)
@@ -395,6 +399,7 @@ def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: s
             )
             fields = {
                 "line": p.get("line"),
+                "favorite_side": p.get("favorite_side"),
                 "model_prob": p["model_prob"],
                 "market_prob": p.get("market_prob"),
                 "edge": p.get("edge"),
@@ -432,10 +437,15 @@ def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
         # se cargue una línea alterna (-2.5, +0.5, etc.) esto liquidaba mal
         # el pick en silencio. model/markets.py::run_line_prob() ya
         # generalizaba correctamente sobre `line` para la PROBABILIDAD;
-        # aquí se hace lo mismo para la LIQUIDACIÓN real del pick.
+        # aquí se hace lo mismo para la LIQUIDACIÓN real del pick. A su vez,
+        # esto asumía que el LOCAL siempre era el favorito (da -line) --
+        # favorite_side generaliza también ese supuesto (ver C1).
         diff = result["home_score"] - result["away_score"]
         line = pick.line if pick.line is not None else 1.5
-        margin = (diff - line) if pick.selection == "home" else (line - diff)
+        favorite_side = pick.favorite_side if pick.favorite_side is not None else "home"
+        home_spread = -line if favorite_side == "home" else line
+        home_margin = diff + home_spread
+        margin = home_margin if pick.selection == "home" else -home_margin
         if margin == 0:
             return "push"  # solo alcanzable con una línea entera (X.0), no con el X.5 estándar
         return "win" if margin > 0 else "loss"

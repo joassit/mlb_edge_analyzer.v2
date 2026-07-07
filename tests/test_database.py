@@ -198,11 +198,12 @@ def test_get_pending_moneyline_bets_filters_by_date(isolated_db):
     assert isolated_db.get_pending_moneyline_bets("2026-07-05") == []
 
 
-def _make_pick(market, selection, line=None, odds_used=-110, forced=False, model_prob=0.6, edge=0.05, ev=0.06):
+def _make_pick(market, selection, line=None, odds_used=-110, forced=False, model_prob=0.6, edge=0.05, ev=0.06,
+               favorite_side=None):
     return {
         "market": market, "selection": selection, "line": line,
         "model_prob": model_prob, "market_prob": 0.5, "edge": edge, "ev": ev,
-        "odds_used": odds_used, "forced": forced,
+        "odds_used": odds_used, "forced": forced, "favorite_side": favorite_side,
     }
 
 
@@ -443,6 +444,116 @@ def test_settle_picks_for_game_run_line_pushes_on_exact_whole_number_line(isolat
         pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
         assert pick.result == "push"
         assert pick.profit_unit == 0.0
+    finally:
+        session.close()
+
+
+# --- C1: run_line con el VISITANTE como favorito (favorite_side="away") ---
+# Antes, la liquidación asumía SIEMPRE que el local era favorito -- un pick
+# sobre el visitante favorito (-1.5) que ganaba por 1 (no cubre) se
+# liquidaba como "win" en vez de "loss" (ver la reproducción de este
+# defecto contra el código viejo, sin favorite_side, más arriba en esta
+# sesión). Los 4 cuadrantes: home-fav cubre/falla, away-fav cubre/falla.
+
+def test_settle_picks_for_game_run_line_away_favorite_covers(isolated_db):
+    # Visitante favorito (-1.5), gana por 2 -> SÍ cubre.
+    isolated_db.save_picks(1, "2026-07-05", [
+        _make_pick("run_line", "away", line=1.5, odds_used=-140, favorite_side="away"),
+    ], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 3, "away_score": 5, "winner": "away", "total_runs": 8,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.favorite_side == "away"
+        assert pick.result == "win"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_away_favorite_fails_to_cover(isolated_db):
+    # Visitante favorito (-1.5), gana por SOLO 1 -> NO cubre. Este es
+    # exactamente el caso que el código viejo (sin favorite_side) liquidaba
+    # mal como "win".
+    isolated_db.save_picks(1, "2026-07-05", [
+        _make_pick("run_line", "away", line=1.5, odds_used=-140, favorite_side="away"),
+    ], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 4, "away_score": 5, "winner": "away", "total_runs": 9,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "loss"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_home_underdog_covers_when_away_is_favorite(isolated_db):
+    # Local +1.5 (underdog, visitante es favorito) -- local pierde por 1,
+    # menos que la línea -> cubre.
+    isolated_db.save_picks(1, "2026-07-05", [
+        _make_pick("run_line", "home", line=1.5, odds_used=120, favorite_side="away"),
+    ], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 4, "away_score": 5, "winner": "away", "total_runs": 9,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "win"
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_run_line_home_underdog_fails_when_away_favorite_covers(isolated_db):
+    # Local +1.5 (underdog) -- pierde por 2, el visitante favorito SÍ
+    # cubrió su -1.5 -> el local NO cubre su +1.5.
+    isolated_db.save_picks(1, "2026-07-05", [
+        _make_pick("run_line", "home", line=1.5, odds_used=120, favorite_side="away"),
+    ], "v1")
+
+    isolated_db.settle_picks_for_game(1, {
+        "home_score": 3, "away_score": 5, "winner": "away", "total_runs": 8,
+    })
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.result == "loss"
+    finally:
+        session.close()
+
+
+def test_save_picks_persists_favorite_side(isolated_db):
+    isolated_db.save_picks(1, "2026-07-05", [
+        _make_pick("run_line", "away", line=1.5, favorite_side="away"),
+    ], "v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="run_line").one()
+        assert pick.favorite_side == "away"
+    finally:
+        session.close()
+
+
+def test_save_picks_defaults_favorite_side_to_none_when_absent(isolated_db):
+    # _make_pick(favorite_side=None) por default -- compatibilidad con
+    # picks viejos (moneyline/totales nunca tuvieron favorite_side).
+    isolated_db.save_picks(1, "2026-07-05", [_make_pick("moneyline", "away")], "v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="moneyline").one()
+        assert pick.favorite_side is None
     finally:
         session.close()
 

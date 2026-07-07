@@ -16,16 +16,28 @@ import math
 from scipy.stats import skellam, poisson
 
 
-def run_line_prob(mu_home: float, mu_away: float, line: float = 1.5) -> tuple[float, float]:
+def run_line_prob(mu_home: float, mu_away: float, line: float = 1.5,
+                   favorite_side: str = "home") -> tuple[float, float]:
     """
-    Probabilidad de que el LOCAL cubra -line (gane por más de `line` carreras)
-    y de que el VISITANTE cubra +line (pierda por menos de `line`, o gane).
+    Probabilidad de que el LOCAL cubra su línea y de que el VISITANTE cubra
+    la suya, dado cuál lado es favorito (da -line) y cuál es underdog
+    (recibe +line).
 
-    line=1.5 es el estándar de MLB (el favorito debe ganar por 2+ para cubrir).
+    favorite_side="home" (default, compatibilidad con el estándar de MLB
+    donde el local suele ser favorito): local cubre -line si gana por más
+    de `line`. favorite_side="away": los roles se invierten -- el
+    visitante debe ganar por más de `line` para cubrir su -line, y el
+    local cubre +line si pierde por menos de `line` o gana.
     """
+    if favorite_side not in ("home", "away"):
+        raise ValueError(f"favorite_side inválido: {favorite_side!r} (debe ser 'home' o 'away')")
     threshold = math.ceil(line)  # 1.5 -> 2 carreras de diferencia
-    home_covers = 1.0 - skellam.cdf(threshold - 1, mu_home, mu_away)
-    away_covers = 1.0 - home_covers
+    if favorite_side == "home":
+        home_covers = 1.0 - skellam.cdf(threshold - 1, mu_home, mu_away)
+        away_covers = 1.0 - home_covers
+    else:
+        away_covers = 1.0 - skellam.cdf(threshold - 1, mu_away, mu_home)
+        home_covers = 1.0 - away_covers
     return home_covers, away_covers
 
 

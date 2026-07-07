@@ -299,6 +299,68 @@ def test_run_line_and_totals_fall_back_to_skellam_when_heuristic_requested():
     assert abs(totals["model_prob"] - expected_totals) < 1e-9
 
 
+# --- C1: favorite_side propagado a generate_pick_candidates() ---
+
+def test_run_line_defaults_favorite_side_to_home_when_omitted():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "run_line": {"line": 1.5, "home_odds": 150, "away_odds": -180, "home_novig": None, "away_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="skellam")
+    rl = next(c for c in candidates if c["market"] == "run_line")
+
+    assert rl["favorite_side"] == "home"
+    home_cover, away_cover = run_line_prob(3.5, 5.0, 1.5, favorite_side="home")
+    expected = home_cover if rl["selection"] == "home" else away_cover
+    assert abs(rl["model_prob"] - expected) < 1e-9
+
+
+def test_run_line_uses_away_favorite_side_when_specified():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "run_line": {"line": 1.5, "favorite_side": "away", "home_odds": 150, "away_odds": -180,
+                     "home_novig": None, "away_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="skellam")
+    rl = next(c for c in candidates if c["market"] == "run_line")
+
+    assert rl["favorite_side"] == "away"
+    home_cover_away_fav, away_cover_away_fav = run_line_prob(3.5, 5.0, 1.5, favorite_side="away")
+    expected = home_cover_away_fav if rl["selection"] == "home" else away_cover_away_fav
+    assert abs(rl["model_prob"] - expected) < 1e-9
+
+    # Confirma que de verdad usa una probabilidad DISTINTA a home-favorito
+    # (si no, la prueba no protegería nada de la regresión de C1).
+    home_cover_home_fav, away_cover_home_fav = run_line_prob(3.5, 5.0, 1.5, favorite_side="home")
+    expected_home_fav = home_cover_home_fav if rl["selection"] == "home" else away_cover_home_fav
+    assert abs(expected - expected_home_fav) > 1e-6
+
+
+def test_run_line_favorite_side_propagates_to_negbin_source():
+    prediction = _prediction(home_proj_runs=3.5, away_proj_runs=5.0)
+    market_lines = {
+        "run_line": {"line": 1.5, "favorite_side": "away", "home_odds": 150, "away_odds": -180,
+                     "home_novig": None, "away_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines, prob_source="negbin")
+    rl = next(c for c in candidates if c["market"] == "run_line")
+
+    home_cover, away_cover = negbin_run_line_prob(3.5, 5.0, NEGBIN_DISPERSION, 1.5, favorite_side="away")
+    expected = home_cover if rl["selection"] == "home" else away_cover
+    assert abs(rl["model_prob"] - expected) < 1e-9
+
+
+def test_moneyline_and_totals_have_no_favorite_side():
+    prediction = _prediction()
+    market_lines = {
+        "moneyline": {"home_odds": 130, "away_odds": -150, "home_novig": 0.40, "away_novig": 0.60},
+        "totals": {"line": 8.5, "over_odds": -110, "under_odds": -110, "over_novig": None, "under_novig": None},
+    }
+    candidates = generate_pick_candidates(prediction, market_lines)
+    for c in candidates:
+        assert c["favorite_side"] is None
+
+
 # --- directional_discrepancy con valores REALES (numpy.bool_ vs bool nativo) ---
 #
 # Las pruebas test_directional_discrepancy_* de arriba usan la fixture

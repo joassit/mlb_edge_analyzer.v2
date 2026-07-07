@@ -55,6 +55,37 @@ def test_run_line_favors_stronger_team():
     assert home > away
 
 
+# --- C1: negbin_run_line_prob con el VISITANTE como favorito ---
+
+def test_negbin_run_line_home_favorite_default_matches_no_favorite_side_arg():
+    with_default = negbin_run_line_prob(mu_home=4.5, mu_away=3.8, k=7.0)
+    with_explicit = negbin_run_line_prob(mu_home=4.5, mu_away=3.8, k=7.0, favorite_side="home")
+    assert with_default == with_explicit
+
+
+def test_negbin_run_line_away_favorite_probabilities_sum_to_one():
+    home, away = negbin_run_line_prob(mu_home=3.0, mu_away=6.0, k=7.0, favorite_side="away")
+    assert abs((home + away) - 1.0) < 1e-9
+
+
+def test_negbin_run_line_away_favorite_covers_more_often_than_home_underdog():
+    home, away = negbin_run_line_prob(mu_home=3.0, mu_away=6.0, k=7.0, favorite_side="away")
+    assert away > home
+
+
+def test_negbin_run_line_home_fav_vs_away_fav_are_symmetric_with_mu_swapped():
+    home_away_fav, away_away_fav = negbin_run_line_prob(mu_home=3.0, mu_away=6.0, k=7.0, favorite_side="away")
+    home_home_fav, away_home_fav = negbin_run_line_prob(mu_home=6.0, mu_away=3.0, k=7.0, favorite_side="home")
+    assert abs(away_away_fav - home_home_fav) < 1e-9
+    assert abs(home_away_fav - away_home_fav) < 1e-9
+
+
+def test_negbin_run_line_rejects_invalid_favorite_side():
+    import pytest
+    with pytest.raises(ValueError):
+        negbin_run_line_prob(mu_home=4.5, mu_away=3.8, k=7.0, favorite_side="visitor")
+
+
 def test_totals_probabilities_sum_to_exactly_one():
     over, under = negbin_totals_prob(mu_home=4.5, mu_away=3.8, k=7.0, line=8.5)
     assert abs((over + under) - 1.0) < 1e-9

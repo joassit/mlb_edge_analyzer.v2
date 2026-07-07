@@ -33,7 +33,8 @@ def _build_candidate(market: str, selection: str, line, model_prob: float,
                       odds: float, market_novig_prob: float | None,
                       min_ev: float, min_edge: float,
                       prob_source: str | None = None,
-                      directional_discrepancy: bool | None = None) -> dict:
+                      directional_discrepancy: bool | None = None,
+                      favorite_side: str | None = None) -> dict:
     market_prob = market_novig_prob if market_novig_prob is not None else implied_prob(odds)
     e = edge_fn(model_prob, market_prob)
     ev = expected_value(model_prob, odds)
@@ -55,17 +56,22 @@ def _build_candidate(market: str, selection: str, line, model_prob: float,
         # por consistencia pero la discrepancia direccional no aplica.
         "prob_source": prob_source,
         "directional_discrepancy": directional_discrepancy,
+        # Solo run_line: quién es el favorito real del mercado (da -line).
+        # None en moneyline/totales.
+        "favorite_side": favorite_side,
     }
 
 
 def _best_side(market: str, options: list[tuple], min_ev: float, min_edge: float,
-               prob_source: str | None = None, directional_discrepancy: bool | None = None) -> dict | None:
+               prob_source: str | None = None, directional_discrepancy: bool | None = None,
+               favorite_side: str | None = None) -> dict | None:
     """options: lista de (selection, line, model_prob, odds, market_novig_prob).
     Devuelve el mejor lado (por EV) de ESE mercado, o None si ningún lado
     tiene cuota disponible."""
     built = [
         _build_candidate(market, sel, line, model_prob, odds, novig, min_ev, min_edge,
-                          prob_source=prob_source, directional_discrepancy=directional_discrepancy)
+                          prob_source=prob_source, directional_discrepancy=directional_discrepancy,
+                          favorite_side=favorite_side)
         for (sel, line, model_prob, odds, novig) in options
         if odds is not None
     ]
@@ -83,9 +89,13 @@ def generate_pick_candidates(prediction: dict, market_lines: dict,
 
         {
           "moneyline": {"home_odds":.., "away_odds":.., "home_novig":.., "away_novig":..},
-          "run_line":  {"line": 1.5, "home_odds":.., "away_odds":.., "home_novig":.., "away_novig":..},
+          "run_line":  {"line": 1.5, "favorite_side": "home"|"away", "home_odds":.., "away_odds":..,
+                        "home_novig":.., "away_novig":..},
           "totals":    {"line": 8.5, "over_odds":.., "under_odds":.., "over_novig":.., "under_novig":..},
         }
+
+    run_line["favorite_side"] indica quién da -line ("home" o "away");
+    default "home" si se omite (compatibilidad con el estándar de MLB).
 
     prob_source: qué modelo de `prediction` alimenta moneyline
     ("heuristic"/"skellam"/"negbin", ver _PROB_SOURCE_FIELDS). Por default
@@ -133,18 +143,21 @@ def generate_pick_candidates(prediction: dict, market_lines: dict,
     rl = market_lines.get("run_line")
     if rl:
         line = rl.get("line", 1.5)
+        favorite_side = rl.get("favorite_side", "home")
         if market_prob_source == "negbin":
             home_cover_prob, away_cover_prob = negbin_run_line_prob(
-                prediction["home_proj_runs"], prediction["away_proj_runs"], NEGBIN_DISPERSION, line
+                prediction["home_proj_runs"], prediction["away_proj_runs"], NEGBIN_DISPERSION, line,
+                favorite_side=favorite_side,
             )
         else:
             home_cover_prob, away_cover_prob = run_line_prob(
-                prediction["home_proj_runs"], prediction["away_proj_runs"], line
+                prediction["home_proj_runs"], prediction["away_proj_runs"], line, favorite_side=favorite_side,
             )
         best = _best_side("run_line", [
             ("home", line, home_cover_prob, rl.get("home_odds"), rl.get("home_novig")),
             ("away", line, away_cover_prob, rl.get("away_odds"), rl.get("away_novig")),
-        ], min_ev, min_edge, prob_source=market_prob_source, directional_discrepancy=None)
+        ], min_ev, min_edge, prob_source=market_prob_source, directional_discrepancy=None,
+           favorite_side=favorite_side)
         if best:
             candidates.append(best)
 

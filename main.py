@@ -55,8 +55,12 @@ MARKET_ODDS = {
 # presupuesto por mercado × región, así que pedir spreads/totals en vivo
 # triplicaría el consumo de ODDS_API_MONTHLY_BUDGET por llamada. Se conecta
 # en vivo más adelante si el presupuesto lo permite.
+# "favorite_side" ("home" o "away") indica quién da -line según el
+# mercado real -- si se omite, se asume "home" y se loggea un WARNING (ver
+# C1: antes se asumía "home" siempre, sin poder expresar un visitante
+# favorito, ~45% de los juegos reales).
 MARKET_SPREADS = {
-    # 717468: {"line": 1.5, "home": -120, "away": +100},
+    # 717468: {"line": 1.5, "favorite_side": "home", "home": -120, "away": +100},
 }
 MARKET_TOTALS = {
     # 717468: {"line": 8.5, "over": -110, "under": -110},
@@ -419,8 +423,17 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
             "home_novig": home_market_no_vig_prob, "away_novig": away_market_no_vig_prob,
         }
     if manual_rl:
+        rl_favorite_side = manual_rl.get("favorite_side")
+        if rl_favorite_side is None:
+            rl_favorite_side = "home"
+            logger.warning(
+                f"{g['away_team']} @ {g['home_team']}: MARKET_SPREADS sin favorite_side explícito -- "
+                f"asumiendo 'home' (línea -1.5 para el local). Verifica cuál equipo es el favorito real "
+                f"del mercado antes de confiar en este pick."
+            )
         market_lines["run_line"] = {
             "line": manual_rl.get("line", 1.5),
+            "favorite_side": rl_favorite_side,
             "home_odds": manual_rl.get("home"), "away_odds": manual_rl.get("away"),
             "home_novig": rl_home_novig, "away_novig": rl_away_novig,
         }

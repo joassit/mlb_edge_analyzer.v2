@@ -79,3 +79,25 @@ def test_predict_from_raw_inputs_uses_frozen_park_factor_weight_not_live_config(
     live_config_result = predict_from_raw_inputs(raw_using_live_config)
 
     assert frozen_result["home_proj_runs"] != live_config_result["home_proj_runs"]
+
+
+def test_predict_from_raw_inputs_run_line_probs_unaffected_by_market_run_line_favorite_side():
+    # C1 agregó favorite_side a MARKET_SPREADS/Pick (model/picks.py,
+    # db/database.py), pero predict_from_raw_inputs() NUNCA lee
+    # raw["market_run_line"] -- home_covers_rl_prob/away_covers_rl_prob son
+    # la línea justa informativa (siempre 1.5, home favorito), no la línea
+    # real de mercado. Un snapshot viejo (sin "market_run_line") debe
+    # recalcular EXACTAMENTE igual que uno nuevo con favorite_side="away"
+    # y una línea distinta -- si no fuera así, C1 habría roto la regla de
+    # compatibilidad hacia atrás de snapshots congelados antes del cambio.
+    raw_old_snapshot = _base_raw_inputs()  # snapshot pre-C1, sin "market_run_line"
+    raw_new_with_market_data = _base_raw_inputs(
+        market_run_line={"line": 2.5, "favorite_side": "away", "home": -120, "away": 100}
+    )
+
+    old_result = predict_from_raw_inputs(raw_old_snapshot)
+    new_result = predict_from_raw_inputs(raw_new_with_market_data)
+
+    assert old_result["home_covers_rl_prob"] == new_result["home_covers_rl_prob"]
+    assert old_result["away_covers_rl_prob"] == new_result["away_covers_rl_prob"]
+    assert old_result == new_result  # snapshot completo idéntico, no solo el run line

@@ -86,3 +86,31 @@ def test_analyze_today_logs_warning_when_no_market_data_available(monkeypatch, c
 
     assert len(results) == 1
     assert any("sin datos de mercado" in r.message for r in caplog.records)
+
+
+def test_analyze_today_warns_when_market_spreads_omits_favorite_side(monkeypatch, caplog):
+    # C1: MARKET_SPREADS sin favorite_side explícito debe avisar (no fallar
+    # en silencio) que se está asumiendo "home" como favorito.
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_SPREADS", {888889: {"line": 1.5, "home": -120, "away": 100}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert len(results) == 1
+    assert any("favorite_side" in r.message for r in caplog.records)
+    rl_pick = next(p for p in results[0]["_picks"] if p["market"] == "run_line")
+    assert rl_pick["favorite_side"] == "home"
+
+
+def test_analyze_today_does_not_warn_when_favorite_side_is_explicit(monkeypatch, caplog):
+    _patch_full_pipeline_no_market_data(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_SPREADS",
+                         {888889: {"line": 1.5, "favorite_side": "away", "home": -120, "away": 100}})
+
+    with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
+        results = main.analyze_today()
+
+    assert not any("favorite_side" in r.message for r in caplog.records)
+    rl_pick = next(p for p in results[0]["_picks"] if p["market"] == "run_line")
+    assert rl_pick["favorite_side"] == "away"
