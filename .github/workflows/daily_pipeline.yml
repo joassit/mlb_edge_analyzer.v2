@@ -137,32 +137,6 @@ jobs:
           fi
           python main.py
 
-      - name: TEMP - Dump DB diagnostics for report regeneration
-        if: always()
-        run: |
-          python -c "
-import json
-import db.database as database
-
-database.init_db()
-session = database.SessionLocal()
-
-def row_to_dict(row):
-    d = {}
-    for col in row.__table__.columns:
-        v = getattr(row, col.name)
-        d[col.name] = v.isoformat() if hasattr(v, 'isoformat') else v
-    return d
-
-out = {
-    'picks': [row_to_dict(r) for r in session.query(database.Pick).all()],
-}
-session.close()
-print('===DIAGNOSTIC_JSON_START===')
-print(json.dumps(out))
-print('===DIAGNOSTIC_JSON_END===')
-"
-
       - name: Save mlb_edge.db for the next run (best-effort, solo sin DATABASE_URL externo)
         # Se salta junto con "Run pipeline" (mismo condicional) -- si no
         # corrió, mlb_edge.db no cambió respecto al ya restaurado, y
