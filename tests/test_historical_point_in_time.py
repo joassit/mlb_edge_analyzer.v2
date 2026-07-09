@@ -41,8 +41,8 @@ class FakeProvider(HistoricalStatsProvider):
     def team_ops_as_of(self, team_id, as_of_date, season):
         self.calls.append(("ops", as_of_date))
         if as_of_date <= self.CUTOFF:
-            return 0.700
-        return 0.999
+            return (0.700, 4200)  # "verdad" pre-corte -- PA real, no aproximado
+        return (0.999, 100)  # centinela post-corte
 
     def bullpen_era_as_of(self, team_id, as_of_date, season):
         self.calls.append(("bullpen", as_of_date))
@@ -80,7 +80,9 @@ def test_reconstructs_pre_cutoff_values_only():
         season=2026, provider=provider,
     )
     assert features.era == 3.00
+    assert features.innings_pitched == 50.0
     assert features.ops == 0.700
+    assert features.team_pa == 4200
     assert features.bullpen_era == 4.00
     assert features.k_pct == 0.22
     assert features.days_rest == 4
@@ -139,6 +141,10 @@ def test_reconstruct_game_features_covers_both_sides_and_park_and_weather():
     assert result["as_of_date"] == "2026-05-15"
     assert result["away_era"] == 3.00
     assert result["home_era"] == 3.00
+    assert result["away_innings_pitched"] == 50.0
+    assert result["home_innings_pitched"] == 50.0
+    assert result["away_team_pa"] == 4200
+    assert result["home_team_pa"] == 4200
     assert result["park_name"] == "Yankee Stadium"
     assert result["park_factor"] == 1.05
     assert result["temp_f"] == 75.0
@@ -168,6 +174,7 @@ def test_missing_pitcher_id_returns_none_fields_without_calling_provider_for_pit
     assert features.days_rest is None
     assert ("era", "2026-05-15") not in provider.calls
     assert features.ops == 0.700  # el lado de equipo sigue reconstruyéndose
+    assert features.team_pa == 4200
 
 
 def test_default_as_of_date_is_one_day_before_game_date():

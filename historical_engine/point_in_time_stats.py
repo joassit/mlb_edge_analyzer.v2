@@ -52,6 +52,7 @@ class PointInTimeFeatures:
     era: float | None = None
     innings_pitched: float | None = None
     ops: float | None = None
+    team_pa: int | None = None
     bullpen_era: float | None = None
     k_pct: float | None = None
     bb_pct: float | None = None
@@ -86,11 +87,12 @@ def reconstruct_team_pitcher_features(
         rest = provider.pitcher_rest_as_of(pitcher_id, as_of_date, season)
         days_rest, last_outing_pitches = rest.get("days_rest"), rest.get("last_outing_pitches")
 
-    ops = provider.team_ops_as_of(team_id, as_of_date, season)
+    ops_result = provider.team_ops_as_of(team_id, as_of_date, season)
+    ops, team_pa = ops_result if ops_result is not None else (None, None)
     bullpen_era = provider.bullpen_era_as_of(team_id, as_of_date, season)
 
     return PointInTimeFeatures(
-        era=era, innings_pitched=ip, ops=ops, bullpen_era=bullpen_era,
+        era=era, innings_pitched=ip, ops=ops, team_pa=team_pa, bullpen_era=bullpen_era,
         k_pct=k_pct, bb_pct=bb_pct, days_rest=days_rest, last_outing_pitches=last_outing_pitches,
     )
 
@@ -133,6 +135,7 @@ def reconstruct_game_features(
         "away_era": away.era, "home_era": home.era,
         "away_innings_pitched": away.innings_pitched, "home_innings_pitched": home.innings_pitched,
         "away_ops": away.ops, "home_ops": home.ops,
+        "away_team_pa": away.team_pa, "home_team_pa": home.team_pa,
         "away_bullpen_era": away.bullpen_era, "home_bullpen_era": home.bullpen_era,
         "away_k_pct": away.k_pct, "home_k_pct": home.k_pct,
         "away_bb_pct": away.bb_pct, "home_bb_pct": home.bb_pct,
