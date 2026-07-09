@@ -61,6 +61,8 @@ def test_run_over_games_creates_analysis_and_predictions_for_each_source(tmp_pat
 
     assert len(analyses) == 1
     assert analyses[0].away_era == 3.00  # viene del FakeProvider, valor pre-corte
+    assert analyses[0].away_innings_pitched == 50.0  # IP real persistida (no aproximada)
+    assert analyses[0].away_team_pa == 4200  # PA real persistida (no aproximada)
     assert len(predictions) == 3  # heuristic, skellam, negbin
     sources = {p.source for p in predictions}
     assert sources == {"heuristic", "skellam", "negbin"}

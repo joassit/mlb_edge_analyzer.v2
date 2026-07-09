@@ -62,7 +62,11 @@ class HistoricalStatsProvider:
     def pitcher_era_ip_as_of(self, pitcher_id: int, as_of_date: str, season: int) -> tuple[float, float] | None:
         raise NotImplementedError
 
-    def team_ops_as_of(self, team_id: int, as_of_date: str, season: int) -> float | None:
+    def team_ops_as_of(self, team_id: int, as_of_date: str, season: int) -> tuple[float, int | None] | None:
+        """Devuelve (ops, plate_appearances) -- PA junto al OPS (mismo
+        payload de la API, sin llamada extra) para poder aplicarle
+        shrinkage real más adelante en vez de una aproximación por
+        calendario (ver historical_engine/training.py)."""
         raise NotImplementedError
 
     def bullpen_era_as_of(self, team_id: int, as_of_date: str, season: int) -> float | None:
@@ -129,7 +133,13 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             splits = resp.json()["stats"][0]["splits"]
             if not splits:
                 return None
-            return float(splits[0]["stat"]["ops"])
+            stat = splits[0]["stat"]
+            ops = stat.get("ops")
+            if ops is None:
+                return None
+            pa_raw = stat.get("plateAppearances")
+            pa = int(pa_raw) if pa_raw is not None else None
+            return float(ops), pa
         except (requests.RequestException, KeyError, IndexError, ValueError) as e:
             logger.debug(f"[historical] OPS as-of falló para equipo {team_id} @ {as_of_date}: {e}")
             return None

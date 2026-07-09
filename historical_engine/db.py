@@ -120,8 +120,16 @@ class HistoricalAnalysis(HistoricalBase):
 
     away_era = Column(Float, nullable=True)
     home_era = Column(Float, nullable=True)
+    # IP/PA reales point-in-time -- antes solo se persistía el ERA/OPS ya
+    # calculado, sin la muestra que lo respalda, así que no había forma de
+    # re-derivar shrinkage con un k_ip distinto sin volver a golpear la API
+    # (ver historical_engine/training.py y el barrido k_ip_era x k_ip_ops).
+    away_innings_pitched = Column(Float, nullable=True)
+    home_innings_pitched = Column(Float, nullable=True)
     away_ops = Column(Float, nullable=True)
     home_ops = Column(Float, nullable=True)
+    away_team_pa = Column(Integer, nullable=True)
+    home_team_pa = Column(Integer, nullable=True)
     away_bullpen_era = Column(Float, nullable=True)
     home_bullpen_era = Column(Float, nullable=True)
     away_k_pct = Column(Float, nullable=True)
