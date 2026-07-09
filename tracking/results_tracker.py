@@ -20,6 +20,12 @@ from db.database import (
     SessionLocal, GameAnalysis, ActualResult, Bet, Pick,
     save_result, get_predictions_without_result, settle_bets_for_game, settle_picks_for_game,
 )
+# ECE/MCE ya viven en historical_engine/stats_utils.py (funciones puras, sin
+# DB ni estado) -- se reutilizan acá en vez de duplicar la fórmula. Esto NO
+# viola el aislamiento de historical_engine/ (ver tests/test_historical_isolation.py):
+# esa suite prohíbe que historical_engine importe DE producción, no que
+# producción importe una función matemática pura de historical_engine.
+from historical_engine.stats_utils import expected_calibration_error, maximum_calibration_error
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -386,7 +392,11 @@ def _compute_model_calibration(rows: list, home_field: str) -> dict:
             "gap": hit_rate - avg_confidence,
         })
 
-    return {"n_games": n_games, "n_skipped": n_skipped, "buckets": buckets}
+    return {
+        "n_games": n_games, "n_skipped": n_skipped, "buckets": buckets,
+        "ece": expected_calibration_error(buckets, n_games),
+        "mce": maximum_calibration_error(buckets),
+    }
 
 
 def compute_calibration(days: int = 90) -> dict:
@@ -834,6 +844,10 @@ def print_calibration_report(days: int = 90) -> None:
 
         if model_cal["n_skipped"]:
             print(f"({model_cal['n_skipped']} predicción(es) sin probabilidad de este modelo, omitidas de arriba)")
+
+        if model_cal.get("ece") is not None:
+            print(f"ECE (error de calibración esperado): {model_cal['ece']:.1%}   "
+                  f"MCE (peor bucket): {model_cal['mce']:.1%}")
     print()
 
 
