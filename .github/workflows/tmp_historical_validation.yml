@@ -1,0 +1,59 @@
+name: tmp-historical-validation
+
+# TEMPORAL -- barrido k_ip_era x k_ip_ops sobre los 382 juegos de mayo 2024
+# ya ingeridos (artifact historical-backtest-db-2024-05, run 28998468272),
+# más comparación de compresión de mu contra producción real (artifact del
+# daily_pipeline.yml más reciente, run 28987598016). Ningún HTTP a MLB
+# Stats API -- solo descarga de artifacts ya generados + cómputo local.
+# Se retira junto con scripts/tmp_workflow_kip_sweep.py apenas se extraen
+# los resultados. Nunca se referencia desde daily_pipeline.yml ni main.py.
+
+on:
+  push:
+    branches:
+      - feature/historical-backtesting
+    paths:
+      - ".github/workflows/tmp_historical_validation.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout feature/historical-backtesting
+        uses: actions/checkout@v7
+        with:
+          ref: feature/historical-backtesting
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install scipy
+
+      - name: Descargar historical-backtest-db-2024-05 (run 28998468272)
+        uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2024-05
+          run-id: 28998468272
+          github-token: ${{ github.token }}
+
+      - name: Descargar mlb-edge-daily-output-28987598016 (produccion real mas reciente)
+        uses: actions/download-artifact@v6
+        with:
+          name: mlb-edge-daily-output-28987598016
+          run-id: 28987598016
+          github-token: ${{ github.token }}
+          path: prod_artifact
+
+      - name: Ubicar mlb_edge.db de produccion en el nombre esperado
+        run: cp prod_artifact/mlb_edge.db mlb_edge_production.db
+
+      - name: Barrido k_ip_era x k_ip_ops + comparacion mayo 2024 vs. produccion
+        run: python -m scripts.tmp_workflow_kip_sweep
