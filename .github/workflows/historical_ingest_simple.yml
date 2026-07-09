@@ -1,0 +1,35 @@
+name: historical-ingest-simple
+
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Año de temporada a ingerir (ej. 2024)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-season:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - run: python -m historical_engine.cli season ${{ inputs.season }}
+
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-backtest-db-${{ inputs.season }}
+          path: historical_backtest.db
+          if-no-files-found: warn
+          retention-days: 30
