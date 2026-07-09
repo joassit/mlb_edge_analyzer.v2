@@ -244,6 +244,99 @@ def test_count_liquidated_picks_counts_each_settled_pick_separately(tmp_path, mo
     assert results_tracker.count_liquidated_picks_with_market_odds() == 3
 
 
+def test_count_liquidated_picks_counts_a_normal_pick_exactly_once(tmp_path, monkeypatch):
+    # Caso base: un pick liquidado, sin ningún recálculo -- debe contar 1.
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_normal_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    _add_pick(session, 1, odds_used=-150, result="win")
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 1
+
+
+def test_count_liquidated_picks_same_selection_recalculated_does_not_duplicate(tmp_path, monkeypatch):
+    # Recalculado varias veces el mismo día SIN cambiar de lado: mismo
+    # (game_pk, game_date, market, selection) -- uq_pick_game_market_selection
+    # ya lo resuelve como upsert (una sola fila real en la base), así que
+    # una sola fila representa correctamente ese escenario.
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_same_selection_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    _add_pick(session, 1, odds_used=-150, result="win", selection="away")
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 1
+
+
+def test_count_liquidated_picks_dedupes_when_selection_flips_between_recalculations(tmp_path, monkeypatch):
+    # EL BUG CORREGIDO: un recálculo intradía que cambia `selection`
+    # (home->away o viceversa) no choca con uq_pick_game_market_selection
+    # (selection es parte de la unique key), así que ambas filas conviven
+    # en la tabla para el MISMO game_pk+market -- deben contar como 1, no 2.
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_flip_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    session.add(database.Pick(
+        game_pk=1, game_date="2026-01-01", market="moneyline", selection="home",
+        model_prob=0.55, odds_used=-150, result="loss",
+        created_at=datetime(2026, 1, 1, 0, 0, 0),
+    ))
+    session.add(database.Pick(
+        game_pk=1, game_date="2026-01-01", market="moneyline", selection="away",
+        model_prob=0.60, odds_used=130, result="win",
+        created_at=datetime(2026, 1, 1, 1, 0, 0),
+    ))
+    session.commit()
+    session.close()
+
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 1
+
+
+def test_count_liquidated_picks_dedupes_across_multiple_games_independently(tmp_path, monkeypatch):
+    # Varios partidos a la vez: el dedup de uno no debe afectar el conteo
+    # de otro, y un partido sin duplicados debe seguir contando normal.
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/count_multi_game_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    # game_pk=1: recalculado con cambio de lado -- debe contar 1, no 2.
+    session.add(database.Pick(
+        game_pk=1, game_date="2026-01-01", market="moneyline", selection="home",
+        model_prob=0.55, odds_used=-150, result="loss",
+        created_at=datetime(2026, 1, 1, 0, 0, 0),
+    ))
+    session.add(database.Pick(
+        game_pk=1, game_date="2026-01-01", market="moneyline", selection="away",
+        model_prob=0.60, odds_used=130, result="win",
+        created_at=datetime(2026, 1, 1, 1, 0, 0),
+    ))
+    # game_pk=2: sin recálculo -- cuenta 1.
+    _add_pick(session, 2, odds_used=-110, result="win", game_date="2026-01-01")
+    # game_pk=3: dos mercados distintos del mismo juego -- cuentan 2, no se
+    # deben perder ni fusionar entre sí (dedup es por (game_pk, market)).
+    _add_pick(session, 3, odds_used=-120, result="win", market="moneyline", game_date="2026-01-01")
+    _add_pick(session, 3, odds_used=105, result="loss", market="totals", selection="over", game_date="2026-01-01")
+    session.commit()
+    session.close()
+
+    # game_pk=1 -> 1, game_pk=2 -> 1, game_pk=3 -> 2 (moneyline + totals) = 4
+    assert results_tracker.count_liquidated_picks_with_market_odds() == 4
+
+
 def test_count_liquidated_picks_has_no_days_window_parameter():
     # A diferencia de compute_metrics(days=N), esto no tiene ventana de
     # días -- importa el histórico TOTAL acumulado, no uno reciente.

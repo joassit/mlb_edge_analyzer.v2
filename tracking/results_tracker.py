@@ -287,20 +287,31 @@ def count_liquidated_picks_with_market_odds() -> int:
     ningún edge, así que no cuenta aquí aunque sí tenga un resultado real
     y una probabilidad válida.
 
-    No hace falta dedup por game_pk/model_version: Pick tiene su propio
-    UniqueConstraint (game_pk, game_date, market, selection) -- un
-    recálculo del mismo día hace upsert vía save_picks(), nunca duplica
-    la fila.
+    Dedup por (game_pk, market), quedándose con la fila de mayor
+    created_at: uq_pick_game_market_selection NO evita que el mismo
+    game_pk+market quede duplicado si el pick cambió de `selection` entre
+    dos corridas del mismo día (el recálculo es una fila nueva, no un
+    upsert, porque selection forma parte de la unique key) — mismo
+    criterio ya usado en compute_pick_performance()/compute_daily_review().
     """
     session = SessionLocal()
     try:
-        return (
+        picks = (
             session.query(Pick)
             .filter(Pick.odds_used.isnot(None), Pick.result != "pending")
-            .count()
+            .all()
         )
     finally:
         session.close()
+
+    latest_by_game_market = {}
+    for p in picks:
+        key = (p.game_pk, p.market)
+        prev = latest_by_game_market.get(key)
+        if prev is None or p.created_at > prev.created_at:
+            latest_by_game_market[key] = p
+
+    return len(latest_by_game_market)
 
 
 # Rango [low, high) de confianza en el favorito declarado -- confidence =

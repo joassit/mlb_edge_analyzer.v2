@@ -282,6 +282,15 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
         print(calibration_note)
         print()
 
+    # Nota única (aplica igual a todo momio de este reporte, ver
+    # data.odds_api.best_available_price): el momio mostrado es la MEJOR
+    # cuota por lado entre las casas frescas disponibles -- visitante y
+    # local pueden venir de casas de apuestas distintas, no necesariamente
+    # de una cuota simultánea de un solo libro.
+    print("Momio: mejor cuota disponible por lado entre las casas frescas -- "
+          "visitante y local pueden venir de casas de apuestas distintas "
+          "(no siempre la misma casa para ambos lados).\n")
+
     if not rows:
         print("No hay juegos analizados hoy.")
         return

@@ -482,6 +482,19 @@ def best_available_price(event: dict) -> dict | None:
     podrías apostar) — distinta del consenso no-vig, que sirve para medir
     edge/CLV, no para ejecutar la apuesta. None si no hay bookmakers con
     datos usables y frescos.
+
+    Comportamiento intencional (line shopping): "away" y "home" se calculan
+    con max() de forma INDEPENDIENTE entre todos los bookmakers frescos, así
+    que pueden venir de dos casas de apuestas distintas -- no es la cuota
+    simultánea de un único libro. Esto modela a un apostador que compra la
+    mejor cuota disponible para el lado que realmente va a jugar (una
+    práctica real y estándar entre apostadores serios), no a alguien
+    limitado a una sola casa. Cada Pick individual solo usa el precio de UN
+    lado (el que eligió, ver model/picks.py::_build_candidate), así que esta
+    combinación nunca se "apuesta junta" -- pero si en algún punto se
+    comparan away/home de este dict como si fueran una única cuota coherente
+    de mercado (ej. para overround), hay que tener presente que pueden no
+    serlo. Ver también la nota impresa en reports/generate_report.py.
     """
     fresh = _fresh_prices(event)
     if not fresh:

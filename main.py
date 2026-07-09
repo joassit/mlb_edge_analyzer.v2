@@ -552,8 +552,16 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "park_name": park["name"],
         "park_factor": park["park_factor"],
         "temp_f": weather.get("temp_f"),
-        "away_proj_runs": round(away_mu, 2),
-        "home_proj_runs": round(home_mu, 2),
+        # Precisión completa (sin redondear) a propósito: away_skellam_prob/
+        # home_skellam_prob/away_negbin_prob/etc. ya se calcularon arriba a
+        # partir de away_mu/home_mu SIN redondear (ver model/predictor.py) --
+        # redondear aquí antes de guardar rompía la reproducibilidad de esas
+        # probabilidades a partir del dato persistido. El redondeo para
+        # lectura humana se aplica solo en la capa de reporte
+        # (reports/generate_report.py ya imprime con :.1f/:.2f, sin depender
+        # de que el dato esté pre-redondeado en la base).
+        "away_proj_runs": away_mu,
+        "home_proj_runs": home_mu,
         "away_model_prob": away_model_prob,
         "home_model_prob": home_model_prob,
         "away_skellam_prob": away_skellam_prob,
