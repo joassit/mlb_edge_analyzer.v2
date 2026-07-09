@@ -1,0 +1,43 @@
+name: tmp-extract-today-report
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ID cuyo artifact se va a descargar"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: mlb-edge-daily-output-${{ inputs.run_id }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded
+
+      - run: find downloaded -maxdepth 3
+
+      - name: Locate DB and copy to expected path
+        run: |
+          DB_PATH=$(find downloaded -iname "*.db" | head -n1)
+          echo "Found DB at: $DB_PATH"
+          cp "$DB_PATH" mlb_edge.db
+
+      - name: Extract report data
+        run: python scratchpad_extract_today_report_data.py
