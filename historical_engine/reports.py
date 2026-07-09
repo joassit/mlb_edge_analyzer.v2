@@ -14,6 +14,14 @@ from historical_engine.model_comparison import compare_models
 from historical_engine.validation import compare_seasons_drift, SOURCES
 from historical_engine.runs_analysis import analyze_runs_projection
 
+BULLPEN_RISK_WARNING = (
+    "Bullpen ERA usa el roster ACTUAL como aproximación del histórico -- sesgo potencial en "
+    "cualquier métrica que dependa de bullpen, especialmente pitching_staff_score con "
+    "starter_weight=0.65 aplicado a temporadas pasadas. bullpen_era es un dato REQUERIDO para que un "
+    "juego se analice (ver historical_engine/pipeline.py) -- todo juego presente en este reporte, sin "
+    "excepción, usó esta aproximación."
+)
+
 _STYLE = """
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
@@ -28,6 +36,7 @@ table{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0;}
 th,td{padding:6px 8px;border-bottom:1px solid #dde3ea;text-align:left;}
 thead th{text-transform:uppercase;font-size:10px;color:#5a6472;border-bottom:2px solid #0e2340;}
 .callout{background:#f4f6f9;border-left:3px solid #2f6fb0;padding:10px 14px;font-size:12.5px;margin:10px 0;}
+.callout-warning{background:#fdf3e3;border-left:3px solid #c9860f;padding:10px 14px;font-size:12.5px;margin:10px 0;}
 .na{color:#8a6a1f;font-weight:600;}
 img{max-width:100%;border:1px solid #dde3ea;border-radius:4px;margin:8px 0;}
 footer{border-top:2px solid #0e2340;margin-top:40px;padding:14px 40px;font-size:10.5px;color:#8b95a3;}
@@ -97,6 +106,7 @@ def _auto_conclusions(comparison: dict, drift_by_source: dict, runs_metrics: dic
         "requeriría un modelo entrenable con importancia de variables (ej. un GBM auxiliar), fuera del "
         "alcance de esta entrega. Documentado explícitamente en vez de inventar un número."
     )
+    conclusions.append(BULLPEN_RISK_WARNING)
     return conclusions
 
 
@@ -134,6 +144,8 @@ def _render_html(season_year, run_id, comparison, drift_by_source, runs_metrics,
      historical_engine (aislado de producción)</p>
 </div>
 <div class="content">
+
+<div class="callout-warning">⚠ {BULLPEN_RISK_WARNING}</div>
 
 <h2>Comparación entre modelos</h2>
 <table><thead><tr><th>Motor</th><th>n</th><th>Accuracy</th><th>Brier</th><th>Log-loss</th><th>ECE</th><th>MCE</th></tr></thead>
