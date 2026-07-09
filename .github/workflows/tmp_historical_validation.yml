@@ -7,7 +7,11 @@ name: tmp-historical-validation
 # nunca se referencia desde daily_pipeline.yml ni desde main.py.
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - feature/historical-backtesting
+    paths:
+      - ".github/workflows/tmp_historical_validation.yml"
 
 permissions:
   contents: read
