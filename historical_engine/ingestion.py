@@ -42,23 +42,43 @@ def ingest_date_range(start: date, end: date, run_id: int, season: int) -> dict:
     ya lo tiene disponible (nunca lo inventa: None si el juego no terminó
     o la API falla, igual que en producción).
 
-    Devuelve un resumen {"n_games": int, "n_final": int, "n_errors": int}.
+    HistoricalGame tiene UNIQUE(game_pk, run_id) -- necesario porque un
+    juego suspendido/reprogramado puede aparecer en el calendario oficial
+    de MÁS DE UN día dentro del mismo rango (el día original y el día de
+    reanudación/makeup), y sin este guard esto rompía ingest_date_range()
+    a mitad de una corrida real (ver UNIQUE constraint failed:
+    historical_game.game_pk, historical_game.run_id, confirmado corriendo
+    2024-05 completo contra la API real). game_pk repetido se salta -- se
+    queda con la primera fecha vista, nunca se sobreescribe ni se inventa
+    cuál de las dos fechas es la "correcta".
+
+    Devuelve un resumen {"n_games": int, "n_final": int, "n_errors": int,
+    "n_duplicate_game_pk_skipped": int}.
     """
     init_historical_db()
     session = SessionLocal()
-    n_games = n_final = n_errors = 0
+    n_games = n_final = n_errors = n_duplicates = 0
+    seen_game_pks = {
+        row.game_pk for row in session.query(HistoricalGame.game_pk).filter_by(run_id=run_id).all()
+    }
     try:
         for d in _daterange(start, end):
             games = get_schedule(d)
             for g in games:
+                game_pk = g["game_pk"]
+                if game_pk in seen_game_pks:
+                    n_duplicates += 1
+                    logger.info(f"[historical] game_pk={game_pk} ya ingerido para run_id={run_id} "
+                                f"(visto de nuevo el {d}) -- se salta, probable juego suspendido/reprogramado.")
+                    continue
                 try:
                     result = None
                     if g.get("abstract_state") == "Final":
-                        result = get_game_result(g["game_pk"])
+                        result = get_game_result(game_pk)
 
                     session.add(HistoricalGame(
                         run_id=run_id,
-                        game_pk=g["game_pk"],
+                        game_pk=game_pk,
                         game_date=g.get("game_date_official") or d.strftime("%Y-%m-%d"),
                         season_year=season,
                         away_team=g["away_team"], home_team=g["home_team"],
@@ -71,17 +91,18 @@ def ingest_date_range(start: date, end: date, run_id: int, season: int) -> dict:
                         winner=result["winner"] if result else None,
                         total_runs=result["total_runs"] if result else None,
                     ))
+                    seen_game_pks.add(game_pk)
                     n_games += 1
                     if result is not None:
                         n_final += 1
                 except Exception as e:
                     n_errors += 1
-                    logger.error(f"[historical] error ingiriendo game_pk={g.get('game_pk')} de {d}: {e}", exc_info=True)
+                    logger.error(f"[historical] error ingiriendo game_pk={game_pk} de {d}: {e}", exc_info=True)
             session.commit()
     finally:
         session.close()
 
-    return {"n_games": n_games, "n_final": n_final, "n_errors": n_errors}
+    return {"n_games": n_games, "n_final": n_final, "n_errors": n_errors, "n_duplicate_game_pk_skipped": n_duplicates}
 
 
 def ingest_season(season: int, run_id: int) -> dict:
