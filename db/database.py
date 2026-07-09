@@ -307,6 +307,36 @@ def init_db():
     _auto_add_missing_columns()
 
 
+def _upsert_feature_snapshot(session, game_pk: int, game_date: str, raw_inputs: dict) -> None:
+    """Lógica de upsert de FeatureSnapshot contra una sesión YA ABIERTA por
+    el caller -- ni abre ni cierra ni commitea sesión propia, para poder
+    compartir transacción con otros upserts (ver save_game_results())."""
+    payload = json.dumps(raw_inputs, default=str)
+    frozen_config = {
+        "park_factor_weight": raw_inputs.get("park_factor_weight"),
+        "weather_correction": raw_inputs.get("weather_correction"),
+        "starter_weight": raw_inputs.get("starter_weight"),
+        "home_field_advantage": raw_inputs.get("home_field_advantage"),
+    }
+    existing = (
+        session.query(FeatureSnapshot)
+        .filter_by(game_pk=game_pk, game_date=game_date)
+        .one_or_none()
+    )
+    if existing:
+        existing.raw_inputs_json = payload
+        existing.captured_at = _utcnow_naive()
+        existing.model_version = MODEL_VERSION
+        for key, value in frozen_config.items():
+            setattr(existing, key, value)
+    else:
+        session.add(FeatureSnapshot(
+            game_pk=game_pk, game_date=game_date,
+            raw_inputs_json=payload, model_version=MODEL_VERSION,
+            **frozen_config,
+        ))
+
+
 def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> None:
     """Congela los insumos crudos de una predicción. Upsert por
     (game_pk, game_date), igual que save_analysis — re-ejecutar el pipeline
@@ -318,34 +348,10 @@ def save_feature_snapshot(game_pk: int, game_date: str, raw_inputs: dict) -> Non
     esta vez sí encuentra la fila (ya insertada por la otra corrida) y
     actualiza en vez de insertar. No protege contra una segunda colisión
     en la misma ventana -- eso ya no es una carrera real, es un bug aparte."""
-    payload = json.dumps(raw_inputs, default=str)
-    frozen_config = {
-        "park_factor_weight": raw_inputs.get("park_factor_weight"),
-        "weather_correction": raw_inputs.get("weather_correction"),
-        "starter_weight": raw_inputs.get("starter_weight"),
-        "home_field_advantage": raw_inputs.get("home_field_advantage"),
-    }
-
     for attempt in range(2):
         session = SessionLocal()
         try:
-            existing = (
-                session.query(FeatureSnapshot)
-                .filter_by(game_pk=game_pk, game_date=game_date)
-                .one_or_none()
-            )
-            if existing:
-                existing.raw_inputs_json = payload
-                existing.captured_at = _utcnow_naive()
-                existing.model_version = MODEL_VERSION
-                for key, value in frozen_config.items():
-                    setattr(existing, key, value)
-            else:
-                session.add(FeatureSnapshot(
-                    game_pk=game_pk, game_date=game_date,
-                    raw_inputs_json=payload, model_version=MODEL_VERSION,
-                    **frozen_config,
-                ))
+            _upsert_feature_snapshot(session, game_pk, game_date, raw_inputs)
             session.commit()
             return
         except IntegrityError:
@@ -377,6 +383,24 @@ def get_feature_snapshot(game_pk: int, game_date: str) -> dict | None:
         session.close()
 
 
+def _upsert_analysis(session, row: dict) -> None:
+    """Lógica de upsert de GameAnalysis contra una sesión YA ABIERTA por el
+    caller -- ver _upsert_feature_snapshot() para el porqué de este split."""
+    model_version = row.get("model_version") or MODEL_VERSION
+    row = {**row, "model_version": model_version}
+    existing = (
+        session.query(GameAnalysis)
+        .filter_by(game_pk=row["game_pk"], game_date=row["game_date"],
+                   model_version=model_version)
+        .one_or_none()
+    )
+    if existing:
+        for key, value in row.items():
+            setattr(existing, key, value)
+    else:
+        session.add(GameAnalysis(**row))
+
+
 def save_analysis(row: dict) -> None:
     """Upsert por (game_pk, game_date, model_version): re-ejecutar el
     pipeline el mismo día CON LA MISMA VERSIÓN DE MODELO actualiza la fila
@@ -393,23 +417,10 @@ def save_analysis(row: dict) -> None:
     Un solo reintento si dos corridas concurrentes insertan la misma fila
     entre la búsqueda y el commit (IntegrityError sobre uq_pred) -- ver el
     mismo criterio en save_feature_snapshot()."""
-    model_version = row.get("model_version") or MODEL_VERSION
-    row = {**row, "model_version": model_version}
-
     for attempt in range(2):
         session = SessionLocal()
         try:
-            existing = (
-                session.query(GameAnalysis)
-                .filter_by(game_pk=row["game_pk"], game_date=row["game_date"],
-                           model_version=model_version)
-                .one_or_none()
-            )
-            if existing:
-                for key, value in row.items():
-                    setattr(existing, key, value)
-            else:
-                session.add(GameAnalysis(**row))
+            _upsert_analysis(session, row)
             session.commit()
             return
         except IntegrityError:
@@ -418,6 +429,39 @@ def save_analysis(row: dict) -> None:
                 raise
         finally:
             session.close()
+
+
+def _upsert_picks(session, game_pk: int, game_date: str, picks: list[dict], model_version: str) -> None:
+    """Lógica de upsert de Pick (TODA la tanda) contra una sesión YA
+    ABIERTA por el caller -- ver _upsert_feature_snapshot() para el
+    porqué de este split."""
+    for p in picks:
+        existing = (
+            session.query(Pick)
+            .filter_by(game_pk=game_pk, game_date=game_date,
+                       market=p["market"], selection=p["selection"])
+            .one_or_none()
+        )
+        fields = {
+            "line": p.get("line"),
+            "favorite_side": p.get("favorite_side"),
+            "model_prob": p["model_prob"],
+            "market_prob": p.get("market_prob"),
+            "edge": p.get("edge"),
+            "ev": p.get("ev"),
+            "odds_used": p.get("odds_used"),
+            "forced": p.get("forced", False),
+            "prob_source": p.get("prob_source"),
+            "directional_discrepancy": p.get("directional_discrepancy"),
+            "calibration_phase": p.get("calibration_phase", False),
+            "model_version": model_version,
+        }
+        if existing:
+            for key, value in fields.items():
+                setattr(existing, key, value)
+        else:
+            session.add(Pick(game_pk=game_pk, game_date=game_date,
+                              market=p["market"], selection=p["selection"], **fields))
 
 
 def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: str) -> None:
@@ -435,33 +479,42 @@ def save_picks(game_pk: int, game_date: str, picks: list[dict], model_version: s
     for attempt in range(2):
         session = SessionLocal()
         try:
-            for p in picks:
-                existing = (
-                    session.query(Pick)
-                    .filter_by(game_pk=game_pk, game_date=game_date,
-                               market=p["market"], selection=p["selection"])
-                    .one_or_none()
-                )
-                fields = {
-                    "line": p.get("line"),
-                    "favorite_side": p.get("favorite_side"),
-                    "model_prob": p["model_prob"],
-                    "market_prob": p.get("market_prob"),
-                    "edge": p.get("edge"),
-                    "ev": p.get("ev"),
-                    "odds_used": p.get("odds_used"),
-                    "forced": p.get("forced", False),
-                    "prob_source": p.get("prob_source"),
-                    "directional_discrepancy": p.get("directional_discrepancy"),
-                    "calibration_phase": p.get("calibration_phase", False),
-                    "model_version": model_version,
-                }
-                if existing:
-                    for key, value in fields.items():
-                        setattr(existing, key, value)
-                else:
-                    session.add(Pick(game_pk=game_pk, game_date=game_date,
-                                      market=p["market"], selection=p["selection"], **fields))
+            _upsert_picks(session, game_pk, game_date, picks, model_version)
+            session.commit()
+            return
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise
+        finally:
+            session.close()
+
+
+def save_game_results(row: dict, snapshot: dict | None, picks: list[dict], model_version: str) -> None:
+    """
+    Guarda análisis + snapshot (si hay) + picks (si hay) de UN JUEGO en una
+    sola transacción: los 3 upserts comparten la misma sesión y se
+    comitean juntos al final -- si cualquiera de los 3 falla (o el commit
+    mismo falla), TODOS se revierten, nunca queda el juego con análisis
+    pero sin picks (o viceversa).
+
+    Antes de esto, save_analysis()/save_feature_snapshot()/save_picks()
+    eran 3 llamadas con 3 sesiones y 3 commits totalmente independientes
+    (ver auditoría externa, PASO 4) -- si save_picks() fallaba DESPUÉS de
+    que save_analysis() ya había comiteado, el análisis quedaba grabado
+    sin sus picks, sin ninguna forma de revertirlo automáticamente.
+
+    Mismo criterio de reintento único que las 3 funciones individuales si
+    el commit choca con una UniqueConstraint por una corrida concurrente.
+    """
+    for attempt in range(2):
+        session = SessionLocal()
+        try:
+            _upsert_analysis(session, row)
+            if snapshot is not None:
+                _upsert_feature_snapshot(session, row["game_pk"], row["game_date"], snapshot)
+            if picks:
+                _upsert_picks(session, row["game_pk"], row["game_date"], picks, model_version)
             session.commit()
             return
         except IntegrityError:
