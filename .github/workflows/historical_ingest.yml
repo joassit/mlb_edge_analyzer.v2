@@ -1,0 +1,52 @@
+name: historical-ingest
+
+# Infraestructura permanente de historical_engine/ -- completamente
+# aislada de daily_pipeline.yml (producción, ver test_historical_isolation.py
+# ::test_daily_pipeline_workflow_does_not_reference_historical_engine). Este
+# workflow nunca corre por schedule ni se invoca desde otro workflow: solo
+# a mano, una temporada a la vez, cuando se necesita (re)ingerir historial.
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Año de temporada a ingerir (ej. 2024)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-season:
+    runs-on: ubuntu-latest
+    # La ingesta completa de una temporada toma ~4.2 horas -- el default de
+    # Actions (360 min) alcanzaría, pero se fija un techo explícito con
+    # margen (300 min = 5h) para no depender del default de la plataforma
+    # ni dejar un job colgado indefinidamente si algo se traba.
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest season
+        run: python -m historical_engine.cli season ${{ inputs.season }}
+
+      # Nombre con la temporada incluida a propósito: sin esto, correr dos
+      # temporadas distintas (ej. 2023 y 2024) pisaría el mismo artifact --
+      # con el año en el nombre, cada corrida deja su propia base separada.
+      - name: Upload historical_backtest.db
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-backtest-db-${{ inputs.season }}
+          path: historical_backtest.db
+          if-no-files-found: warn
+          retention-days: 30
