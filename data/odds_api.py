@@ -38,6 +38,7 @@ from urllib3.util.retry import Retry
 from config import ODDS_API_CACHE_TTL_SECONDS, ODDS_API_MONTHLY_BUDGET, ODDS_CACHE_DIR, resolve_odds_api_keys
 from data.contracts import require, SchemaError
 from data.quote_gate import gate_quote
+from db.enums import MarketPriceSource
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -370,20 +371,20 @@ def fetch_moneyline_odds() -> list[dict]:
 
     cached = _read_cache()
     if cached is not None:
-        _last_fetch_meta.update(source="api_cache", fetched_at=_cache_fetched_at())
+        _last_fetch_meta.update(source=MarketPriceSource.API_CACHE, fetched_at=_cache_fetched_at())
         return _parse_payload(cached)
 
     for idx, key in enumerate(api_keys):
         key_label = f"#{idx + 1} ({_hash_key(key)})"
         payload = _try_key(key, key_label)
         if payload is not None:
-            _last_fetch_meta.update(source="api_live", fetched_at=_cache_fetched_at())
+            _last_fetch_meta.update(source=MarketPriceSource.API_LIVE, fetched_at=_cache_fetched_at())
             return _parse_payload(payload)
 
     stale = _read_cache(ignore_ttl=True)
     if stale is not None:
         logger.warning("Usando el último caché de odds conocido (vencido) -- ninguna key configurada funcionó.")
-        _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
+        _last_fetch_meta.update(source=MarketPriceSource.API_STALE_CACHE, fetched_at=_cache_fetched_at())
         return _parse_payload(stale)
     _last_fetch_meta.update(source="none", fetched_at=None)
     return []

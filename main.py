@@ -31,6 +31,7 @@ from data.odds_api import (
 )
 from data.quote_gate import validate_manual_american_odds, validate_manual_line
 from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
+from db.enums import MarketPriceSource
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
 from tracking.results_tracker import (
     update_results, print_performance_report, print_calibration_report, audit_totals, compute_daily_review,
@@ -377,7 +378,7 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
             if fetched_at_unix is not None else None
         )
     elif manual_price is not None:
-        market_price_source = "manual"
+        market_price_source = MarketPriceSource.MANUAL
         market_captured_at = None
     else:
         market_price_source = None
