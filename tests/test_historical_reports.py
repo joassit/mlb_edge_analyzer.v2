@@ -46,3 +46,5 @@ def test_generate_historical_report_writes_html_file(tmp_path):
         content = f.read()
     assert "Historical Backtesting Report" in content
     assert "temporada 2024" in content
+    assert "roster ACTUAL como aproximación del histórico" in content
+    assert content.count("Bullpen ERA usa el roster ACTUAL") == 2  # callout + conclusión
