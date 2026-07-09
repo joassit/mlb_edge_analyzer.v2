@@ -384,6 +384,62 @@ def test_save_picks_allows_multiple_markets_same_game(isolated_db):
         session.close()
 
 
+def test_settle_picks_for_game_works_on_pre_existing_row_with_raw_string_result(isolated_db):
+    """PASO 3 (Enums): una fila ya persistida ANTES de este cambio tiene
+    result="pending" como string crudo de Python, nunca el Enum -- esto
+    inserta esa fila exactamente como quedaría en una DB vieja (bypaseando
+    save_picks(), que ahora sí usaría PickResult) y confirma que
+    settle_picks_for_game() -- que ahora compara/asigna con PickResult --
+    la sigue liquidando bien, sin ninguna migración de datos."""
+    session = isolated_db.SessionLocal()
+    try:
+        session.add(isolated_db.Pick(
+            game_pk=1, game_date="2026-07-05", market="moneyline", selection="away",
+            model_prob=0.6, market_prob=0.5, edge=0.05, ev=0.06, odds_used=-150,
+            result="pending",  # string crudo, no PickResult.PENDING -- simula fila vieja
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    settled = isolated_db.settle_picks_for_game(1, {
+        "home_score": 2, "away_score": 5, "winner": "away", "total_runs": 7,
+    })
+    assert settled == 1
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="moneyline").one()
+        assert pick.result == "win"
+        assert pick.result == isolated_db.PickResult.WIN  # compara igual que el Enum, sin migración
+    finally:
+        session.close()
+
+
+def test_settle_bets_for_game_works_on_pre_existing_row_with_raw_string_result(isolated_db):
+    session = isolated_db.SessionLocal()
+    try:
+        session.add(isolated_db.Bet(
+            game_pk=1, game_date="2026-07-05", market="moneyline", side="away",
+            odds=130, model_prob=0.6, stake=1.0,
+            result="pending",  # string crudo -- simula fila vieja, no BetResult.PENDING
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    settled = isolated_db.settle_bets_for_game(1, winner="away")
+    assert settled == 1
+
+    session = isolated_db.SessionLocal()
+    try:
+        bet = session.query(isolated_db.Bet).filter_by(game_pk=1).one()
+        assert bet.result == "win"
+        assert bet.result == isolated_db.BetResult.WIN
+    finally:
+        session.close()
+
+
 def test_settle_picks_for_game_moneyline(isolated_db):
     isolated_db.save_picks(1, "2026-07-05", [_make_pick("moneyline", "away", odds_used=-150)], "v1")
 

@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from config import DATABASE_URL, MODEL_VERSION
+from db.enums import BetResult, PickResult
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -162,7 +163,7 @@ class Bet(Base):
     expected_value = Column(Float, nullable=True)  # EV por unidad, calculado al momento de apostar
     stake = Column(Float, nullable=False)
     placed_at = Column(DateTime, default=_utcnow_naive)
-    result = Column(String, default="pending")  # pending, win, loss
+    result = Column(String, default=BetResult.PENDING)  # BetResult: pending, win, loss
     profit = Column(Float, nullable=True)  # se llena al liquidar
     closing_odds = Column(Float, nullable=True)  # cuota del mismo lado cerca del inicio del juego
     clv = Column(Float, nullable=True)  # closing line value, en probabilidad (ver record_closing_odds)
@@ -226,7 +227,7 @@ class Pick(Base):
     # reporte y cualquier análisis de ROI futuro puedan excluirlo de
     # "señal apostable real".
     calibration_phase = Column(Boolean, nullable=False, default=False)
-    result = Column(String, default="pending")   # pending / win / loss / push
+    result = Column(String, default=PickResult.PENDING)   # PickResult: pending / win / loss / push
     profit_unit = Column(Float, nullable=True)   # ganancia por 1 unidad nocional (NO dinero real)
     model_version = Column(String, nullable=True)
     created_at = Column(DateTime, default=_utcnow_naive)
@@ -476,7 +477,7 @@ def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
     juego. `result` es el mismo dict que usa save_result / settle_bets_for_game
     (home_score, away_score, winner, total_runs)."""
     if pick.market == "moneyline":
-        return "win" if pick.selection == result["winner"] else "loss"
+        return PickResult.WIN if pick.selection == result["winner"] else PickResult.LOSS
 
     if pick.market == "run_line":
         # Antes esto estaba hardcodeado a diff>=2 / diff<=1 (el umbral fijo
@@ -496,16 +497,16 @@ def _resolve_pick_outcome(pick: "Pick", result: dict) -> str:
         home_margin = diff + home_spread
         margin = home_margin if pick.selection == "home" else -home_margin
         if margin == 0:
-            return "push"  # solo alcanzable con una línea entera (X.0), no con el X.5 estándar
-        return "win" if margin > 0 else "loss"
+            return PickResult.PUSH  # solo alcanzable con una línea entera (X.0), no con el X.5 estándar
+        return PickResult.WIN if margin > 0 else PickResult.LOSS
 
     if pick.market == "totals":
         if result["total_runs"] == pick.line:
-            return "push"
+            return PickResult.PUSH
         over_hit = result["total_runs"] > pick.line
         if pick.selection == "over":
-            return "win" if over_hit else "loss"
-        return "win" if not over_hit else "loss"
+            return PickResult.WIN if over_hit else PickResult.LOSS
+        return PickResult.WIN if not over_hit else PickResult.LOSS
 
     raise ValueError(f"Mercado desconocido en Pick: {pick.market}")
 
@@ -520,15 +521,15 @@ def settle_picks_for_game(game_pk: int, result: dict) -> int:
     try:
         picks = (
             session.query(Pick)
-            .filter(Pick.game_pk == game_pk, Pick.result == "pending")
+            .filter(Pick.game_pk == game_pk, Pick.result == PickResult.PENDING)
             .all()
         )
         for p in picks:
             outcome = _resolve_pick_outcome(p, result)
             p.result = outcome
-            if outcome == "push":
+            if outcome == PickResult.PUSH:
                 p.profit_unit = 0.0
-            elif outcome == "win":
+            elif outcome == PickResult.WIN:
                 p.profit_unit = (100 / abs(p.odds_used)) if p.odds_used < 0 else (p.odds_used / 100)
             else:
                 p.profit_unit = -1.0
@@ -574,12 +575,12 @@ def settle_bets_for_game(game_pk: int, winner: str) -> int:
     try:
         pending = (
             session.query(Bet)
-            .filter(Bet.game_pk == game_pk, Bet.result == "pending", Bet.market == "moneyline")
+            .filter(Bet.game_pk == game_pk, Bet.result == BetResult.PENDING, Bet.market == "moneyline")
             .all()
         )
         for bet in pending:
             won = (bet.side == winner)
-            bet.result = "win" if won else "loss"
+            bet.result = BetResult.WIN if won else BetResult.LOSS
             if won:
                 b = (100 / abs(bet.odds)) if bet.odds < 0 else (bet.odds / 100)
                 bet.profit = bet.stake * b

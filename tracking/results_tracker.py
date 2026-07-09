@@ -26,6 +26,7 @@ from db.database import (
 # esa suite prohíbe que historical_engine importe DE producción, no que
 # producción importe una función matemática pura de historical_engine.
 from historical_engine.stats_utils import expected_calibration_error, maximum_calibration_error
+from db.enums import BetResult, PickResult
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
@@ -304,7 +305,7 @@ def count_liquidated_picks_with_market_odds() -> int:
     try:
         picks = (
             session.query(Pick)
-            .filter(Pick.odds_used.isnot(None), Pick.result != "pending")
+            .filter(Pick.odds_used.isnot(None), Pick.result != PickResult.PENDING)
             .all()
         )
     finally:
@@ -451,7 +452,7 @@ def compute_bet_performance(days: int = 30) -> dict:
     try:
         settled = (
             session.query(Bet)
-            .filter(Bet.game_date >= cutoff, Bet.result.in_(["win", "loss"]))
+            .filter(Bet.game_date >= cutoff, Bet.result.in_([BetResult.WIN, BetResult.LOSS]))
             .all()
         )
     finally:
@@ -462,7 +463,7 @@ def compute_bet_performance(days: int = 30) -> dict:
 
     total_staked = sum(b.stake for b in settled)
     total_profit = sum(b.profit for b in settled)
-    wins = sum(1 for b in settled if b.result == "win")
+    wins = sum(1 for b in settled if b.result == BetResult.WIN)
 
     return {
         "n_bets": len(settled),
@@ -484,8 +485,8 @@ def _summarize_picks(subset: list) -> dict:
     """
     if not subset:
         return {"n_picks": 0, "win_rate": None, "roi": None}
-    decided = [p for p in subset if p.result != "push"]
-    wins = sum(1 for p in decided if p.result == "win")
+    decided = [p for p in subset if p.result != PickResult.PUSH]
+    wins = sum(1 for p in decided if p.result == PickResult.WIN)
     total_profit = sum(p.profit_unit for p in subset if p.profit_unit is not None)
     return {
         "n_picks": len(subset),
@@ -520,7 +521,7 @@ def compute_pick_performance(days: int = 30) -> dict:
     try:
         picks = (
             session.query(Pick)
-            .filter(Pick.game_date >= cutoff, Pick.result.in_(["win", "loss", "push"]))
+            .filter(Pick.game_date >= cutoff, Pick.result.in_([PickResult.WIN, PickResult.LOSS, PickResult.PUSH]))
             .all()
         )
     finally:
@@ -604,7 +605,7 @@ def compute_daily_review(review_date: str) -> dict:
         }
         picks = (
             session.query(Pick)
-            .filter(Pick.game_date == review_date, Pick.result != "pending")
+            .filter(Pick.game_date == review_date, Pick.result != PickResult.PENDING)
             .all()
         )
     finally:
