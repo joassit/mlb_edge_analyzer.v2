@@ -30,7 +30,7 @@ from data.odds_api import (
     consensus_power_devig_prob, get_last_fetch_meta,
 )
 from data.quote_gate import validate_manual_american_odds, validate_manual_line
-from db.database import init_db, save_analysis, save_feature_snapshot, save_picks
+from db.database import init_db, save_game_results
 from db.enums import MarketPriceSource
 from reports.generate_report import print_report, export_csv, export_picks_csv, print_yesterday_review
 from tracking.results_tracker import (
@@ -655,6 +655,50 @@ def _calibration_phase_note(n_liquidated_picks: int, min_liquidated_picks: int) 
     )
 
 
+def _persist_game_results(results: list[dict], in_calibration_phase: bool) -> tuple[dict, list[dict], int]:
+    """
+    Guarda análisis + snapshot + picks de CADA juego de `results`, uno por
+    uno, en su propia transacción (ver save_game_results()) -- y aislado:
+    si guardar un juego falla, se cuenta como error y se sigue con el
+    siguiente, nunca aborta el resto de la corrida (antes, una excepción
+    sin atrapar acá tumbaba el análisis de todos los juegos posteriores,
+    no solo el que falló -- ver auditoría externa, PASO 4).
+
+    Devuelve (picks_by_game, all_picks_rows, n_persistence_errors).
+    """
+    picks_by_game = {}
+    all_picks_rows = []
+    n_persistence_errors = 0
+
+    for r in results:
+        snapshot = r.pop("_feature_snapshot", None)
+        picks = r.pop("_picks", [])
+        for p in picks:
+            p["calibration_phase"] = in_calibration_phase
+
+        try:
+            save_game_results(r, snapshot, picks, MODEL_VERSION)
+        except Exception as e:
+            n_persistence_errors += 1
+            logger.error(
+                f"Error guardando análisis/picks de {r.get('away_team')} @ {r.get('home_team')} "
+                f"(game_pk={r.get('game_pk')}): {e}",
+                exc_info=True,
+            )
+            continue
+
+        if picks:
+            picks_by_game[r["game_pk"]] = picks
+            for p in picks:
+                all_picks_rows.append({
+                    "game_pk": r["game_pk"], "game_date": r["game_date"],
+                    "away_team": r["away_team"], "home_team": r["home_team"],
+                    **p,
+                })
+
+    return picks_by_game, all_picks_rows, n_persistence_errors
+
+
 def run_pipeline():
     start_time = time.monotonic()
     setup_logging()
@@ -711,27 +755,11 @@ def run_pipeline():
     calibration_note = _calibration_phase_note(n_liquidated_picks, MIN_LIQUIDATED_PICKS_FOR_CALIBRATION)
     in_calibration_phase = calibration_note is not None
 
-    picks_by_game = {}
-    all_picks_rows = []
+    picks_by_game, all_picks_rows, n_persistence_errors = _persist_game_results(results, in_calibration_phase)
 
-    for r in results:
-        snapshot = r.pop("_feature_snapshot", None)
-        picks = r.pop("_picks", [])
-
-        save_analysis(r)
-        if snapshot is not None:
-            save_feature_snapshot(r["game_pk"], r["game_date"], snapshot)
-        if picks:
-            for p in picks:
-                p["calibration_phase"] = in_calibration_phase
-            save_picks(r["game_pk"], r["game_date"], picks, MODEL_VERSION)
-            picks_by_game[r["game_pk"]] = picks
-            for p in picks:
-                all_picks_rows.append({
-                    "game_pk": r["game_pk"], "game_date": r["game_date"],
-                    "away_team": r["away_team"], "home_team": r["home_team"],
-                    **p,
-                })
+    if n_persistence_errors:
+        logger.warning(f"{n_persistence_errors} juego(s) tuvieron un error al persistir análisis/picks -- "
+                        f"ver 'Error guardando análisis/picks' arriba. El resto de la corrida continuó.")
 
     # print_report() se llama SIEMPRE, incluso sin resultados -- así el
     # detalle de juegos descartados (ver analyze_today()) queda visible en

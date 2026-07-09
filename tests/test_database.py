@@ -384,6 +384,58 @@ def test_save_picks_allows_multiple_markets_same_game(isolated_db):
         session.close()
 
 
+def test_save_game_results_persists_all_three_together(isolated_db):
+    row = {
+        "game_pk": 1, "game_date": "2026-07-05", "away_team": "A", "home_team": "B",
+        "away_model_prob": 0.6, "home_model_prob": 0.4,
+    }
+    snapshot = {"away_era": 3.5}
+    picks = [_make_pick("moneyline", "home")]
+
+    isolated_db.save_game_results(row, snapshot, picks, "v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        assert session.query(isolated_db.GameAnalysis).filter_by(game_pk=1).count() == 1
+        assert session.query(isolated_db.FeatureSnapshot).filter_by(game_pk=1).count() == 1
+        assert session.query(isolated_db.Pick).filter_by(game_pk=1).count() == 1
+    finally:
+        session.close()
+
+
+def test_save_game_results_rolls_back_all_three_if_picks_fail(isolated_db, monkeypatch):
+    """PASO 4: reproduce el problema original de la auditoría -- si guardar
+    los picks falla DESPUÉS de que el análisis ya se procesó en la misma
+    transacción, antes (3 sesiones/commits separados) el análisis ya
+    quedaba comiteado en disco sin sus picks. Ahora comparten sesión: un
+    fallo en cualquiera revierte los 3, no queda nada a medias."""
+    def _boom(*a, **k):
+        raise RuntimeError("fallo simulado guardando picks")
+
+    monkeypatch.setattr(isolated_db, "_upsert_picks", _boom)
+
+    row = {
+        "game_pk": 1, "game_date": "2026-07-05", "away_team": "A", "home_team": "B",
+        "away_model_prob": 0.6, "home_model_prob": 0.4,
+    }
+    snapshot = {"away_era": 3.5}
+    picks = [_make_pick("moneyline", "home")]
+
+    with pytest.raises(RuntimeError, match="fallo simulado"):
+        isolated_db.save_game_results(row, snapshot, picks, "v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        # NINGUNO de los 3 debe haber quedado grabado -- ni siquiera el
+        # análisis, que en la lógica vieja (3 llamadas separadas) ya
+        # habría comiteado exitosamente antes de llegar a los picks.
+        assert session.query(isolated_db.GameAnalysis).filter_by(game_pk=1).count() == 0
+        assert session.query(isolated_db.FeatureSnapshot).filter_by(game_pk=1).count() == 0
+        assert session.query(isolated_db.Pick).filter_by(game_pk=1).count() == 0
+    finally:
+        session.close()
+
+
 def test_settle_picks_for_game_works_on_pre_existing_row_with_raw_string_result(isolated_db):
     """PASO 3 (Enums): una fila ya persistida ANTES de este cambio tiene
     result="pending" como string crudo de Python, nunca el Enum -- esto
