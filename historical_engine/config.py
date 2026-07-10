@@ -15,7 +15,7 @@ from config import MLB_API_BASE  # solo una constante de URL, sin estado
 # Temporadas soportadas para backtesting -- nunca se mezclan automáticamente
 # entre sí (ver historical_engine/pipeline.py, cada corrida pertenece a UNA
 # sola temporada). Se puede ampliar sin tocar el resto del motor.
-SUPPORTED_SEASONS = [2023, 2024, 2025, 2026]
+SUPPORTED_SEASONS = [2022, 2023, 2024, 2025, 2026]
 
 # Base de datos COMPLETAMENTE separada de mlb_edge.db -- archivo físico
 # distinto, nunca el mismo motor de conexión que db/database.py. Variable
