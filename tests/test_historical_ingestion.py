@@ -102,6 +102,30 @@ def test_ingest_date_range_skips_game_pk_already_ingested_in_a_prior_call(tmp_pa
     session.close()
 
 
+def test_ingest_season_supports_2022_with_lockout_adjusted_start(tmp_path, monkeypatch):
+    """2022 arrancó tarde por el lockout de la MLB -- Opening Day real fue
+    el 7 de abril, no fines de marzo como las otras temporadas. Confirma
+    que ingest_season(2022, ...) no lanza (SEASON_DATE_RANGES lo cubre) y
+    que efectivamente arranca la ingesta en la fecha de inicio de esa
+    temporada, no antes."""
+    Session = _fresh_session(tmp_path, monkeypatch, "ingestion_2022")
+
+    calls = []
+
+    def fake_get_schedule(d):
+        calls.append(d)
+        return []
+
+    monkeypatch.setattr(ingestion, "get_schedule", fake_get_schedule)
+    monkeypatch.setattr(ingestion, "get_game_result", lambda game_pk: None)
+
+    summary = ingestion.ingest_season(2022, run_id=1)
+
+    assert summary["n_errors"] == 0
+    assert min(calls) == date(2022, 4, 7)
+    assert max(calls) == date(2022, 10, 5)
+
+
 def test_ingest_date_range_still_ingests_distinct_game_pks_normally(tmp_path, monkeypatch):
     Session = _fresh_session(tmp_path, monkeypatch, "ingestion_normal")
 

@@ -22,6 +22,10 @@ logger = logging.getLogger("mlb_edge_analyzer.historical")
 # afecta el análisis estadístico), documentadas como aproximación a
 # propósito en vez de presentarse como fechas oficiales exactas.
 SEASON_DATE_RANGES = {
+    # 2022 arrancó tarde por el lockout de la MLB (acuerdo colectivo
+    # resuelto en marzo de 2022) -- Opening Day real fue el 7 de abril,
+    # no la fecha habitual de finales de marzo de las otras temporadas.
+    2022: (date(2022, 4, 7), date(2022, 10, 5)),
     2023: (date(2023, 3, 30), date(2023, 10, 1)),
     2024: (date(2024, 3, 20), date(2024, 9, 29)),
     2025: (date(2025, 3, 27), date(2025, 9, 28)),
