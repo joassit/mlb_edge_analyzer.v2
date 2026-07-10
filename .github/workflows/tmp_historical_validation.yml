@@ -1,31 +1,30 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- descarga el
-# artifact de la corrida de PRODUCCIÓN de hoy (mlb_edge.db + reports/logs)
-# y extrae los picks del día para armar el PDF de predicciones. Se
-# retira/reemplaza según haga falta en cada uso. Nota: sobreescribir este
-# archivo NO afecta corridas ya en progreso de una dispatch anterior.
+# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
+# real de una temporada mientras historical_ingest.yml/
+# historical_ingest_simple.yml (los archivos permanentes) terminan de
+# indexarse. Se retira/reemplaza según haga falta en cada uso.
 on:
   workflow_dispatch:
     inputs:
-      artifact_name:
-        description: 'Nombre del artifact de producción a descargar'
-        required: true
-        type: string
-      source_run_id:
-        description: 'run_id del daily-pipeline que generó ese artifact'
+      season:
+        description: 'Año de temporada a ingerir (ej. 2025)'
         required: true
         type: string
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  extract:
+  ingest-season:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
+    # para jobs en runners hosteados que ningún timeout-minutes puede
+    # superar. Con WEATHER_CLIMATOLOGY_YEARS bajado de 5 a 3 + cache de
+    # climatología dentro de la corrida, una temporada completa debería
+    # entrar cómoda en ~4h30m-4h50m -- 340 deja margen real.
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v7
 
@@ -35,16 +34,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - uses: actions/download-artifact@v6
+      - run: python -m historical_engine.cli season ${{ inputs.season }}
+
+      - if: always()
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.artifact_name }}
-          run-id: ${{ inputs.source_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: downloaded
-
-      - run: find downloaded -maxdepth 2
-
-      - name: Copy mlb_edge.db to expected path
-        run: cp downloaded/mlb_edge.db mlb_edge.db
-
-      - run: python scratchpad_extract_todays_picks.py
+          name: historical-backtest-db-${{ inputs.season }}
+          path: historical_backtest.db
+          if-no-files-found: warn
+          retention-days: 30
