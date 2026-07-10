@@ -62,8 +62,8 @@ class FakeProvider(HistoricalStatsProvider):
             return {"days_rest": 4, "last_outing_pitches": 90}
         return {"days_rest": -1, "last_outing_pitches": -1}
 
-    def historical_weather(self, lat, lon, game_date):
-        self.calls.append(("weather", game_date))
+    def historical_weather(self, lat, lon, game_date, as_of_date):
+        self.calls.append(("weather", game_date, as_of_date))
         return {"temp_f": 75.0}
 
     def league_averages_as_of(self, as_of_date, season):

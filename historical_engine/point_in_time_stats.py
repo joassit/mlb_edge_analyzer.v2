@@ -124,7 +124,7 @@ def reconstruct_game_features(
     )
 
     park = get_park_info(game["home_team_id"])
-    weather = provider.historical_weather(park.get("lat"), park.get("lon"), game_date)
+    weather = provider.historical_weather(park.get("lat"), park.get("lon"), game_date, as_of_date=as_of_date)
     league = provider.league_averages_as_of(as_of_date, season)
 
     return {

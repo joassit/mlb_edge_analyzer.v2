@@ -76,3 +76,54 @@ def test_bullpen_era_as_of_computes_weighted_era_from_roster_pitchers(monkeypatc
 
     # (3.00*10 + 6.00*5) / 15 = 4.00
     assert era == 4.0
+
+
+def test_historical_weather_never_queries_a_window_overlapping_as_of_date_or_later(monkeypatch):
+    """Regresión del hallazgo de auditoría: historical_weather() usaba
+    game_date directamente (el clima REAL del propio partido), la única
+    variable del proveedor que rompía la invariante point-in-time. Ahora
+    usa climatología de años anteriores -- ninguna ventana consultada
+    puede llegar a as_of_date ni a game_date."""
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        return pitp_FakeResponse({"hourly": {"temperature_2m": [70.0, 72.0, 74.0]}})
+
+    def pitp_FakeResponse(data):
+        return type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: data})()
+
+    monkeypatch.setattr(pitp, "session", type("S", (), {"get": staticmethod(fake_get)})())
+
+    provider = pitp.MLBStatsAPIProvider()
+    result = provider.historical_weather(lat=40.0, lon=-74.0, game_date="2024-07-16", as_of_date="2024-07-15")
+
+    assert calls, "no se hizo ninguna llamada de climatología"
+    as_of = pitp.date.fromisoformat("2024-07-15")
+    for params in calls:
+        window_end = pitp.date.fromisoformat(params["end_date"])
+        window_start = pitp.date.fromisoformat(params["start_date"])
+        assert window_end < as_of, f"ventana {params} llega hasta as_of_date o después"
+        assert window_start.year < as_of.year  # cada ventana vive en un año calendario anterior completo
+    assert result["temp_f"] == 72.0  # promedio simple de todas las llamadas mockeadas (todas iguales acá)
+
+
+def test_historical_weather_averages_across_climatology_years(monkeypatch):
+    """Confirma que sí promedia sobre múltiples años (no solo el más
+    reciente) -- valores bien distintos por año deben reflejarse en el
+    promedio final, no en el valor de un solo año."""
+    year_temps = {2019: [50.0], 2020: [60.0], 2021: [70.0], 2022: [80.0], 2023: [90.0]}
+
+    def fake_get(url, params=None, timeout=None):
+        yr = int(params["start_date"][:4])
+        return type("R", (), {
+            "raise_for_status": lambda self: None,
+            "json": lambda self: {"hourly": {"temperature_2m": year_temps[yr]}},
+        })()
+
+    monkeypatch.setattr(pitp, "session", type("S", (), {"get": staticmethod(fake_get)})())
+
+    provider = pitp.MLBStatsAPIProvider()
+    result = provider.historical_weather(lat=40.0, lon=-74.0, game_date="2024-07-16", as_of_date="2024-07-15")
+
+    assert result["temp_f"] == sum([50, 60, 70, 80, 90]) / 5  # 70.0 -- promedio de los 5 años anteriores
