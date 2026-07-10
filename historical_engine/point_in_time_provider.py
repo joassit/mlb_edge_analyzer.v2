@@ -145,15 +145,21 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             return None
 
     def bullpen_era_as_of(self, team_id, as_of_date, season):
-        # Roster activo AL MOMENTO de as_of_date no es reconstruible de forma
-        # confiable sin snapshots de roster históricos -- se usa el roster
-        # actual como aproximación (mismo criterio de "mejor esfuerzo" que
-        # el resto del proveedor, documentado explícitamente, no oculto) y
-        # se filtra el ERA de cada relevista por byDateRange antes del corte.
+        # El endpoint de roster SÍ soporta un snapshot histórico real vía
+        # `date=` (verificado empíricamente contra la API real: 9/9
+        # comparaciones entre abril/julio/septiembre 2024 en 3 equipos
+        # distintos dieron rosters DISTINTOS, con conteos consistentes con
+        # la expansión real de roster de septiembre -- no es el roster
+        # "actual" ignorando el parámetro). Se pide con la misma fecha de
+        # corte que el resto del proveedor (`_end_date`, día anterior a
+        # as_of_date) para que el roster nunca incluya un movimiento
+        # (trade/call-up/DL) posterior al corte -- antes de este fix, un
+        # jugador incorporado meses después del juego podía contarse en el
+        # bullpen de un juego temprano de esa misma temporada.
         try:
             roster_resp = session.get(
                 f"{MLB_API_BASE}/teams/{team_id}/roster",
-                params={"rosterType": "active", "season": season},
+                params={"rosterType": "active", "date": self._end_date(as_of_date)},
                 timeout=INGESTION_REQUEST_TIMEOUT,
             )
             roster_resp.raise_for_status()
