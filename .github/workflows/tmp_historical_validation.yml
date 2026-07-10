@@ -1,25 +1,22 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada mientras historical_ingest.yml/
-# historical_ingest_simple.yml (los archivos permanentes) terminan de
-# indexarse. Se retira/reemplaza según haga falta en cada uso.
+# indexado de workflow_dispatch para archivos nuevos). Este uso puntual:
+# verifica si GET /teams/{id}/roster?date=YYYY-MM-DD de la MLB Stats API
+# devuelve snapshots históricos reales o ignora el parámetro -- necesario
+# antes de confiar en el fix propuesto para bullpen_era_as_of() (paso 2
+# del plan escalonado de la auditoría de look-ahead bias). Se
+# retira/reemplaza según haga falta en cada uso.
 on:
-  workflow_dispatch:
-    inputs:
-      season:
-        description: 'Año de temporada a ingerir (ej. 2023)'
-        required: true
-        type: string
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
-  ingest-season:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -27,14 +24,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install -r requirements.txt
+      - run: pip install requests
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
-
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: historical-backtest-db-${{ inputs.season }}
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+      - run: python scratchpad_verify_roster_date_param.py
