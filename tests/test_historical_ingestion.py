@@ -118,3 +118,84 @@ def test_ingest_date_range_still_ingests_distinct_game_pks_normally(tmp_path, mo
     assert summary["n_games"] == 3
     assert summary["n_duplicate_game_pk_skipped"] == 0
     assert summary["n_final"] == 3
+    assert summary["n_postponed_reconciled"] == 0
+
+
+def test_ingest_date_range_reconciles_postponed_game_without_changing_game_date(tmp_path, monkeypatch):
+    """Regresión del hallazgo de auditoría: un juego pospuesto (ingerido
+    primero sin resultado) que reaparece en el calendario de la fecha de
+    reanudación, ya Final, debe actualizar winner/scores en la MISMA fila
+    -- nunca crear una segunda fila, y nunca tocar game_date (as_of_date
+    se calcula desde la fecha ORIGINAL programada, no la de reanudación:
+    correrla movería el corte point-in-time)."""
+    Session = _fresh_session(tmp_path, monkeypatch, "ingestion_reconcile")
+
+    def _game_with_state(game_pk, abstract_state, game_date_official):
+        g = _game(game_pk=game_pk)
+        g["abstract_state"] = abstract_state
+        g["status"] = abstract_state
+        g["game_date_official"] = game_date_official
+        return g
+
+    # Día original: el juego se pospone antes de jugarse -- MLB API sigue
+    # reportando game_date_official = la fecha originalmente programada.
+    schedule_day1 = {date(2024, 6, 10): [_game_with_state(746799, "Postponed", "2024-06-10")]}
+    monkeypatch.setattr(ingestion, "get_schedule", lambda d: schedule_day1.get(d, []))
+    monkeypatch.setattr(ingestion, "get_game_result", lambda game_pk: None)
+
+    ingestion.ingest_date_range(date(2024, 6, 10), date(2024, 6, 10), run_id=1, season=2024)
+
+    session = Session()
+    row = session.query(historical_db.HistoricalGame).filter_by(run_id=1, game_pk=746799).one()
+    assert row.winner is None
+    assert row.game_date == "2024-06-10"
+    session.close()
+
+    # Día de reanudación: mismo game_pk, ahora Final, pero la API sigue
+    # reportando game_date_official = la fecha ORIGINAL (2024-06-10), no
+    # la de reanudación (2024-06-12) -- así lo hace la MLB Stats API real.
+    schedule_day2 = {date(2024, 6, 12): [_game_with_state(746799, "Final", "2024-06-10")]}
+    monkeypatch.setattr(ingestion, "get_schedule", lambda d: schedule_day2.get(d, []))
+    monkeypatch.setattr(ingestion, "get_game_result",
+                         lambda game_pk: {"home_score": 6, "away_score": 3, "winner": "home", "total_runs": 9})
+
+    summary = ingestion.ingest_date_range(date(2024, 6, 12), date(2024, 6, 12), run_id=1, season=2024)
+
+    assert summary["n_duplicate_game_pk_skipped"] == 1
+    assert summary["n_postponed_reconciled"] == 1
+
+    session = Session()
+    rows = session.query(historical_db.HistoricalGame).filter_by(run_id=1, game_pk=746799).all()
+    session.close()
+    assert len(rows) == 1  # nunca una segunda fila para el mismo (game_pk, run_id)
+    row = rows[0]
+    assert row.game_date == "2024-06-10"  # el game_date ORIGINAL nunca se toca
+    assert row.winner == "home"
+    assert row.home_score == 6 and row.away_score == 3 and row.total_runs == 9
+    assert row.status == "Final"
+
+
+def test_ingest_date_range_does_not_re_fetch_result_when_already_reconciled(tmp_path, monkeypatch):
+    """Si la fila existente YA tiene resultado (no es un pospuesto sin
+    resolver), una reaparición del mismo game_pk no debe volver a llamar
+    get_game_result() -- protege contra pisar un resultado ya correcto con
+    una llamada redundante a la API."""
+    Session = _fresh_session(tmp_path, monkeypatch, "ingestion_no_reconcile_needed")
+
+    schedule_by_date = {
+        date(2024, 5, 14): [_game(game_pk=746799)],  # Final desde el día 1
+        date(2024, 5, 15): [_game(game_pk=746799)],  # reaparece, también Final
+    }
+    monkeypatch.setattr(ingestion, "get_schedule", lambda d: schedule_by_date.get(d, []))
+    call_count = {"n": 0}
+
+    def fake_get_game_result(game_pk):
+        call_count["n"] += 1
+        return {"home_score": 5, "away_score": 2, "winner": "home", "total_runs": 7}
+
+    monkeypatch.setattr(ingestion, "get_game_result", fake_get_game_result)
+
+    summary = ingestion.ingest_date_range(date(2024, 5, 14), date(2024, 5, 15), run_id=1, season=2024)
+
+    assert summary["n_postponed_reconciled"] == 0
+    assert call_count["n"] == 1  # solo el día 1 -- el día 2 ni siquiera lo intenta

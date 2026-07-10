@@ -48,35 +48,65 @@ def ingest_date_range(start: date, end: date, run_id: int, season: int) -> dict:
     reanudación/makeup), y sin este guard esto rompía ingest_date_range()
     a mitad de una corrida real (ver UNIQUE constraint failed:
     historical_game.game_pk, historical_game.run_id, confirmado corriendo
-    2024-05 completo contra la API real). game_pk repetido se salta -- se
-    queda con la primera fecha vista, nunca se sobreescribe ni se inventa
-    cuál de las dos fechas es la "correcta".
+    2024-05 completo contra la API real).
+
+    Un game_pk repetido nunca crea una segunda fila -- pero si la fila
+    YA existente todavía no tiene resultado (winner is None: el día que se
+    ingirió por primera vez, el juego estaba pospuesto/en curso) y esta
+    reaparición SÍ trae abstract_state=Final, se reconcilia el resultado
+    en la fila existente. El game_date NUNCA se toca en la reconciliación
+    -- as_of_date se calcula desde la fecha ORIGINAL programada (cuándo
+    debía jugarse el partido), no desde la fecha de reanudación, que es un
+    accidente de calendario y correrla movería el corte point-in-time.
+    Antes de este fix, un juego pospuesto quedaba con winner=None para
+    siempre (se descartaba de accuracy/Brier sin que quedara registrado en
+    ningún lado que existía un resultado real sin reconciliar).
 
     Devuelve un resumen {"n_games": int, "n_final": int, "n_errors": int,
-    "n_duplicate_game_pk_skipped": int}.
+    "n_duplicate_game_pk_skipped": int, "n_postponed_reconciled": int}.
     """
     init_historical_db()
     session = SessionLocal()
-    n_games = n_final = n_errors = n_duplicates = 0
-    seen_game_pks = {
-        row.game_pk for row in session.query(HistoricalGame.game_pk).filter_by(run_id=run_id).all()
+    n_games = n_final = n_errors = n_duplicates = n_reconciled = 0
+    existing_by_pk = {
+        row.game_pk: row for row in session.query(HistoricalGame).filter_by(run_id=run_id).all()
     }
     try:
         for d in _daterange(start, end):
             games = get_schedule(d)
             for g in games:
                 game_pk = g["game_pk"]
-                if game_pk in seen_game_pks:
+                existing = existing_by_pk.get(game_pk)
+                if existing is not None:
                     n_duplicates += 1
-                    logger.info(f"[historical] game_pk={game_pk} ya ingerido para run_id={run_id} "
-                                f"(visto de nuevo el {d}) -- se salta, probable juego suspendido/reprogramado.")
+                    if existing.winner is None and g.get("abstract_state") == "Final":
+                        try:
+                            result = get_game_result(game_pk)
+                        except Exception as e:
+                            n_errors += 1
+                            logger.error(f"[historical] error reconciliando game_pk={game_pk} "
+                                         f"visto de nuevo el {d}: {e}", exc_info=True)
+                            continue
+                        if result:
+                            existing.home_score = result["home_score"]
+                            existing.away_score = result["away_score"]
+                            existing.winner = result["winner"]
+                            existing.total_runs = result["total_runs"]
+                            existing.status = "Final"
+                            n_reconciled += 1
+                            logger.info(f"[historical] game_pk={game_pk}: resultado reconciliado desde "
+                                        f"la fecha de reanudación ({d}) -- game_date original "
+                                        f"({existing.game_date}) preservado.")
+                    else:
+                        logger.info(f"[historical] game_pk={game_pk} ya ingerido para run_id={run_id} "
+                                    f"(visto de nuevo el {d}) -- se salta, ya tenía resultado o sigue sin Final.")
                     continue
                 try:
                     result = None
                     if g.get("abstract_state") == "Final":
                         result = get_game_result(game_pk)
 
-                    session.add(HistoricalGame(
+                    new_row = HistoricalGame(
                         run_id=run_id,
                         game_pk=game_pk,
                         game_date=g.get("game_date_official") or d.strftime("%Y-%m-%d"),
@@ -90,8 +120,9 @@ def ingest_date_range(start: date, end: date, run_id: int, season: int) -> dict:
                         away_score=result["away_score"] if result else None,
                         winner=result["winner"] if result else None,
                         total_runs=result["total_runs"] if result else None,
-                    ))
-                    seen_game_pks.add(game_pk)
+                    )
+                    session.add(new_row)
+                    existing_by_pk[game_pk] = new_row
                     n_games += 1
                     if result is not None:
                         n_final += 1
@@ -102,7 +133,10 @@ def ingest_date_range(start: date, end: date, run_id: int, season: int) -> dict:
     finally:
         session.close()
 
-    return {"n_games": n_games, "n_final": n_final, "n_errors": n_errors, "n_duplicate_game_pk_skipped": n_duplicates}
+    return {
+        "n_games": n_games, "n_final": n_final, "n_errors": n_errors,
+        "n_duplicate_game_pk_skipped": n_duplicates, "n_postponed_reconciled": n_reconciled,
+    }
 
 
 def ingest_season(season: int, run_id: int) -> dict:
