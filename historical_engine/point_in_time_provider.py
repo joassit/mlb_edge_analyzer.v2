@@ -29,6 +29,14 @@ logger = logging.getLogger("mlb_edge_analyzer.historical")
 
 OPEN_METEO_ARCHIVE_BASE = "https://archive-api.open-meteo.com/v1/archive"
 
+# Ventana de climatología para historical_weather() -- +/- 5 días de
+# calendario alrededor del mes-día del juego, promediado sobre los últimos
+# 5 años ANTERIORES al año de as_of_date. Números chicos a propósito: ya
+# es un promedio de por sí (pierde precisión de un día puntual), no hace
+# falta una ventana ancha para estabilizar más de lo necesario.
+WEATHER_WINDOW_DAYS = 5
+WEATHER_CLIMATOLOGY_YEARS = 5
+
 
 def _parse_innings(ip_str: str) -> float:
     """Mismo parseo que data/stats.py::_parse_innings -- '63.1' son 63 y
@@ -78,7 +86,7 @@ class HistoricalStatsProvider:
     def pitcher_rest_as_of(self, pitcher_id: int, as_of_date: str, season: int) -> dict:
         raise NotImplementedError
 
-    def historical_weather(self, lat: float | None, lon: float | None, game_date: str) -> dict:
+    def historical_weather(self, lat: float | None, lon: float | None, game_date: str, as_of_date: str) -> dict:
         raise NotImplementedError
 
     def league_averages_as_of(self, as_of_date: str, season: int) -> dict:
@@ -231,30 +239,65 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             logger.debug(f"[historical] descanso as-of falló para pitcher {pitcher_id} @ {as_of_date}: {e}")
         return result
 
-    def historical_weather(self, lat, lon, game_date):
-        # Open-Meteo ARCHIVE (no forecast) -- el único endpoint capaz de
-        # devolver clima de una fecha ya pasada. data/weather.py usa el
-        # endpoint de forecast a propósito porque solo le importa hoy/
-        # próximos días -- no es reutilizable acá sin dar resultados
-        # incorrectos para fechas viejas.
+    def historical_weather(self, lat, lon, game_date, as_of_date):
+        """
+        Climatología point-in-time -- NUNCA consulta el clima real de
+        game_date (eso rompía la invariante: era la única variable del
+        proveedor que no respetaba un corte de fecha, ver auditoría de
+        look-ahead bias de esta sesión). En vez de eso, promedia la
+        temperatura de la MISMA ventana de calendario (+/- WEATHER_WINDOW_DAYS
+        alrededor del mes-día del juego, ignorando el año) en los
+        WEATHER_CLIMATOLOGY_YEARS años ANTERIORES al año de as_of_date --
+        cada ventana queda enteramente en un año pasado completo, así que
+        es imposible que se solape con as_of_date o con game_date sin
+        necesidad de un chequeo adicional por ventana.
+
+        Pierde la variación puntual de un día específico (una ola de
+        calor real no se refleja) a cambio de una garantía point-in-time
+        absoluta -- documentado a propósito como trade-off, no un
+        descuido: usar el clima REAL de game_date le daba al backtest una
+        certeza sobre el clima del partido que producción en vivo nunca
+        tuvo (ahí se usa un forecast pre-partido, no el registro real).
+        """
         result = {"temp_f": None}
         if lat is None or lon is None or not game_date:
             return result
+
         try:
-            params = {
-                "latitude": lat, "longitude": lon,
-                "start_date": game_date, "end_date": game_date,
-                "hourly": "temperature_2m", "temperature_unit": "fahrenheit", "timezone": "UTC",
-            }
-            resp = session.get(OPEN_METEO_ARCHIVE_BASE, params=params, timeout=INGESTION_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            temps = resp.json().get("hourly", {}).get("temperature_2m", [])
-            if temps:
-                mid = temps[len(temps) // 2]
-                if mid is not None:
-                    result["temp_f"] = float(mid)
-        except (requests.RequestException, KeyError, IndexError, ValueError, TypeError) as e:
-            logger.debug(f"[historical] clima archivado falló para {game_date}: {e}")
+            cutoff_year = date.fromisoformat(as_of_date).year
+            month, day = int(game_date[5:7]), int(game_date[8:10])
+        except ValueError:
+            return result
+
+        temps = []
+        for year_offset in range(1, WEATHER_CLIMATOLOGY_YEARS + 1):
+            yr = cutoff_year - year_offset
+            try:
+                center = date(yr, month, day)
+            except ValueError:
+                continue  # ej. 29 de febrero en un año no bisiesto -- se salta ese año
+            window_start = center - timedelta(days=WEATHER_WINDOW_DAYS)
+            window_end = center + timedelta(days=WEATHER_WINDOW_DAYS)
+            # Defensa adicional (redundante por construcción: window_end
+            # cae en un año < cutoff_year, así que siempre es anterior a
+            # as_of_date) -- se deja explícita para que un cambio futuro
+            # en el rango de años no pueda reintroducir una fuga en silencio.
+            if window_end >= date.fromisoformat(as_of_date):
+                continue
+            try:
+                resp = session.get(OPEN_METEO_ARCHIVE_BASE, params={
+                    "latitude": lat, "longitude": lon,
+                    "start_date": window_start.isoformat(), "end_date": window_end.isoformat(),
+                    "hourly": "temperature_2m", "temperature_unit": "fahrenheit", "timezone": "UTC",
+                }, timeout=INGESTION_REQUEST_TIMEOUT)
+                resp.raise_for_status()
+                vals = resp.json().get("hourly", {}).get("temperature_2m", [])
+                temps.extend(v for v in vals if v is not None)
+            except (requests.RequestException, KeyError, ValueError, TypeError) as e:
+                logger.debug(f"[historical] climatología {yr} falló para {game_date}: {e}")
+
+        if temps:
+            result["temp_f"] = sum(temps) / len(temps)
         return result
 
     def league_averages_as_of(self, as_of_date, season):
