@@ -31,11 +31,20 @@ OPEN_METEO_ARCHIVE_BASE = "https://archive-api.open-meteo.com/v1/archive"
 
 # Ventana de climatología para historical_weather() -- +/- 5 días de
 # calendario alrededor del mes-día del juego, promediado sobre los últimos
-# 5 años ANTERIORES al año de as_of_date. Números chicos a propósito: ya
+# 3 años ANTERIORES al año de as_of_date. Números chicos a propósito: ya
 # es un promedio de por sí (pierde precisión de un día puntual), no hace
 # falta una ventana ancha para estabilizar más de lo necesario.
+#
+# Bajado de 5 a 3 años (cada año = 1 llamada HTTP a Open-Meteo por
+# juego): con 5 años, ingerir una temporada completa con este fix pasó de
+# ~1h54m a ~2h55m (+54%) -- y en una temporada más grande (2431 juegos,
+# similar a 2023/2025) eso empujó la corrida por encima del límite duro
+# de 6h de GitHub Actions para runners hosteados, cortando el job a
+# mitad de camino (confirmado: run 29101406176, cancelado a los 300 min
+# sin terminar). 3 años sigue siendo una muestra climatológica razonable
+# y recorta el costo de clima ~40%.
 WEATHER_WINDOW_DAYS = 5
-WEATHER_CLIMATOLOGY_YEARS = 5
+WEATHER_CLIMATOLOGY_YEARS = 3
 
 
 def _parse_innings(ip_str: str) -> float:
@@ -102,6 +111,17 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
     trae el acumulado completo vigente al momento de la llamada, no
     acotado a una fecha pasada).
     """
+
+    def __init__(self):
+        # Cache de climatología SOLO en memoria de esta instancia -- vive y
+        # muere con una única corrida de ingesta (pipeline.py crea un
+        # MLBStatsAPIProvider() por corrida, nunca lo comparte entre runs).
+        # Ahorra llamadas redundantes en dobles carteleras (juego 1 y
+        # juego 2 del mismo día, mismo parque, mismo as_of_date -- misma
+        # ventana de climatología exacta) sin arriesgar ninguna
+        # contaminación cross-run: es estado de proceso, no un archivo ni
+        # una variable de módulo compartida.
+        self._weather_cache: dict[tuple, float | None] = {}
 
     def _end_date(self, as_of_date: str) -> str:
         cutoff = date.fromisoformat(as_of_date) - timedelta(days=1)
@@ -263,6 +283,14 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         if lat is None or lon is None or not game_date:
             return result
 
+        # Clave de cache: redondeada a 2 decimales (~1km) -- suficiente
+        # para que un doble cartelera (mismo parque exacto, mismo
+        # game_date, mismo as_of_date) pegue en cache sin arriesgar
+        # mezclar dos parques distintos por un redondeo demasiado grosero.
+        cache_key = (round(lat, 2), round(lon, 2), game_date, as_of_date)
+        if cache_key in self._weather_cache:
+            return {"temp_f": self._weather_cache[cache_key]}
+
         try:
             cutoff_year = date.fromisoformat(as_of_date).year
             month, day = int(game_date[5:7]), int(game_date[8:10])
@@ -298,6 +326,7 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
 
         if temps:
             result["temp_f"] = sum(temps) / len(temps)
+        self._weather_cache[cache_key] = result["temp_f"]
         return result
 
     def league_averages_as_of(self, as_of_date, season):

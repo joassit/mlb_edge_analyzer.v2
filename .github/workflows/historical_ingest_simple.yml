@@ -14,7 +14,9 @@ permissions:
 jobs:
   ingest-season:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # 340, no 300 -- ver historical_ingest.yml para el porqué (tope duro
+    # de 6h de GitHub Actions + costo real del fix de climatología).
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v7
 
