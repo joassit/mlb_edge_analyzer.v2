@@ -111,8 +111,11 @@ def test_historical_weather_never_queries_a_window_overlapping_as_of_date_or_lat
 def test_historical_weather_averages_across_climatology_years(monkeypatch):
     """Confirma que sí promedia sobre múltiples años (no solo el más
     reciente) -- valores bien distintos por año deben reflejarse en el
-    promedio final, no en el valor de un solo año."""
-    year_temps = {2019: [50.0], 2020: [60.0], 2021: [70.0], 2022: [80.0], 2023: [90.0]}
+    promedio final, no en el valor de un solo año. WEATHER_CLIMATOLOGY_YEARS=3
+    (bajado de 5 -- ver commit de optimización de costo tras el timeout de
+    la corrida de 2025): solo se consultan los 3 años inmediatamente
+    anteriores al de as_of_date."""
+    year_temps = {2019: [10.0], 2020: [20.0], 2021: [70.0], 2022: [80.0], 2023: [90.0]}
 
     def fake_get(url, params=None, timeout=None):
         yr = int(params["start_date"][:4])
@@ -126,4 +129,33 @@ def test_historical_weather_averages_across_climatology_years(monkeypatch):
     provider = pitp.MLBStatsAPIProvider()
     result = provider.historical_weather(lat=40.0, lon=-74.0, game_date="2024-07-16", as_of_date="2024-07-15")
 
-    assert result["temp_f"] == sum([50, 60, 70, 80, 90]) / 5  # 70.0 -- promedio de los 5 años anteriores
+    # Solo 2021/2022/2023 (los 3 años anteriores a 2024) -- si tocara
+    # 2019/2020 el promedio bajaría mucho (10.0/20.0 están ahí a propósito
+    # para que este test falle fuerte si alguien vuelve a subir el rango).
+    assert result["temp_f"] == sum([70, 80, 90]) / 3  # 80.0
+
+
+def test_historical_weather_caches_within_the_same_provider_instance(monkeypatch):
+    """Dos juegos de un doble cartelera (mismo parque, mismo game_date,
+    mismo as_of_date) no deben repetir las llamadas de climatología -- la
+    segunda consulta debe pegar en cache. Ahorra costo real: fue parte de
+    la optimización tras el timeout de la corrida de 2025."""
+    call_count = {"n": 0}
+
+    def fake_get(url, params=None, timeout=None):
+        call_count["n"] += 1
+        return type("R", (), {
+            "raise_for_status": lambda self: None,
+            "json": lambda self: {"hourly": {"temperature_2m": [75.0]}},
+        })()
+
+    monkeypatch.setattr(pitp, "session", type("S", (), {"get": staticmethod(fake_get)})())
+
+    provider = pitp.MLBStatsAPIProvider()
+    r1 = provider.historical_weather(lat=40.0, lon=-74.0, game_date="2024-07-16", as_of_date="2024-07-15")
+    calls_after_first = call_count["n"]
+    r2 = provider.historical_weather(lat=40.0, lon=-74.0, game_date="2024-07-16", as_of_date="2024-07-15")
+
+    assert calls_after_first == 3  # WEATHER_CLIMATOLOGY_YEARS llamadas reales
+    assert call_count["n"] == calls_after_first  # la segunda vez, cero llamadas nuevas
+    assert r1 == r2 == {"temp_f": 75.0}

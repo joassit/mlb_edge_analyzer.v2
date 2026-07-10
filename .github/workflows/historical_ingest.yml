@@ -19,11 +19,15 @@ permissions:
 jobs:
   ingest-season:
     runs-on: ubuntu-latest
-    # La ingesta completa de una temporada toma ~4.2 horas -- el default de
-    # Actions (360 min) alcanzaría, pero se fija un techo explícito con
-    # margen (300 min = 5h) para no depender del default de la plataforma
-    # ni dejar un job colgado indefinidamente si algo se traba.
-    timeout-minutes: 300
+    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
+    # para jobs en runners hosteados que ningún timeout-minutes puede
+    # superar. Con el fix de climatología point-in-time (WEATHER_
+    # CLIMATOLOGY_YEARS=3 + cache dentro de la corrida, ver
+    # point_in_time_provider.py) una temporada completa toma ~4h30m-4h50m
+    # -- 300 llegó a cortar una corrida real a mitad de camino antes de
+    # bajar de 5 a 3 años de climatología (run 29101406176, temporada
+    # 2025). 340 deja margen real sin acercarse al tope de la plataforma.
+    timeout-minutes: 340
     steps:
       - name: Checkout
         uses: actions/checkout@v7
