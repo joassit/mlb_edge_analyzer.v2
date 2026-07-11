@@ -696,13 +696,20 @@ def get_pending_moneyline_bets(game_date: str) -> list[dict]:
         session.close()
 
 
-def get_predictions_without_result(days_back: int = 5) -> list[dict]:
+def get_predictions_without_result(days_back: int = 21) -> list[dict]:
     """Predicciones de los últimos N días que todavía no tienen resultado
     guardado. Deduplicado por game_pk: como GameAnalysis ahora puede tener
     más de una fila por juego (una por model_version, ver UniqueConstraint
     uq_pred), sin este dedup un mismo juego se procesaría dos veces en
     update_results() -- llamadas duplicadas a la API de resultados y un
-    contador de "actualizados" inflado."""
+    contador de "actualizados" inflado.
+
+    days_back sube de 5 a 21: con 5 días, un juego pospuesto que tarda más
+    de 5 días en reanudarse bajo el mismo game_pk cae permanentemente fuera
+    de esta ventana antes de que get_game_result() alcance a ver su estado
+    Final -- la fila queda huérfana (winner=None) para siempre, sin volver
+    a intentarse. 21 días da margen real para reanudaciones tardías sin
+    dejar de ser una ventana acotada."""
     from datetime import date, timedelta
 
     cutoff = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")

@@ -833,3 +833,56 @@ def test_auto_add_missing_columns_alter_statement_is_ansi_compatible():
     col_type = database.Pick.__table__.columns["favorite_side"].type.compile(dialect=dialect)
     statement = f"ALTER TABLE picks ADD COLUMN favorite_side {col_type}"
     assert statement == "ALTER TABLE picks ADD COLUMN favorite_side VARCHAR"
+
+
+# --- get_predictions_without_result: ventana de 21 días (antes 5) ---
+# Un juego pospuesto que tarda más de 5 días en reanudarse bajo el mismo
+# game_pk quedaba huérfano (winner=None) para siempre, porque
+# update_results() nunca volvía a mirarlo una vez que su game_date caía
+# fuera de la ventana -- ver el hallazgo documentado en el informe técnico
+# del 2026-07-11 (dos filas huérfanas: 07-07 y 07-10).
+
+def test_get_predictions_without_result_default_window_is_21_days(isolated_db):
+    from datetime import date, timedelta
+
+    old_date = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    isolated_db.save_analysis({
+        "game_pk": 111, "game_date": old_date,
+        "away_team": "A", "home_team": "B",
+    })
+
+    pending = isolated_db.get_predictions_without_result()
+
+    assert any(p["game_pk"] == 111 for p in pending)
+
+
+def test_get_predictions_without_result_excludes_games_older_than_window(isolated_db):
+    from datetime import date, timedelta
+
+    too_old_date = (date.today() - timedelta(days=25)).strftime("%Y-%m-%d")
+    isolated_db.save_analysis({
+        "game_pk": 112, "game_date": too_old_date,
+        "away_team": "A", "home_team": "B",
+    })
+
+    pending = isolated_db.get_predictions_without_result()
+
+    assert all(p["game_pk"] != 112 for p in pending)
+
+
+def test_get_predictions_without_result_excludes_games_with_saved_result(isolated_db):
+    from datetime import date, timedelta
+
+    recent_date = (date.today() - timedelta(days=2)).strftime("%Y-%m-%d")
+    isolated_db.save_analysis({
+        "game_pk": 113, "game_date": recent_date,
+        "away_team": "A", "home_team": "B",
+    })
+    isolated_db.save_result({
+        "game_pk": 113, "game_date": recent_date,
+        "home_score": 4, "away_score": 2, "winner": "home", "total_runs": 6,
+    })
+
+    pending = isolated_db.get_predictions_without_result()
+
+    assert all(p["game_pk"] != 113 for p in pending)

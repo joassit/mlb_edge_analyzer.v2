@@ -31,10 +31,14 @@ from db.enums import BetResult, PickResult
 logger = logging.getLogger("mlb_edge_analyzer")
 
 
-def update_results(days_back: int = 5) -> int:
+def update_results(days_back: int = 21) -> int:
     """
     Busca resultados reales para predicciones pasadas que aún no los
     tienen. Devuelve cuántos juegos se actualizaron.
+
+    days_back en 21 (antes 5) -- ver get_predictions_without_result() en
+    db/database.py: una ventana corta deja huérfanos para siempre a los
+    juegos pospuestos que tardan más de esos días en reanudarse.
     """
     pending = get_predictions_without_result(days_back=days_back)
     updated = 0

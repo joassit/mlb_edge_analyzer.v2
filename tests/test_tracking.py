@@ -540,3 +540,20 @@ def test_compute_pick_performance_empty_when_no_picks_settled(tmp_path, monkeypa
 
     assert perf["overall_real"]["n_picks"] == 0
     assert perf["overall_forced"]["n_picks"] == 0
+
+
+def test_update_results_defaults_to_21_day_window(monkeypatch):
+    # Antes en 5 -- un juego pospuesto que tarda más de esos días en
+    # reanudarse bajo el mismo game_pk quedaba huérfano para siempre, ver
+    # el hallazgo del informe técnico del 2026-07-11.
+    captured = {}
+
+    def _fake_get_predictions_without_result(days_back):
+        captured["days_back"] = days_back
+        return []
+
+    monkeypatch.setattr(results_tracker, "get_predictions_without_result", _fake_get_predictions_without_result)
+
+    results_tracker.update_results()
+
+    assert captured["days_back"] == 21
