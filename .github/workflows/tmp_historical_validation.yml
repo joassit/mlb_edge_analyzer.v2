@@ -1,30 +1,24 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- consolida las 4
-# temporadas de historical_engine (2022-2025) en un solo
-# historical_backtest.db. 2023 y 2024 se re-ingieren en este mismo job
-# porque se cargaron ANTES de los fixes de look-ahead bias de esta sesión
-# (roster de bullpen con corte histórico, clima con climatología
-# point-in-time); 2022 (run 29090145151) y 2025 (run 29128736717) ya se
-# ingirieron con el código corregido, así que solo se descargan y
-# fusionan, sin volver a gastar horas de cómputo re-ingiriéndolas. Se
-# retira/reemplaza según haga falta en cada uso.
+# indexado de workflow_dispatch para archivos nuevos) -- consulta rápida
+# del calendario real de MLB Stats API para el 2026-07-08 al 2026-07-11
+# (el egress de este entorno bloquea el acceso directo a statsapi.mlb.com,
+# incluso vía WebFetch). Reemplaza temporalmente el modo "consolidate"
+# mientras esa corrida (run 29139330131, ya despachada con el commit
+# anterior) sigue en curso -- no la afecta, cada run usa el contenido con
+# el que fue despachado. Se restaura a modo consolidate/ingesta según
+# haga falta.
 on:
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  consolidate:
+  check-schedule:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- tope duro de 6h (360 min) de GitHub Actions. Solo
-    # se re-ingieren 2 temporadas acá (2023+2024, ~100-110 min cada una
-    # con el código ya optimizado) en vez de las 4, así que 340 deja
-    # margen amplio sin acercarse al tope.
-    timeout-minutes: 340
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -32,50 +26,4 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install -r requirements.txt
-
-      - name: Descargar artifact ya limpio de 2022 (run 29090145151, post-fixes)
-        uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2022
-          run-id: 29090145151
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: existing_2022
-
-      - name: Descargar artifact ya limpio de 2025 (run 29128736717, post-fixes)
-        uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2025
-          run-id: 29128736717
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: existing_2025
-
-      - run: mv existing_2022/historical_backtest.db ./historical_backtest_2022.db
-      - run: mv existing_2025/historical_backtest.db ./historical_backtest_2025.db
-
-      - name: Re-ingesta real de 2023 (contaminada en su ingesta original, código ya corregido)
-        run: python -m historical_engine.cli season 2023
-
-      - name: Re-ingesta real de 2024 (contaminada en su ingesta original, código ya corregido)
-        run: python -m historical_engine.cli season 2024
-
-      - name: Fusionar 2022 y 2025 (ya limpios) dentro del mismo archivo
-        run: python scratchpad_merge_historical_dbs.py historical_backtest.db historical_backtest_2022.db historical_backtest_2025.db
-
-      - run: |
-          python -c "
-          import sqlite3
-          conn = sqlite3.connect('historical_backtest.db')
-          cur = conn.cursor()
-          print('=== resumen por temporada ===')
-          for row in cur.execute('SELECT season_year, COUNT(*) FROM historical_game GROUP BY season_year ORDER BY season_year'):
-              print(row)
-          "
-
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: historical-backtest-db-consolidated-2022-2025
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+      - run: python scratchpad_check_dodgers_schedule.py
