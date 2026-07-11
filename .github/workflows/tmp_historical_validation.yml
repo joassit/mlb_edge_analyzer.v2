@@ -1,22 +1,21 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- consulta rápida
-# del calendario real de MLB Stats API para el 2026-07-08 al 2026-07-11
-# (el egress de este entorno bloquea el acceso directo a statsapi.mlb.com,
-# incluso vía WebFetch). Reemplaza temporalmente el modo "consolidate"
-# mientras esa corrida (run 29139330131, ya despachada con el commit
-# anterior) sigue en curso -- no la afecta, cada run usa el contenido con
-# el que fue despachado. Se restaura a modo consolidate/ingesta según
-# haga falta.
+# Uso temporal de un path ya registrado en GitHub Actions -- descarga el
+# artifact de producción del 07-10 (mlb-edge-daily-output-29120301133,
+# run que generó las 14 fichas del reporte de hoy) y verifica si el
+# game_pk 823927 (Arizona Diamondbacks @ Los Angeles Dodgers, 2026-07-10)
+# quedó en game_analysis con datos incompletos o directamente ausente.
+# No afecta a la corrida de consolidación en curso (run 29139330131) --
+# cada run usa el contenido del commit con el que fue despachado.
 on:
   workflow_dispatch: {}
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  check-schedule:
+  check-gap:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -26,4 +25,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: python scratchpad_check_dodgers_schedule.py
+      - run: pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: mlb-edge-daily-output-29120301133
+          run-id: 29120301133
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded
+
+      - run: find downloaded -maxdepth 2
+
+      - run: cp downloaded/mlb_edge.db mlb_edge.db
+
+      - run: python scratchpad_check_dodgers_gap.py
