@@ -320,7 +320,7 @@ def test_print_report_does_not_duplicate_existing_market_lines(capsys):
     assert out.count("EV       ->") == 1
 
 
-def test_print_report_pick_line_shows_odds_implied_prob_and_kelly_placeholder(capsys):
+def test_print_report_pick_line_shows_odds_and_implied_prob(capsys):
     rows = [{
         "game_pk": 1, "away_team": "A", "home_team": "B",
         "away_pitcher": None, "home_pitcher": None,
@@ -332,7 +332,6 @@ def test_print_report_pick_line_shows_odds_implied_prob_and_kelly_placeholder(ca
     out = capsys.readouterr().out
     assert "momio -150" in out
     assert "prob. implícita" in out
-    assert "Kelly Dato no disponible" in out
 
 
 def test_print_report_pick_line_shows_dato_no_disponible_without_odds_used(capsys):

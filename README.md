@@ -454,7 +454,7 @@ mlb_edge_analyzer/
 │   └── stats.py              # ERA de pitchers, OPS de equipos/liga
 ├── model/
 │   ├── probability.py        # modelo de probabilidad
-│   └── edge.py                # implied prob, fair odds, edge, Kelly
+│   └── edge.py                # implied prob, fair odds, edge, EV
 ├── db/
 │   └── database.py             # persistencia (SQLite/PostgreSQL)
 ├── reports/
