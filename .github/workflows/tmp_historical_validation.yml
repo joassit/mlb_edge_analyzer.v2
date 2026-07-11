@@ -1,29 +1,30 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- consolida las 4
-# temporadas de historical_engine (2022-2025) en un solo
-# historical_backtest.db. 2023 y 2024 se re-ingieren en este mismo job
-# porque se cargaron ANTES de los fixes de look-ahead bias de esta sesión
-# (roster de bullpen con corte histórico, clima con climatología
-# point-in-time); 2022 (run 29090145151) y 2025 (run 29128736717) ya se
-# ingirieron con el código corregido, así que solo se descargan y
-# fusionan, sin volver a gastar horas de cómputo re-ingiriéndolas. Se
-# retira/reemplaza según haga falta en cada uso.
+# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
+# real de una temporada (un job = una temporada, mismo patrón que 2022 y
+# 2025, que sí terminaron bien). El intento anterior de meter 2023+2024
+# en un solo job se canceló: 2023 sola tardó 207 min (207 vs. los ~100
+# esperados) y 2024 quedó cortada por el timeout de 340 min del job
+# completo. Se despachan 2023 y 2024 como corridas independientes en
+# paralelo para que ninguna dependa del tiempo que tarde la otra.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Año de temporada a ingerir (ej. 2023)'
+        required: true
+        type: string
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  consolidate:
+  ingest-season:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- tope duro de 6h (360 min) de GitHub Actions. Solo
-    # se re-ingieren 2 temporadas acá (2023+2024, ~100-110 min cada una
-    # con el código ya optimizado) en vez de las 4, así que 340 deja
-    # margen amplio sin acercarse al tope.
+    # 340 min, no 300 -- tope duro de 6h (360 min) de GitHub Actions.
+    # 2023 sola ya tardó 207 min con el código optimizado -- 340 sigue
+    # siendo el máximo margen real disponible sin acercarse al tope.
     timeout-minutes: 340
     steps:
       - uses: actions/checkout@v7
@@ -34,48 +35,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Descargar artifact ya limpio de 2022 (run 29090145151, post-fixes)
-        uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2022
-          run-id: 29090145151
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: existing_2022
-
-      - name: Descargar artifact ya limpio de 2025 (run 29128736717, post-fixes)
-        uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2025
-          run-id: 29128736717
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: existing_2025
-
-      - run: mv existing_2022/historical_backtest.db ./historical_backtest_2022.db
-      - run: mv existing_2025/historical_backtest.db ./historical_backtest_2025.db
-
-      - name: Re-ingesta real de 2023 (contaminada en su ingesta original, código ya corregido)
-        run: python -m historical_engine.cli season 2023
-
-      - name: Re-ingesta real de 2024 (contaminada en su ingesta original, código ya corregido)
-        run: python -m historical_engine.cli season 2024
-
-      - name: Fusionar 2022 y 2025 (ya limpios) dentro del mismo archivo
-        run: python scratchpad_merge_historical_dbs.py historical_backtest.db historical_backtest_2022.db historical_backtest_2025.db
-
-      - run: |
-          python -c "
-          import sqlite3
-          conn = sqlite3.connect('historical_backtest.db')
-          cur = conn.cursor()
-          print('=== resumen por temporada ===')
-          for row in cur.execute('SELECT season_year, COUNT(*) FROM historical_game GROUP BY season_year ORDER BY season_year'):
-              print(row)
-          "
+      - run: python -m historical_engine.cli season ${{ inputs.season }}
 
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: historical-backtest-db-consolidated-2022-2025
+          name: historical-backtest-db-${{ inputs.season }}
           path: historical_backtest.db
           if-no-files-found: warn
           retention-days: 30
