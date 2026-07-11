@@ -396,7 +396,7 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
                       f"(momio {_format_odds(odds_used)}, prob. implícita {implied_txt}, "
                       f"prob. mercado usada para el edge {market_prob_txt} (sin vig si hay "
                       f"consenso en vivo, si no implícita del momio), "
-                      f"edge {p['edge']:+.1%}, EV {p['ev']:+.2f}, Kelly {_DATO_NO_DISPONIBLE})"
+                      f"edge {p['edge']:+.1%}, EV {p['ev']:+.2f})"
                       f"{tag}{source_tag}{discrepancy_tag}")
 
         print("-" * 70)

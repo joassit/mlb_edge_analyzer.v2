@@ -1,7 +1,7 @@
 import pytest
 
 from model.edge import (
-    implied_prob, fair_odds, edge, kelly_fraction, expected_value, no_vig_probs, market_favorite,
+    implied_prob, fair_odds, edge, expected_value, no_vig_probs, market_favorite,
     power_devig,
 )
 
@@ -32,14 +32,6 @@ def test_fair_odds_rejects_invalid_probabilities():
 def test_edge_positive_when_model_more_confident_than_market():
     assert edge(0.60, 0.55) > 0
     assert edge(0.50, 0.55) < 0
-
-
-def test_kelly_fraction_is_non_negative():
-    assert kelly_fraction(model_p=0.5, odds=100, fraction=0.25) >= 0
-
-
-def test_kelly_fraction_positive_when_real_edge_exists():
-    assert kelly_fraction(model_p=0.65, odds=100, fraction=0.25) > 0
 
 
 def test_expected_value_positive_with_real_edge():

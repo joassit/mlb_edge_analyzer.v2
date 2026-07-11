@@ -122,20 +122,6 @@ def market_favorite(away_team: str, home_team: str, away_prob: float, home_prob:
     return {"team": home_team, "side": "home", "prob": home_prob, "pickem": False}
 
 
-def kelly_fraction(model_p: float, odds: float, fraction: float = 0.25) -> float:
-    """
-    Tamaño de apuesta sugerido como fracción del bankroll, usando Kelly
-    fraccionado (fraction=0.25 = 1/4 Kelly, más conservador que Kelly completo).
-    Devuelve 0 si no hay edge positivo.
-
-    No conectado al pipeline todavía (uso futuro declarado).
-    """
-    b = (100 / abs(odds)) if odds < 0 else (odds / 100)  # ganancia neta por unidad apostada
-    q = 1 - model_p
-    full_kelly = (b * model_p - q) / b
-    return max(0.0, full_kelly * fraction)
-
-
 # Alias -- "devig_two_way" y "no_vig_probs" son la misma operación (remover
 # el vig de dos cuotas del mismo mercado). Se expone el nombre alternativo
 # para el trabajo futuro de calibración/CLV sin duplicar la lógica.
