@@ -1,21 +1,30 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions -- baja el
-# artifact consolidado de las 4 temporadas (run 29166468139,
-# historical-backtest-db-consolidated-2022-2025) y corre validate +
-# compare por temporada, drift por motor a través de las 4, train y el
-# reporte histórico final (fase 2 completa).
+# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
+# indexado de workflow_dispatch para archivos nuevos) -- descarga el
+# artifact de la corrida de PRODUCCIÓN de hoy (mlb_edge.db + reports/logs)
+# y extrae todos los datos oficiales para el Technical Performance Report
+# estandarizado de hoy. Se retira/reemplaza según haga falta en cada uso.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      artifact_name:
+        description: 'Nombre del artifact de producción a descargar'
+        required: true
+        type: string
+      source_run_id:
+        description: 'run_id del daily-pipeline que generó ese artifact'
+        required: true
+        type: string
 
 permissions:
   contents: read
   actions: read
 
 jobs:
-  phase2-analysis:
+  extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -27,19 +36,14 @@ jobs:
 
       - uses: actions/download-artifact@v6
         with:
-          name: historical-backtest-db-consolidated-2022-2025
-          run-id: 29166468139
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.source_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: downloaded
 
-      - run: cp downloaded/historical_backtest.db historical_backtest.db
+      - run: find downloaded -maxdepth 2
 
-      - run: python scratchpad_phase2_analysis.py
+      - name: Copy mlb_edge.db to expected path
+        run: cp downloaded/mlb_edge.db mlb_edge.db
 
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: historical-report-2022-2025
-          path: historical_reports/
-          if-no-files-found: warn
-          retention-days: 30
+      - run: python scratchpad_extract_today_report_data.py
