@@ -1,12 +1,15 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions -- descarga el
-# artifact de producción del 07-10 (mlb-edge-daily-output-29120301133,
-# run que generó las 14 fichas del reporte de hoy) y verifica si el
-# game_pk 823927 (Arizona Diamondbacks @ Los Angeles Dodgers, 2026-07-10)
-# quedó en game_analysis con datos incompletos o directamente ausente.
-# No afecta a la corrida de consolidación en curso (run 29139330131) --
-# cada run usa el contenido del commit con el que fue despachado.
+# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
+# indexado de workflow_dispatch para archivos nuevos) -- consolida las 4
+# temporadas de historical_engine (2022-2025) en un solo
+# historical_backtest.db. 2023 y 2024 se re-ingieren en este mismo job
+# porque se cargaron ANTES de los fixes de look-ahead bias de esta sesión
+# (roster de bullpen con corte histórico, clima con climatología
+# point-in-time); 2022 (run 29090145151) y 2025 (run 29128736717) ya se
+# ingirieron con el código corregido, así que solo se descargan y
+# fusionan, sin volver a gastar horas de cómputo re-ingiriéndolas. Se
+# retira/reemplaza según haga falta en cada uso.
 on:
   workflow_dispatch: {}
 
@@ -15,9 +18,13 @@ permissions:
   actions: read
 
 jobs:
-  check-gap:
+  consolidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 340 min, no 300 -- tope duro de 6h (360 min) de GitHub Actions. Solo
+    # se re-ingieren 2 temporadas acá (2023+2024, ~100-110 min cada una
+    # con el código ya optimizado) en vez de las 4, así que 340 deja
+    # margen amplio sin acercarse al tope.
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v7
 
@@ -27,15 +34,48 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - uses: actions/download-artifact@v6
+      - name: Descargar artifact ya limpio de 2022 (run 29090145151, post-fixes)
+        uses: actions/download-artifact@v6
         with:
-          name: mlb-edge-daily-output-29120301133
-          run-id: 29120301133
+          name: historical-backtest-db-2022
+          run-id: 29090145151
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: downloaded
+          path: existing_2022
 
-      - run: find downloaded -maxdepth 2
+      - name: Descargar artifact ya limpio de 2025 (run 29128736717, post-fixes)
+        uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2025
+          run-id: 29128736717
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: existing_2025
 
-      - run: cp downloaded/mlb_edge.db mlb_edge.db
+      - run: mv existing_2022/historical_backtest.db ./historical_backtest_2022.db
+      - run: mv existing_2025/historical_backtest.db ./historical_backtest_2025.db
 
-      - run: python scratchpad_check_dodgers_gap.py
+      - name: Re-ingesta real de 2023 (contaminada en su ingesta original, código ya corregido)
+        run: python -m historical_engine.cli season 2023
+
+      - name: Re-ingesta real de 2024 (contaminada en su ingesta original, código ya corregido)
+        run: python -m historical_engine.cli season 2024
+
+      - name: Fusionar 2022 y 2025 (ya limpios) dentro del mismo archivo
+        run: python scratchpad_merge_historical_dbs.py historical_backtest.db historical_backtest_2022.db historical_backtest_2025.db
+
+      - run: |
+          python -c "
+          import sqlite3
+          conn = sqlite3.connect('historical_backtest.db')
+          cur = conn.cursor()
+          print('=== resumen por temporada ===')
+          for row in cur.execute('SELECT season_year, COUNT(*) FROM historical_game GROUP BY season_year ORDER BY season_year'):
+              print(row)
+          "
+
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-backtest-db-consolidated-2022-2025
+          path: historical_backtest.db
+          if-no-files-found: warn
+          retention-days: 30
