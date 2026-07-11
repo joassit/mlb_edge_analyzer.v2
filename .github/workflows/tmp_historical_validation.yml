@@ -1,10 +1,10 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions -- fusiona los
-# 4 artifacts de temporada YA ingeridos por separado (2022 run
-# 29090145151, 2023 run 29160806554, 2024 run 29160809065, 2025 run
-# 29128736717 -- las 4 con el código ya corregido) en un solo
-# historical_backtest.db, sin re-ingerir nada.
+# Uso temporal de un path ya registrado en GitHub Actions -- baja el
+# artifact consolidado de las 4 temporadas (run 29166468139,
+# historical-backtest-db-consolidated-2022-2025) y corre validate +
+# compare por temporada, drift por motor a través de las 4, train y el
+# reporte histórico final (fase 2 completa).
 on:
   workflow_dispatch: {}
 
@@ -13,9 +13,9 @@ permissions:
   actions: read
 
 jobs:
-  merge:
+  phase2-analysis:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -27,49 +27,19 @@ jobs:
 
       - uses: actions/download-artifact@v6
         with:
-          name: historical-backtest-db-2022
-          run-id: 29090145151
+          name: historical-backtest-db-consolidated-2022-2025
+          run-id: 29166468139
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: s2022
+          path: downloaded
 
-      - uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2023
-          run-id: 29160806554
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: s2023
+      - run: cp downloaded/historical_backtest.db historical_backtest.db
 
-      - uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2024
-          run-id: 29160809065
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: s2024
-
-      - uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-2025
-          run-id: 29128736717
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: s2025
-
-      - run: cp s2022/historical_backtest.db historical_backtest.db
-      - run: python scratchpad_merge_historical_dbs.py historical_backtest.db s2023/historical_backtest.db s2024/historical_backtest.db s2025/historical_backtest.db
-
-      - run: |
-          python -c "
-          import sqlite3
-          conn = sqlite3.connect('historical_backtest.db')
-          cur = conn.cursor()
-          print('=== resumen por temporada ===')
-          for row in cur.execute('SELECT season_year, COUNT(*) FROM historical_game GROUP BY season_year ORDER BY season_year'):
-              print(row)
-          "
+      - run: python scratchpad_phase2_analysis.py
 
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: historical-backtest-db-consolidated-2022-2025
-          path: historical_backtest.db
+          name: historical-report-2022-2025
+          path: historical_reports/
           if-no-files-found: warn
           retention-days: 30
