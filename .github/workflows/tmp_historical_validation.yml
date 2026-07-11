@@ -1,31 +1,21 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada (un job = una temporada, mismo patrón que 2022 y
-# 2025, que sí terminaron bien). El intento anterior de meter 2023+2024
-# en un solo job se canceló: 2023 sola tardó 207 min (207 vs. los ~100
-# esperados) y 2024 quedó cortada por el timeout de 340 min del job
-# completo. Se despachan 2023 y 2024 como corridas independientes en
-# paralelo para que ninguna dependa del tiempo que tarde la otra.
+# Uso temporal de un path ya registrado en GitHub Actions -- fusiona los
+# 4 artifacts de temporada YA ingeridos por separado (2022 run
+# 29090145151, 2023 run 29160806554, 2024 run 29160809065, 2025 run
+# 29128736717 -- las 4 con el código ya corregido) en un solo
+# historical_backtest.db, sin re-ingerir nada.
 on:
-  workflow_dispatch:
-    inputs:
-      season:
-        description: 'Año de temporada a ingerir (ej. 2023)'
-        required: true
-        type: string
+  workflow_dispatch: {}
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  ingest-season:
+  merge:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- tope duro de 6h (360 min) de GitHub Actions.
-    # 2023 sola ya tardó 207 min con el código optimizado -- 340 sigue
-    # siendo el máximo margen real disponible sin acercarse al tope.
-    timeout-minutes: 340
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -35,12 +25,51 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2022
+          run-id: 29090145151
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: s2022
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2023
+          run-id: 29160806554
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: s2023
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2024
+          run-id: 29160809065
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: s2024
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2025
+          run-id: 29128736717
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: s2025
+
+      - run: cp s2022/historical_backtest.db historical_backtest.db
+      - run: python scratchpad_merge_historical_dbs.py historical_backtest.db s2023/historical_backtest.db s2024/historical_backtest.db s2025/historical_backtest.db
+
+      - run: |
+          python -c "
+          import sqlite3
+          conn = sqlite3.connect('historical_backtest.db')
+          cur = conn.cursor()
+          print('=== resumen por temporada ===')
+          for row in cur.execute('SELECT season_year, COUNT(*) FROM historical_game GROUP BY season_year ORDER BY season_year'):
+              print(row)
+          "
 
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: historical-backtest-db-${{ inputs.season }}
+          name: historical-backtest-db-consolidated-2022-2025
           path: historical_backtest.db
           if-no-files-found: warn
           retention-days: 30
