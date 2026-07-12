@@ -126,6 +126,11 @@ class GameAnalysis(Base):
     away_ev = Column(Float, nullable=True)
     home_ev = Column(Float, nullable=True)
     flag_review = Column(Boolean, nullable=True, default=False)
+    # Confianza del heurístico en su favorito >= config.HIGH_CONFIDENCE_THRESHOLD
+    # -- la "lista corta" de máxima efectividad esperada (ver evidencia de 4
+    # temporadas en config.py). Independiente de flag_review: no requiere
+    # cuota de mercado ni edge.
+    high_confidence = Column(Boolean, nullable=True, default=False)
     decision = Column(String, nullable=True)  # tu decisión final, texto libre
     model_version = Column(String, default=MODEL_VERSION)
     git_commit = Column(String, nullable=True)

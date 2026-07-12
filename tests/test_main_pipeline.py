@@ -317,6 +317,43 @@ def test_analyze_today_does_not_flag_review_without_market_odds(monkeypatch):
     assert row["flag_review"] is False
 
 
+def test_analyze_today_high_confidence_follows_heuristic_threshold(monkeypatch):
+    # La señal debe reflejar EXACTAMENTE si la confianza del heurístico en
+    # su favorito (max(away_model_prob, home_model_prob)) alcanza
+    # HIGH_CONFIDENCE_THRESHOLD -- se verifica la coherencia interna con las
+    # probabilidades reales del propio row, sin acoplarse a un valor
+    # numérico específico del fixture.
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+
+    results = main.analyze_today()
+    row = results[0]
+
+    expected = max(row["away_model_prob"], row["home_model_prob"]) >= main.HIGH_CONFIDENCE_THRESHOLD
+    assert row["high_confidence"] is expected
+
+
+def test_analyze_today_high_confidence_true_when_threshold_forced_low(monkeypatch):
+    # Con el umbral forzado a 0.50, cualquier juego (todo favorito tiene
+    # confianza >= 0.5 por definición) debe quedar marcado -- prueba que el
+    # flag realmente lee el umbral y no un booleano fijo.
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "HIGH_CONFIDENCE_THRESHOLD", 0.50)
+
+    results = main.analyze_today()
+    assert results[0]["high_confidence"] is True
+
+
+def test_analyze_today_high_confidence_false_when_threshold_forced_high(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(main, "MARKET_ODDS", {})
+    monkeypatch.setattr(main, "HIGH_CONFIDENCE_THRESHOLD", 0.99)
+
+    results = main.analyze_today()
+    assert results[0]["high_confidence"] is False
+
+
 def _clear_manual_markets(monkeypatch):
     monkeypatch.setattr(main, "MARKET_ODDS", {})
     monkeypatch.setattr(main, "MARKET_SPREADS", {})

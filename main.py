@@ -39,6 +39,7 @@ from tracking.results_tracker import (
 )
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
+    HIGH_CONFIDENCE_THRESHOLD,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
     PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION, DATABASE_URL,
     MIN_LIQUIDATED_PICKS_FOR_CALIBRATION,
@@ -488,6 +489,14 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         and max(abs(away_edge), abs(home_edge)) >= REVIEW_EDGE_THRESHOLD
     )
 
+    # Señal de confianza alta -- SOLO mira la confianza del heurístico en su
+    # favorito, sin exigir cuota de mercado (a diferencia de flag_review):
+    # mide qué tan seguro está el modelo del resultado, no si hay edge. Ver
+    # config.HIGH_CONFIDENCE_THRESHOLD para la evidencia histórica que
+    # respalda usar el heurístico (y no Skellam/NegBin, sobreconfiados) y
+    # este umbral específico.
+    high_confidence = bool(max(away_model_prob, home_model_prob) >= HIGH_CONFIDENCE_THRESHOLD)
+
     # Picks recomendados — hasta 1 por mercado (moneyline/run_line/
     # totals), como máximo MAX_PICKS_PER_GAME por partido. Un mercado
     # sin cuotas cargadas simplemente no compite (no hay obligación de
@@ -589,6 +598,7 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "away_ev": away_ev,
         "home_ev": home_ev,
         "flag_review": flag_review,
+        "high_confidence": high_confidence,
         "model_version": MODEL_VERSION,
         "git_commit": get_git_commit(),
         # Claves internas — run_pipeline() las extrae antes de guardar

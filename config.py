@@ -142,6 +142,21 @@ ODDS_API_KEYS = resolve_odds_api_keys()
 # primero.
 REVIEW_EDGE_THRESHOLD = float(os.getenv("REVIEW_EDGE_THRESHOLD", "0.03"))
 
+# --- Señal de confianza alta (lista corta de máxima efectividad esperada) ---
+# Un juego se marca high_confidence cuando la confianza del HEURÍSTICO en su
+# favorito (max(prob, 1-prob)) alcanza este umbral. Por qué el heurístico y
+# no Skellam/NegBin: el análisis de selectividad sobre las 4 temporadas
+# históricas (2022-2025, 8,852 juegos con resultado real, 2026-07-12) mostró
+# que el heurístico es el ÚNICO modelo cuya confianza alta es creíble --
+# con confianza >= 0.575 acierta 66.7% (n=735, estable 64-70% en las 4
+# temporadas), mientras que Skellam declarando >= 0.70 acierta apenas 59.5%
+# (n=824, sobreconfianza estructural). Umbrales más exigentes que 0.575
+# cruzan 70% de acierto solo con muestras minúsculas e inestables entre
+# temporadas (n=76 en 4 años) -- no son un punto de operación confiable.
+# Es una preselección informativa para el reporte, nunca una apuesta
+# automática (mismo espíritu que flag_review).
+HIGH_CONFIDENCE_THRESHOLD = float(os.getenv("HIGH_CONFIDENCE_THRESHOLD", "0.575"))
+
 # --- Picks recomendados (moneyline / run_line / totals) ---
 # Un candidato es "viable" si su EV o su edge superan estos umbrales
 # (criterio OR, no AND). Si ningún mercado es viable y FORCE_AT_LEAST_ONE_PICK
