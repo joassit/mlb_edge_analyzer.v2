@@ -13,7 +13,9 @@ import historical_engine.db as historical_db
 from historical_engine.training import (
     propose_dispersion_recalibration,
     propose_runs_projection_recalibration,
+    propose_starter_weight_recalibration,
     _recompute_mu_with_candidate,
+    _raw_inputs_for_starter_weight_candidate,
 )
 
 
@@ -231,3 +233,98 @@ def test_recompute_mu_with_candidate_reproduces_baseline_exactly():
     home_mu, away_mu = _recompute_mu_with_candidate(analysis, park_factor_weight=1.0, weather_correction=0.0)
     assert home_mu == pytest.approx(home_proj_runs)
     assert away_mu == pytest.approx(away_proj_runs)
+
+
+# --- propose_starter_weight_recalibration (STARTER_WEIGHT) ---
+#
+# A diferencia de los dos barridos anteriores, aquí NO se congelan
+# home_proj_runs/away_proj_runs -- se siembran ERA/OPS/bullpen crudos y se
+# recalcula con predict_from_raw_inputs() real. Abridor y bullpen con ERA
+# bien distintos (2.50 vs 5.50) para que el peso SÍ importe.
+
+def _seeded_with_raw_inputs(tmp_path, name):
+    engine = create_engine(f"sqlite:///{tmp_path}/{name}.db")
+    historical_db.HistoricalBase.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    games = [(1, "home"), (2, "away"), (3, "home"), (4, "home"), (5, "away"), (6, "away")]
+    for game_pk, winner in games:
+        session.add(historical_db.HistoricalGame(
+            run_id=1, game_pk=game_pk, game_date="2024-05-01", season_year=2024,
+            away_team="A", home_team="B", winner=winner,
+            home_score=5 if winner == "home" else 2, away_score=2 if winner == "home" else 5,
+        ))
+        session.add(historical_db.HistoricalAnalysis(
+            run_id=1, game_pk=game_pk, game_date="2024-05-01", season_year=2024, as_of_date="2024-04-30",
+            away_era=2.50, home_era=3.00, away_bullpen_era=5.50, home_bullpen_era=5.00,
+            away_ops=0.740, home_ops=0.760, park_factor=1.0, temp_f=70.0,
+        ))
+    session.commit()
+    session.close()
+    return Session
+
+
+def test_starter_weight_recalibration_never_modifies_production_config(tmp_path):
+    original = production_config.STARTER_WEIGHT
+
+    Session = _seeded_with_raw_inputs(tmp_path, "starter_weight_no_mutation")
+    propose_starter_weight_recalibration(
+        season_year=2024, run_id=1, candidate_values=[0.3, 0.9], session_factory=Session,
+    )
+
+    assert production_config.STARTER_WEIGHT == original
+
+
+def test_starter_weight_recalibration_always_marks_applied_false(tmp_path):
+    Session = _seeded_with_raw_inputs(tmp_path, "starter_weight_applied_false")
+    result = propose_starter_weight_recalibration(
+        season_year=2024, run_id=1, candidate_values=[0.3, 0.9], session_factory=Session,
+    )
+    assert result["applied"] is False
+
+    session = Session()
+    sims = session.query(historical_db.HistoricalSimulation).all()
+    session.close()
+    assert len(sims) > 0
+    assert all(sim.applied is False for sim in sims)
+
+
+def test_starter_weight_recalibration_returns_a_proposal_per_candidate_value(tmp_path):
+    Session = _seeded_with_raw_inputs(tmp_path, "starter_weight_candidates")
+    candidates = [0.3, 0.5, 0.9]
+    result = propose_starter_weight_recalibration(
+        season_year=2024, run_id=1, candidate_values=candidates, session_factory=Session,
+    )
+    assert len(result["proposals"]) == 3
+    assert {p["param_value"] for p in result["proposals"]} == set(candidates)
+
+
+def test_starter_weight_recalibration_uses_real_predict_from_raw_inputs(tmp_path):
+    # ERA de abridor (2.5-3.0) muy distinto del bullpen (5.0-5.5) -- si
+    # STARTER_WEIGHT no afectara el cálculo, todos los candidatos darían el
+    # mismo Brier.
+    Session = _seeded_with_raw_inputs(tmp_path, "starter_weight_real_function")
+    result = propose_starter_weight_recalibration(
+        season_year=2024, run_id=1, candidate_values=[0.1, 0.95], session_factory=Session,
+    )
+    briers = [p["brier_score"] for p in result["proposals"]]
+    assert briers[0] != briers[1]
+
+
+def test_raw_inputs_for_starter_weight_candidate_returns_none_without_required_field():
+    analysis = historical_db.HistoricalAnalysis(
+        run_id=1, game_pk=1, game_date="2024-05-01", season_year=2024, as_of_date="2024-04-30",
+        away_era=2.5, home_era=3.0, away_ops=0.740, home_ops=0.760,
+        away_bullpen_era=None, home_bullpen_era=5.00, park_factor=1.0,
+    )
+    assert _raw_inputs_for_starter_weight_candidate(analysis, 0.65) is None
+
+
+def test_raw_inputs_for_starter_weight_candidate_sets_the_candidate_weight():
+    analysis = historical_db.HistoricalAnalysis(
+        run_id=1, game_pk=1, game_date="2024-05-01", season_year=2024, as_of_date="2024-04-30",
+        away_era=2.5, home_era=3.0, away_ops=0.740, home_ops=0.760,
+        away_bullpen_era=5.50, home_bullpen_era=5.00, park_factor=1.0,
+    )
+    raw = _raw_inputs_for_starter_weight_candidate(analysis, 0.42)
+    assert raw["starter_weight"] == 0.42
