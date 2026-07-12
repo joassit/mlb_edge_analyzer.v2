@@ -14,8 +14,10 @@ pasado con k=X" se calcule con la matemática EXACTA de producción, nunca
 una reimplementación paralela que pudiera divergir.
 """
 
-from config import NEGBIN_DISPERSION
+from config import NEGBIN_DISPERSION, PARK_FACTOR_WEIGHT, WEATHER_CORRECTION
 from model.negbin_model import negbin_win_prob
+from model.runs_projection import HOME_FIELD_RUNS_BONUS
+from model.skellam_model import skellam_win_prob
 
 from historical_engine.db import HistoricalAnalysis, HistoricalGame, HistoricalSimulation, SessionLocal
 from historical_engine.stats_utils import brier_score
@@ -97,4 +99,129 @@ def propose_dispersion_recalibration(
         "best_candidate": best,
         "applied": False,
         "note": "Ninguna propuesta se aplicó a producción -- config.NEGBIN_DISPERSION no fue modificado.",
+    }
+
+
+def _recompute_mu_with_candidate(
+    a: HistoricalAnalysis, park_factor_weight: float, weather_correction: float,
+) -> tuple[float | None, float | None]:
+    """
+    Deriva (home_mu, away_mu) bajo un `park_factor_weight`/`weather_correction`
+    candidato, por inversión algebraica EXACTA de
+    model/runs_projection.py::project_team_runs sobre home_proj_runs/
+    away_proj_runs ya congelados en HistoricalAnalysis.
+
+    Por qué invertir en vez de recalcular desde cero con project_team_runs():
+    esa función necesita league_ops/league_era point-in-time, que SÍ se usan
+    al ingerir (historical_engine/pipeline.py) pero NO se persisten por fila
+    -- recalcular con el default de config.py en vez del valor real de esa
+    fecha introduciría un error sistemático. La inversión evita el problema
+    por completo: como la ingesta corrió con PARK_FACTOR_WEIGHT=1.0 y
+    WEATHER_CORRECTION=0.0 (neutralizados, ver pipeline.py), hoy
+    weighted_park_factor == park_factor y weather_impact == 0 EXACTOS, así
+    que "base" (todo lo que no es park factor/clima/bono de local) se
+    despeja sin aproximar nada, sin importar qué league_ops/era se usó.
+
+    None si falta park_factor point-in-time para este juego (no se puede
+    invertir sin él).
+    """
+    if not a.park_factor or a.home_proj_runs is None or a.away_proj_runs is None:
+        return None, None
+
+    weather_impact = weather_correction if (a.temp_f and a.temp_f > 85) else 0.0
+    weighted_park_factor = 1.0 + (a.park_factor - 1.0) * park_factor_weight
+
+    base_away = a.away_proj_runs / a.park_factor
+    away_mu = max(base_away * weighted_park_factor * (1 + weather_impact), 0.3)
+
+    base_home = (a.home_proj_runs - HOME_FIELD_RUNS_BONUS) / a.park_factor
+    home_mu = max(base_home * weighted_park_factor * (1 + weather_impact) + HOME_FIELD_RUNS_BONUS, 0.3)
+
+    return home_mu, away_mu
+
+
+def propose_runs_projection_recalibration(
+    season_year: int, run_id: int, param_name: str, candidate_values: list[float],
+    session_factory=None,
+) -> dict:
+    """
+    Compara el Brier score de Skellam con PARK_FACTOR_WEIGHT/WEATHER_CORRECTION
+    vigentes (baseline -- ambos NEUTRALIZADOS hoy: 1.0 y 0.0 respectivamente,
+    ver config.py) contra valores candidatos, recalculando home_mu/away_mu
+    por juego vía _recompute_mu_with_candidate() sobre el histórico ya
+    reconstruido de `season_year`. Reutiliza model.skellam_model.skellam_win_prob
+    (la misma función de producción) para convertir mu a probabilidad --
+    nunca una reimplementación paralela.
+
+    Mismo criterio que propose_dispersion_recalibration: guarda una fila por
+    candidato en HistoricalSimulation con `applied=False` siempre. NUNCA
+    modifica config.py -- aplicar un cambio es una decisión manual aparte.
+    """
+    if param_name not in ("PARK_FACTOR_WEIGHT", "WEATHER_CORRECTION"):
+        raise ValueError(f"param_name debe ser 'PARK_FACTOR_WEIGHT' o 'WEATHER_CORRECTION', no {param_name!r}")
+
+    baseline_value = PARK_FACTOR_WEIGHT if param_name == "PARK_FACTOR_WEIGHT" else WEATHER_CORRECTION
+    session_factory = session_factory or SessionLocal
+    session = session_factory()
+    try:
+        analyses = session.query(HistoricalAnalysis).filter_by(season_year=season_year).all()
+        outcomes_by_game = _actual_outcomes_by_game(run_id, session)
+
+        def _brier_for(value):
+            park_weight = value if param_name == "PARK_FACTOR_WEIGHT" else PARK_FACTOR_WEIGHT
+            weather_corr = value if param_name == "WEATHER_CORRECTION" else WEATHER_CORRECTION
+            probs, actuals = [], []
+            for a in analyses:
+                winner = outcomes_by_game.get(a.game_pk)
+                if winner is None:
+                    continue
+                home_mu, away_mu = _recompute_mu_with_candidate(a, park_weight, weather_corr)
+                if home_mu is None:
+                    continue
+                probs.append(skellam_win_prob(home_mu, away_mu))
+                actuals.append(1 if winner == "home" else 0)
+            return brier_score(probs, actuals), len(probs)
+
+        baseline_brier, baseline_n = _brier_for(baseline_value)
+
+        proposals = []
+        for value in candidate_values:
+            candidate_brier, n = _brier_for(value)
+            improved = (
+                candidate_brier is not None and baseline_brier is not None and candidate_brier < baseline_brier
+            )
+            sim = HistoricalSimulation(
+                run_id=run_id, season_year=season_year, param_name=param_name,
+                baseline_value=baseline_value, proposed_value=value,
+                based_on_metric="brier_score", baseline_metric_value=baseline_brier,
+                proposed_metric_value=candidate_brier, improved=improved,
+                notes=(
+                    f"n={n} juegos con resultado real en {season_year}. Skellam recalculado con "
+                    f"_recompute_mu_with_candidate() (inversión algebraica exacta de "
+                    f"project_team_runs) -- propuesta generada por historical_engine/training.py, "
+                    f"NO aplicada automáticamente, requiere edición manual de config.py y su "
+                    f"propia revisión."
+                ),
+                applied=False,
+            )
+            session.add(sim)
+            proposals.append({
+                "param_value": value, "brier_score": candidate_brier, "n_sample": n, "improved_over_baseline": improved,
+            })
+        session.commit()
+    finally:
+        session.close()
+
+    best = min(
+        (p for p in proposals if p["brier_score"] is not None),
+        key=lambda p: p["brier_score"], default=None,
+    )
+
+    return {
+        "season_year": season_year, "param_name": param_name,
+        "baseline_value": baseline_value, "baseline_brier_score": baseline_brier, "baseline_n_sample": baseline_n,
+        "proposals": proposals,
+        "best_candidate": best,
+        "applied": False,
+        "note": f"Ninguna propuesta se aplicó a producción -- config.{param_name} no fue modificado.",
     }
