@@ -134,3 +134,44 @@ def test_predict_from_raw_inputs_unaffected_by_market_no_vig_power():
     new_result = predict_from_raw_inputs(raw_with_power_devig)
 
     assert old_result == new_result
+
+
+def test_predict_from_raw_inputs_applies_skellam_shrinkage_from_frozen_alpha():
+    # La contracción hacia 0.5 debe leer el alpha CONGELADO en el snapshot:
+    # con alpha=1.0 (identidad) se recupera la probabilidad cruda, y la
+    # calibrada debe ser exactamente 0.5 + alpha*(cruda - 0.5).
+    raw_prob = predict_from_raw_inputs(_base_raw_inputs(skellam_shrinkage_alpha=1.0))["home_skellam_prob"]
+    calibrated = predict_from_raw_inputs(_base_raw_inputs(skellam_shrinkage_alpha=0.5))["home_skellam_prob"]
+
+    assert abs(calibrated - (0.5 + 0.5 * (raw_prob - 0.5))) < 1e-12
+    # La contracción acerca a 0.5, nunca cruza al otro lado del favorito.
+    assert (raw_prob - 0.5) * (calibrated - 0.5) > 0
+    assert abs(calibrated - 0.5) < abs(raw_prob - 0.5)
+
+
+def test_predict_from_raw_inputs_shrinkage_defaults_to_config_for_old_snapshots():
+    # Un snapshot congelado ANTES de esta clave debe recalcular con el valor
+    # vigente de config (mismo criterio de compatibilidad que
+    # negbin_dispersion/park_factor_weight).
+    from config import SKELLAM_SHRINKAGE_ALPHA
+
+    raw_old_snapshot = _base_raw_inputs()
+    assert "skellam_shrinkage_alpha" not in raw_old_snapshot
+
+    old_result = predict_from_raw_inputs(raw_old_snapshot)
+    explicit_result = predict_from_raw_inputs(
+        _base_raw_inputs(skellam_shrinkage_alpha=SKELLAM_SHRINKAGE_ALPHA)
+    )
+    assert old_result == explicit_result
+
+
+def test_predict_from_raw_inputs_shrinkage_does_not_touch_run_line_totals_or_mu():
+    # El barrido de calibración se ajustó SOLO contra moneyline -- los mu
+    # proyectados, run line y total justo deben ser idénticos con cualquier
+    # alpha (se derivan de los mu crudos, no de la probabilidad de victoria).
+    raw_result = predict_from_raw_inputs(_base_raw_inputs(skellam_shrinkage_alpha=1.0))
+    calibrated_result = predict_from_raw_inputs(_base_raw_inputs(skellam_shrinkage_alpha=0.5))
+
+    for key in ("away_proj_runs", "home_proj_runs", "home_covers_rl_prob",
+                "away_covers_rl_prob", "fair_total_runs"):
+        assert raw_result[key] == calibrated_result[key]

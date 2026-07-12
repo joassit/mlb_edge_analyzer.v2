@@ -10,7 +10,7 @@ congela, así que un snapshot de hace meses se puede recalcular con esto sin
 volver a golpear ninguna API.
 """
 
-from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION
+from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION, SKELLAM_SHRINKAGE_ALPHA
 from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA, LEAGUE_AVG_RUNS_PER_GAME
 from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
@@ -36,6 +36,7 @@ def predict_from_raw_inputs(raw: dict) -> dict:
     park_factor_weight = raw.get("park_factor_weight", PARK_FACTOR_WEIGHT)
     weather_correction = raw.get("weather_correction", WEATHER_CORRECTION)
     negbin_dispersion = raw.get("negbin_dispersion", NEGBIN_DISPERSION)
+    skellam_shrinkage_alpha = raw.get("skellam_shrinkage_alpha", SKELLAM_SHRINKAGE_ALPHA)
 
     # Shrinkage del ERA del abridor hacia el promedio de liga, en proporción
     # a las entradas lanzadas -- sin esto, un abridor con 15 IP de muestra
@@ -81,7 +82,13 @@ def predict_from_raw_inputs(raw: dict) -> dict:
         away_p_raw, home_p_raw, raw.get("home_field_advantage", 0.0)
     )
 
-    home_skellam_prob = skellam_win_prob(home_mu, away_mu)
+    # Contracción hacia 0.5 (calibración de sobreconfianza, ver
+    # config.SKELLAM_SHRINKAGE_ALPHA): SOLO la probabilidad de victoria.
+    # run_line/totals abajo se derivan de los mu crudos, no de esta
+    # probabilidad -- el barrido de calibración se ajustó exclusivamente
+    # contra resultados de moneyline. alpha=1.0 la desactiva (identidad).
+    home_skellam_prob_raw = skellam_win_prob(home_mu, away_mu)
+    home_skellam_prob = 0.5 + skellam_shrinkage_alpha * (home_skellam_prob_raw - 0.5)
     away_skellam_prob = 1.0 - home_skellam_prob
 
     home_negbin_prob = negbin_win_prob(home_mu, away_mu, negbin_dispersion)
