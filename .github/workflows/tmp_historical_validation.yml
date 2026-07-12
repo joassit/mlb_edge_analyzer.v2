@@ -31,4 +31,18 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python scratchpad_diag_gamelog.py
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-consolidated-2022-2025
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29166468139
+
+      - run: python scratchpad_raw_logs_ingest.py ${{ inputs.season }}
+
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-raw-logs-${{ inputs.season }}
+          path: historical_backtest.db
+          if-no-files-found: warn
+          retention-days: 30
