@@ -375,6 +375,13 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
         else:
             print("  Mercado  -> (sin cuotas cargadas todavía)")
 
+        # Fuera del bloque de mercado a propósito: la señal de confianza alta
+        # no depende de que haya cuotas cargadas (mide certeza del modelo, no
+        # edge) -- debe imprimirse aunque el mercado venga vacío.
+        if r.get("high_confidence"):
+            print("  ⭐ CONFIANZA ALTA: heurístico >= umbral histórico de 66-67% de acierto "
+                  "(4 temporadas, ver config.HIGH_CONFIDENCE_THRESHOLD)")
+
         picks = picks_by_game.get(r["game_pk"], [])
         if picks:
             print("  Picks recomendados:")

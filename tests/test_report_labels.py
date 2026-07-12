@@ -162,6 +162,33 @@ def test_report_shows_internal_skellam_negbin_disagreement(capsys):
     assert "🔀 Skellam y NB2 discrepan entre sí" in out
 
 
+def test_print_report_shows_high_confidence_marker(capsys):
+    row = _row_with_models(away_model_prob=0.62, away_skellam_prob=0.60, away_negbin_prob=0.61)
+    row["high_confidence"] = True
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "⭐ CONFIANZA ALTA" in out
+
+
+def test_print_report_hides_high_confidence_marker_when_flag_absent_or_false(capsys):
+    row = _row_with_models(away_model_prob=0.55, away_skellam_prob=0.56, away_negbin_prob=0.55)
+    row["high_confidence"] = False
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "CONFIANZA ALTA" not in out
+
+
+def test_print_report_shows_high_confidence_even_without_market_odds(capsys):
+    # La señal mide certeza del modelo, no edge -- debe imprimirse aunque
+    # el juego no tenga ninguna cuota cargada (a diferencia de flag_review).
+    row = _row_with_models(away_model_prob=0.62, away_skellam_prob=0.60, away_negbin_prob=0.61)
+    row["high_confidence"] = True
+    assert "away_edge" not in row  # sin mercado
+    print_report([row])
+    out = capsys.readouterr().out
+    assert "⭐ CONFIANZA ALTA" in out
+
+
 # --- Visibilidad de juegos descartados en el reporte (Sección 2) ---
 
 def test_print_report_shows_discarded_game_message(capsys):
