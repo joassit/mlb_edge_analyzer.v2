@@ -1,33 +1,30 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada mientras historical_ingest.yml/
-# historical_ingest_simple.yml (los archivos permanentes) terminan de
-# indexarse. Se retira/reemplaza según haga falta en cada uso.
+# Uso temporal de un path ya registrado en GitHub Actions -- descarga el
+# artifact de producción más reciente y verifica el estado REAL (vía MLB
+# Stats API) de las 2 filas huérfanas encontradas en el informe del
+# 2026-07-11 (07-07 y 07-10, predicción sin ActualResult). Se
+# retira/reemplaza según haga falta en cada uso.
 on:
   workflow_dispatch:
     inputs:
-      season:
-        description: 'Año de temporada a ingerir (ej. 2025)'
+      artifact_name:
+        description: 'Nombre del artifact de producción a descargar'
+        required: true
+        type: string
+      source_run_id:
+        description: 'run_id del daily-pipeline que generó ese artifact'
         required: true
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  ingest-season:
+  check:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
-    # para jobs en runners hosteados que ningún timeout-minutes puede
-    # superar. 300 min cortó la corrida de 2025 a mitad de camino (el fix
-    # de climatología del Paso 4 de la auditoría de look-ahead bias subió
-    # el costo real por juego). Con WEATHER_CLIMATOLOGY_YEARS bajado de 5
-    # a 3 + cache de climatología dentro de la corrida, una temporada
-    # completa debería entrar cómoda en ~4h30m-4h50m -- 340 deja margen
-    # real sin acercarse al tope de la plataforma.
-    timeout-minutes: 340
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -37,12 +34,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
-
-      - if: always()
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v6
         with:
-          name: historical-backtest-db-${{ inputs.season }}
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded
+
+      - run: cp downloaded/mlb_edge.db mlb_edge.db
+
+      - run: python scratchpad_check_orphans.py
