@@ -2,7 +2,14 @@ import json
 import sqlite3
 import sys
 
+from historical_engine.db import init_historical_db
 from historical_engine.raw_ingestion import ingest_raw_logs_for_season
+
+# El artifact consolidado se generó ANTES de que esta sesión agregara
+# HistoricalRawBattingLog/PitchingLog/RosterSnapshot/FetchLedger al esquema
+# -- create_all() solo crea las tablas que faltan, nunca toca las que ya
+# existen con datos.
+init_historical_db()
 
 season = int(sys.argv[1])
 
