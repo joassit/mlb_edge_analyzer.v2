@@ -29,7 +29,7 @@ HOME_FIELD_ADVANTAGE = 0.02
 
 # Versión del modelo actual — se guarda con cada predicción para poder
 # comparar rendimiento entre versiones más adelante (Fase 4 del roadmap).
-MODEL_VERSION = "0.5.0-reconectado"
+MODEL_VERSION = "0.6.0-skellam-calibrado"
 
 # ERA de bullpen a usar si no se puede calcular el real (equipo sin datos
 # suficientes, roster incompleto, etc.) — aproximado al promedio de liga.
@@ -66,6 +66,29 @@ WEATHER_CORRECTION = 0.0
 # scripts/calibrate_dispersion.py apenas se acumulen suficientes resultados,
 # y actualizar este comentario con la fecha y el número de juegos usados.
 NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "7.0"))
+
+# --- Calibración de Skellam: contracción hacia 0.5 ---
+# p_calibrada = 0.5 + alpha * (p_cruda - 0.5), aplicada a la probabilidad
+# de victoria de Skellam en model/predictor.py (punto único de cálculo).
+#
+# Por qué: el barrido de calibración sobre las 4 temporadas históricas
+# (2022-2025, 8,852 juegos con resultado real, 2026-07-12) confirmó que
+# Skellam está estructuralmente SOBRECONFIADO -- declarando >= 70% de
+# confianza acierta solo ~59.5% (n=824). Causa de fondo: skellam_win_prob
+# trata los mu proyectados como exactos, sin propagar la incertidumbre de
+# la estimación, dejando las colas demasiado extremas. alpha=0.5 mejoró el
+# Brier en las 4 temporadas SIN EXCEPCIÓN (óptimo por temporada: 0.3-0.6;
+# 0.5 es el punto robusto del rango): 0.24782→0.24542 (2022),
+# 0.25337→0.24786 (2023), 0.24784→0.24567 (2024), 0.25522→0.24880 (2025).
+# El heurístico NO se calibra: alpha=1.0 fue óptimo en las 4 temporadas
+# (ya está bien calibrado de fábrica). alpha=1.0 aquí desactiva la
+# contracción por completo.
+#
+# Efecto en picks en vivo: encoge los edges de moneyline calculados desde
+# Skellam -- menos juegos superan MIN_PICK_EDGE/MIN_PICK_EV, el sistema se
+# vuelve más selectivo. Solo afecta la probabilidad de VICTORIA (moneyline);
+# run_line/totals se derivan de los mu proyectados, que no cambian.
+SKELLAM_SHRINKAGE_ALPHA = float(os.getenv("SKELLAM_SHRINKAGE_ALPHA", "0.5"))
 
 # --- Fuente de probabilidad para picks de moneyline ---
 # Qué modelo alimenta la probabilidad de moneyline en model/picks.py:

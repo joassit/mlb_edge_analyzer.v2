@@ -39,7 +39,7 @@ from tracking.results_tracker import (
 )
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, MODEL_VERSION, REVIEW_EDGE_THRESHOLD,
-    HIGH_CONFIDENCE_THRESHOLD,
+    HIGH_CONFIDENCE_THRESHOLD, SKELLAM_SHRINKAGE_ALPHA,
     MIN_PICK_EV, MIN_PICK_EDGE, FORCE_AT_LEAST_ONE_PICK, MAX_PICKS_PER_GAME,
     PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION, DATABASE_URL,
     MIN_LIQUIDATED_PICKS_FOR_CALIBRATION,
@@ -427,6 +427,7 @@ def _analyze_one_game(g, league_ops, weather_by_team, odds_events,
         "starter_weight": STARTER_WEIGHT, "home_field_advantage": HOME_FIELD_ADVANTAGE,
         "park_factor_weight": PARK_FACTOR_WEIGHT, "weather_correction": WEATHER_CORRECTION,
         "negbin_dispersion": NEGBIN_DISPERSION,
+        "skellam_shrinkage_alpha": SKELLAM_SHRINKAGE_ALPHA,
     }
 
     prediction = predict_from_raw_inputs(raw_inputs)

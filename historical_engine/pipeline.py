@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from config import (
     STARTER_WEIGHT, HOME_FIELD_ADVANTAGE, PARK_FACTOR_WEIGHT,
     WEATHER_CORRECTION, NEGBIN_DISPERSION, MODEL_VERSION,
+    SKELLAM_SHRINKAGE_ALPHA,
 )
 from model.predictor import predict_from_raw_inputs
 from version_info import get_git_commit
@@ -112,6 +113,12 @@ def _analyze_and_store_game(hg: HistoricalGame, provider: HistoricalStatsProvide
         "park_factor_weight": PARK_FACTOR_WEIGHT,
         "weather_correction": WEATHER_CORRECTION,
         "negbin_dispersion": NEGBIN_DISPERSION,
+        # Ojo para futuros barridos de calibración: con esto, las corridas
+        # históricas nuevas persisten el Skellam YA CONTRAÍDO -- ajustar
+        # alpha de nuevo contra esas filas lo doble-contraería. Los barridos
+        # de propose_probability_shrinkage deben correrse contra ingestas
+        # hechas con alpha=1.0, o des-contraer primero.
+        "skellam_shrinkage_alpha": SKELLAM_SHRINKAGE_ALPHA,
     }
     prediction = predict_from_raw_inputs(raw_inputs)
 
