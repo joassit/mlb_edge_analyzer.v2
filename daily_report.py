@@ -17,7 +17,7 @@ Uso:
 from datetime import date
 
 from logging_config import setup_logging
-from data.mlb_api import get_schedule, get_game_result, get_actual_starters, get_actual_starters
+from data.mlb_api import get_schedule, get_game_result
 from data.weather import preload_weather
 from data.park_factors import get_park_info
 from data.stats import get_league_ops
@@ -44,29 +44,7 @@ def audit_finished_game(g: dict) -> None:
         print("-" * 70)
         return
 
-    # --- Defensa contra pitcher scratch ---
-    # Si el abridor real difiere del predicho, la predicción midió un juego
-    # que no ocurrió: se anula (no cuenta como acierto NI como fallo).
-    actual = get_actual_starters(g["game_pk"])
-    if actual and pred.get("away_pitcher_id") and pred.get("home_pitcher_id"):
-        scratched = []
-        if actual["away_starter_id"] and actual["away_starter_id"] != pred["away_pitcher_id"]:
-            scratched.append(f"visitante (predicho: {pred['away_pitcher']})")
-        if actual["home_starter_id"] and actual["home_starter_id"] != pred["home_pitcher_id"]:
-            scratched.append(f"local (predicho: {pred['home_pitcher']})")
-
-        if scratched:
-            print(f"  🚫 PREDICCIÓN ANULADA — pitcher scratch: cambió el abridor {' y '.join(scratched)}")
-            print(f"  Resultado real: {result['away_score']}-{result['home_score']} (solo informativo, no se audita)")
-            # Guarda el resultado igual (para el histórico del juego) pero
-            # NO se califica la predicción — el modelo predijo otro juego.
-            save_result({
-                "game_pk": g["game_pk"], "game_date": today_str,
-                "home_score": result["home_score"], "away_score": result["away_score"],
-                "winner": result["winner"], "total_runs": result["total_runs"],
-            })
-            print("-" * 70)
-            return
+    # TODO: Defensa contra pitcher scratch — get_actual_starters no implementada aún
 
     home_won = result["winner"] == "home"
     predicted_home_favorite = pred["home_model_prob"] > 0.5
