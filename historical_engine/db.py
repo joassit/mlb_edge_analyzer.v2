@@ -242,6 +242,116 @@ class HistoricalSimulation(HistoricalBase):
     created_at = Column(DateTime, default=_utcnow_naive)
 
 
+class HistoricalRawBattingLog(HistoricalBase):
+    """
+    Log crudo juego-por-juego de bateo de EQUIPO (no de jugador individual)
+    -- una fila por (team_id, season_year, game_date). Fuente: MLB Stats API
+    `stats=gameLog` (UNA sola llamada por equipo por temporada, no una por
+    juego/fecha de corte como point_in_time_provider.py). Con esto local,
+    OPS de CUALQUIER ventana (temporada completa o forma reciente) se
+    calcula con aritmética pura, sin volver a golpear la API -- ver
+    historical_engine/raw_ingestion.py.
+    """
+    __tablename__ = "historical_raw_batting_log"
+    __table_args__ = (
+        UniqueConstraint("team_id", "season_year", "game_date", name="uq_raw_batting_log"),
+        Index("ix_raw_batting_log_team_season", "team_id", "season_year"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    team_id = Column(Integer, nullable=False)
+    season_year = Column(Integer, nullable=False)
+    game_date = Column(String, nullable=False)
+    at_bats = Column(Integer, nullable=True)
+    hits = Column(Integer, nullable=True)
+    doubles = Column(Integer, nullable=True)
+    triples = Column(Integer, nullable=True)
+    home_runs = Column(Integer, nullable=True)
+    walks = Column(Integer, nullable=True)
+    hit_by_pitch = Column(Integer, nullable=True)
+    sac_flies = Column(Integer, nullable=True)
+    plate_appearances = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+
+class HistoricalRawPitchingLog(HistoricalBase):
+    """
+    Log crudo juego-por-juego de UN pitcher (abridor o relevo) -- una fila
+    por (pitcher_id, season_year, game_date). Fuente: `stats=gameLog` (UNA
+    sola llamada por pitcher por temporada). Sirve tanto para ERA de
+    abridor como para reconstruir ERA de bullpen de cualquier ventana
+    (junto con HistoricalRawRosterSnapshot, que dice quién estaba en el
+    roster activo cada fecha).
+    """
+    __tablename__ = "historical_raw_pitching_log"
+    __table_args__ = (
+        UniqueConstraint("pitcher_id", "season_year", "game_date", name="uq_raw_pitching_log"),
+        Index("ix_raw_pitching_log_pitcher_season", "pitcher_id", "season_year"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pitcher_id = Column(Integer, nullable=False)
+    season_year = Column(Integer, nullable=False)
+    game_date = Column(String, nullable=False)
+    innings_pitched = Column(Float, nullable=True)
+    earned_runs = Column(Integer, nullable=True)
+    strikeouts = Column(Integer, nullable=True)
+    walks = Column(Integer, nullable=True)
+    batters_faced = Column(Integer, nullable=True)
+    number_of_pitches = Column(Integer, nullable=True)
+    game_started = Column(Boolean, nullable=True)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+
+class HistoricalRawRosterSnapshot(HistoricalBase):
+    """
+    Pitchers en el roster ACTIVO de un equipo en una fecha exacta -- una
+    fila por (team_id, season_year, as_of_date, pitcher_id). Fuente:
+    `teams/{id}/roster?rosterType=active&date=X` (mismo endpoint que ya usa
+    point_in_time_provider.py::bullpen_era_as_of, verificado empíricamente
+    contra la API real). Cachear esto localmente permite reconstruir la
+    composición del bullpen de cualquier fecha ya vista sin volver a pedir
+    el roster -- ver historical_engine/raw_ingestion.py.
+    """
+    __tablename__ = "historical_raw_roster_snapshot"
+    __table_args__ = (
+        UniqueConstraint("team_id", "season_year", "as_of_date", "pitcher_id", name="uq_raw_roster_snapshot"),
+        Index("ix_raw_roster_snapshot_team_date", "team_id", "season_year", "as_of_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    team_id = Column(Integer, nullable=False)
+    season_year = Column(Integer, nullable=False)
+    as_of_date = Column(String, nullable=False)
+    pitcher_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+
+class HistoricalRawFetchLedger(HistoricalBase):
+    """
+    Registro de qué (entity_type, entity_key, season_year) ya se intentó
+    descargar con ÉXITO en raw_ingestion.py -- independiente de cuántas
+    filas produjo. Sin esto, un roster o gameLog legítimamente vacío (0
+    splits/pitchers, ej. un pitcher con una sola aparición en spring
+    training) no dejaría ninguna fila en HistoricalRawBattingLog/
+    PitchingLog/RosterSnapshot, y la próxima corrida lo interpretaría como
+    "nunca descargado" y lo volvería a pedir para siempre -- justo lo que
+    este módulo existe para evitar. Solo se escribe una fila acá cuando la
+    llamada a la API tuvo éxito (nunca en un error de red/esquema, para que
+    esos SÍ se reintenten en la próxima corrida).
+    """
+    __tablename__ = "historical_raw_fetch_ledger"
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_key", "season_year", name="uq_raw_fetch_ledger"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String, nullable=False)  # "batting_team" | "pitching_pitcher" | "roster_snapshot"
+    entity_key = Column(String, nullable=False)  # team_id / pitcher_id / "team_id:as_of_date"
+    season_year = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+
 def init_historical_db() -> None:
     """Crea (si no existen) las tablas de este esquema en HISTORICAL_DATABASE_URL.
     Nunca toca ni conoce el esquema de producción -- HistoricalBase.metadata

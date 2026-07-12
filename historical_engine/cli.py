@@ -13,6 +13,7 @@ Uso:
     python -m historical_engine.cli validate 2024 <run_id>
     python -m historical_engine.cli compare 2024 <run_id>
     python -m historical_engine.cli train 2024 <run_id>
+    python -m historical_engine.cli raw-logs 2024 <run_id>
     python -m historical_engine.cli report 2024 <run_id> [--output-dir DIR]
 """
 
@@ -25,6 +26,7 @@ from historical_engine.validation import validate_all_sources, compare_seasons_d
 from historical_engine.model_comparison import compare_models
 from historical_engine.training import propose_dispersion_recalibration
 from historical_engine.reports import generate_historical_report
+from historical_engine.raw_ingestion import ingest_raw_logs_for_season
 
 
 def _print_result(result) -> None:
@@ -80,6 +82,13 @@ def main(argv=None) -> int:
     p_train.add_argument("season", type=int)
     p_train.add_argument("run_id", type=int)
 
+    p_raw_logs = sub.add_parser(
+        "raw-logs",
+        help="Cachea gameLog crudo de bateo/pitcheo + roster activo (una sola vez, reutilizable para siempre)",
+    )
+    p_raw_logs.add_argument("season", type=int)
+    p_raw_logs.add_argument("run_id", type=int)
+
     p_report = sub.add_parser("report", help="Genera el reporte HTML histórico")
     p_report.add_argument("season", type=int)
     p_report.add_argument("run_id", type=int)
@@ -122,6 +131,10 @@ def main(argv=None) -> int:
         for p in result["proposals"]:
             print(f"  candidato k={p['param_value']}: brier={p['brier_score']} mejora={p['improved_over_baseline']}")
         print(result["note"])
+    elif args.command == "raw-logs":
+        result = ingest_raw_logs_for_season(args.season, args.run_id)
+        for layer, stats in result.items():
+            print(f"{layer}: {stats}")
     elif args.command == "report":
         path = generate_historical_report(
             args.season, args.run_id, args.output_dir,
