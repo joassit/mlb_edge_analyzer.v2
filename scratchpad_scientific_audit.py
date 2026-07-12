@@ -659,6 +659,13 @@ if __name__ == "__main__":
         except Exception as e:
             import traceback
             results["seasons"][season] = {"season": season, "error": f"{e}", "trace": traceback.format_exc()[-2000:]}
-    print("===JSON_SCI_AUDIT_START===")
-    print(json.dumps(results, indent=1, default=str))
-    print("===JSON_SCI_AUDIT_END===")
+    # gzip+base64 en UNA línea: el log de Actions agrega timestamp por línea
+    # y el lector de logs del agente solo puede traer la cola del log --
+    # comprimido, el JSON completo entra holgado en cualquier ventana.
+    import base64
+    import gzip
+    payload = base64.b64encode(gzip.compress(json.dumps(results, default=str).encode())).decode()
+    print("===JSON_SCI_AUDIT_B64GZ_START===")
+    for i in range(0, len(payload), 60000):
+        print(payload[i:i + 60000])
+    print("===JSON_SCI_AUDIT_B64GZ_END===")
