@@ -491,10 +491,8 @@ def benchmarks(rows):
 
 # ---------------- 2024 antes/después (pareado) ----------------
 
-def before_after(conn, run_old, run_new):
+def before_after_rows(rows_old, rows_new, run_old="old", run_new="new"):
     out = {"run_old": run_old, "run_new": run_new}
-    rows_old = {r["game_pk"]: r for r in load_rows(conn, run_old)}
-    rows_new = {r["game_pk"]: r for r in load_rows(conn, run_new)}
     common = sorted(set(rows_old) & set(rows_new))
     out["n_old"], out["n_new"], out["n_common"] = len(rows_old), len(rows_new), len(common)
     out["only_old"], out["only_new"] = len(rows_old) - len(common), len(rows_new) - len(common)
@@ -628,7 +626,9 @@ def audit_season(db_path, season):
         # antes/después si hay más de una corrida de esta temporada
         if len(this_season) >= 2:
             run_old = min(r["id"] for r in this_season)
-            result["before_after"] = before_after(conn, run_old, run_id)
+            rows_old = {r["game_pk"]: r for r in load_rows(conn, run_old)}
+            rows_new = {r["game_pk"]: r for r in load_rows(conn, run_id)}
+            result["before_after"] = before_after_rows(rows_old, rows_new, run_old, run_id)
         return result
     finally:
         conn.close()
@@ -651,6 +651,24 @@ if __name__ == "__main__":
         "league_era_default": LEAGUE_AVG_ERA, "recompute_alpha": 1.0,
     }, "seasons": {}}
     for arg in sys.argv[1:]:
+        if arg.startswith("pair2024="):
+            # pareo entre DOS bases distintas: pair2024=old_db:new_db
+            old_path, new_path = arg.split("=", 1)[1].split(":", 1)
+            print(f"... pareando 2024 {old_path} vs {new_path}", file=sys.stderr, flush=True)
+            try:
+                conn_old = sqlite3.connect(old_path)
+                conn_new = sqlite3.connect(new_path)
+                run_old = max(r["id"] for r in season_runs(conn_old) if r["season_year"] == 2024)
+                run_new = max(r["id"] for r in season_runs(conn_new) if r["season_year"] == 2024)
+                rows_old = {r["game_pk"]: r for r in load_rows(conn_old, run_old)}
+                rows_new = {r["game_pk"]: r for r in load_rows(conn_new, run_new)}
+                results["pair2024"] = before_after_rows(
+                    rows_old, rows_new, f"old:{old_path}#run{run_old}", f"new:{new_path}#run{run_new}")
+                conn_old.close(); conn_new.close()
+            except Exception as e:
+                import traceback
+                results["pair2024"] = {"error": f"{e}", "trace": traceback.format_exc()[-2000:]}
+            continue
         season_str, db_path = arg.split("=", 1)
         season = int(season_str)
         print(f"... auditando {season} ({db_path})", file=sys.stderr, flush=True)

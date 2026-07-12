@@ -1,14 +1,14 @@
 name: tmp-historical-validation
 
-# Uso temporal (ver historial del archivo). Modo actual: comparación
-# pareada 2024 pre-fix (run_id=1) vs. post-fix sobre la base
-# historical-backtest-db-2024 del run 29070769868, que conserva AMBAS
-# corridas. Se restaura a modo season-ingest al terminar.
+# Uso temporal (ver historial del archivo). Modo actual: pareo 2024
+# pre-fix (artifact del run 29049812686, ingesta original) vs. post-fix
+# (artifact del run 29070769868, re-ingesta con los 3 fixes), juego por
+# juego. Se restaura a modo season-ingest al terminar.
 on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'Ignorado en este modo (before-after-2024)'
+        description: 'Ignorado en este modo (pair-2024)'
         required: false
         type: string
 
@@ -17,7 +17,7 @@ permissions:
   actions: read
 
 jobs:
-  before-after-2024:
+  pair-2024:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -33,9 +33,16 @@ jobs:
         with:
           name: historical-backtest-db-2024
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29049812686
+          path: dbs/2024pre
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-backtest-db-2024
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: 29070769868
-          path: dbs/2024old
+          path: dbs/2024post
 
       - run: ls -laR dbs/
 
-      - run: python scratchpad_scientific_audit.py 2024=dbs/2024old/historical_backtest.db
+      - run: python scratchpad_scientific_audit.py "pair2024=dbs/2024pre/historical_backtest.db:dbs/2024post/historical_backtest.db"
