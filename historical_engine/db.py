@@ -254,7 +254,13 @@ class HistoricalRawBattingLog(HistoricalBase):
     """
     __tablename__ = "historical_raw_batting_log"
     __table_args__ = (
-        UniqueConstraint("team_id", "season_year", "game_date", name="uq_raw_batting_log"),
+        # game_pk (no solo la fecha) en la clave: un doubleheader son DOS
+        # splits del gameLog con la misma game_date para el mismo equipo,
+        # distinguidos únicamente por game.gamePk (verificado contra la API
+        # real: Baltimore 2025-04-26, gamePk 778168 y 778180) -- con la
+        # fecha sola, el segundo juego del día tumbaba la ingesta con
+        # UNIQUE constraint failed.
+        UniqueConstraint("team_id", "season_year", "game_date", "game_pk", name="uq_raw_batting_log"),
         Index("ix_raw_batting_log_team_season", "team_id", "season_year"),
     )
 
@@ -262,6 +268,7 @@ class HistoricalRawBattingLog(HistoricalBase):
     team_id = Column(Integer, nullable=False)
     season_year = Column(Integer, nullable=False)
     game_date = Column(String, nullable=False)
+    game_pk = Column(Integer, nullable=True)
     at_bats = Column(Integer, nullable=True)
     hits = Column(Integer, nullable=True)
     doubles = Column(Integer, nullable=True)
@@ -285,7 +292,10 @@ class HistoricalRawPitchingLog(HistoricalBase):
     """
     __tablename__ = "historical_raw_pitching_log"
     __table_args__ = (
-        UniqueConstraint("pitcher_id", "season_year", "game_date", name="uq_raw_pitching_log"),
+        # game_pk en la clave por la misma razón que uq_raw_batting_log:
+        # un relevista puede lanzar en LOS DOS juegos de un doubleheader
+        # (misma fecha, distinto gamePk).
+        UniqueConstraint("pitcher_id", "season_year", "game_date", "game_pk", name="uq_raw_pitching_log"),
         Index("ix_raw_pitching_log_pitcher_season", "pitcher_id", "season_year"),
     )
 
@@ -293,6 +303,7 @@ class HistoricalRawPitchingLog(HistoricalBase):
     pitcher_id = Column(Integer, nullable=False)
     season_year = Column(Integer, nullable=False)
     game_date = Column(String, nullable=False)
+    game_pk = Column(Integer, nullable=True)
     innings_pitched = Column(Float, nullable=True)
     earned_runs = Column(Integer, nullable=True)
     strikeouts = Column(Integer, nullable=True)

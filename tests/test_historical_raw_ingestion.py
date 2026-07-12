@@ -102,6 +102,52 @@ def test_ingest_raw_batting_logs_skips_teams_already_cached(tmp_path, monkeypatc
     assert result["n_teams_skipped_already_cached"] == 2
 
 
+def test_ingest_raw_batting_logs_handles_doubleheader_same_date(tmp_path, monkeypatch):
+    # Regresión del fallo real en la primera corrida contra la API (2025):
+    # un doubleheader son DOS splits con la misma fecha para el mismo
+    # equipo (Baltimore 2025-04-26, gamePk 778168 y 778180) -- con la fecha
+    # sola en la unique key, el segundo juego tumbaba la ingesta con
+    # IntegrityError.
+    Session = _fresh_session(tmp_path, "batting_doubleheader")
+    _seed_games(Session)
+
+    def fake_get(url, params=None, timeout=None):
+        return _FakeResponse({"stats": [{"splits": [
+            {"date": "2024-05-01", "game": {"gamePk": 111, "gameNumber": 1}, "stat": {"atBats": 30}},
+            {"date": "2024-05-01", "game": {"gamePk": 222, "gameNumber": 2}, "stat": {"atBats": 28}},
+        ]}]})
+
+    _install_fake_session(monkeypatch, fake_get)
+    result = raw_ingestion.ingest_raw_batting_logs(2024, run_id=1, session_factory=Session)
+
+    assert result["n_errors"] == 0
+    session = Session()
+    rows = session.query(historical_db.HistoricalRawBattingLog).filter_by(team_id=100).all()
+    session.close()
+    assert {r.game_pk for r in rows} == {111, 222}
+
+
+def test_ingest_raw_pitching_logs_handles_doubleheader_same_date(tmp_path, monkeypatch):
+    # Un relevista puede lanzar en los dos juegos de un doubleheader.
+    Session = _fresh_session(tmp_path, "pitching_doubleheader")
+    _seed_games(Session)
+
+    def fake_get(url, params=None, timeout=None):
+        return _FakeResponse({"stats": [{"splits": [
+            {"date": "2024-05-01", "game": {"gamePk": 111}, "stat": {"inningsPitched": "1.0"}},
+            {"date": "2024-05-01", "game": {"gamePk": 222}, "stat": {"inningsPitched": "0.2"}},
+        ]}]})
+
+    _install_fake_session(monkeypatch, fake_get)
+    result = raw_ingestion.ingest_raw_pitching_logs(2024, run_id=1, session_factory=Session)
+
+    assert result["n_errors"] == 0
+    session = Session()
+    rows = session.query(historical_db.HistoricalRawPitchingLog).filter_by(pitcher_id=11).all()
+    session.close()
+    assert {r.game_pk for r in rows} == {111, 222}
+
+
 def test_ingest_raw_batting_logs_counts_errors_without_crashing(tmp_path, monkeypatch):
     Session = _fresh_session(tmp_path, "batting_errors")
     _seed_games(Session)

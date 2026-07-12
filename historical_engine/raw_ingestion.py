@@ -149,6 +149,7 @@ def ingest_raw_batting_logs(season_year: int, run_id: int, session_factory=None)
                     continue
                 db_session.add(HistoricalRawBattingLog(
                     team_id=team_id, season_year=season_year, game_date=game_date,
+                    game_pk=split.get("game", {}).get("gamePk"),
                     at_bats=stat.get("atBats"), hits=stat.get("hits"),
                     doubles=stat.get("doubles"), triples=stat.get("triples"),
                     home_runs=stat.get("homeRuns"), walks=stat.get("baseOnBalls"),
@@ -255,6 +256,7 @@ def ingest_raw_pitching_logs(season_year: int, run_id: int, session_factory=None
                     continue
                 db_session.add(HistoricalRawPitchingLog(
                     pitcher_id=pitcher_id, season_year=season_year, game_date=game_date,
+                    game_pk=split.get("game", {}).get("gamePk"),
                     innings_pitched=_parse_innings(stat.get("inningsPitched")),
                     earned_runs=stat.get("earnedRuns"), strikeouts=stat.get("strikeOuts"),
                     walks=stat.get("baseOnBalls"), batters_faced=stat.get("battersFaced"),
