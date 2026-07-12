@@ -197,7 +197,12 @@ def ingest_raw_roster_snapshots(season_year: int, run_id: int, session_factory=N
                 n_errors += 1
                 continue
 
-            pitcher_ids = [p["person"]["id"] for p in roster if p.get("position", {}).get("abbreviation") == "P"]
+            # sorted(set(...)) y no una lista directa: la API puede devolver
+            # el MISMO pitcher listado dos veces en un solo payload de roster
+            # (visto en la corrida real: equipo 134, 2025-09-16, pitcher
+            # 677952 duplicado -- probable doble movimiento de roster ese
+            # día) -- sin dedupe, el INSERT violaba uq_raw_roster_snapshot.
+            pitcher_ids = sorted({p["person"]["id"] for p in roster if p.get("position", {}).get("abbreviation") == "P"})
             for pitcher_id in pitcher_ids:
                 db_session.add(HistoricalRawRosterSnapshot(
                     team_id=team_id, season_year=season_year, as_of_date=as_of_date, pitcher_id=pitcher_id,

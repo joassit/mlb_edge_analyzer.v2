@@ -201,6 +201,30 @@ def test_ingest_raw_roster_snapshots_ignores_non_pitchers(tmp_path, monkeypatch)
     assert pitcher_ids == {1}
 
 
+def test_ingest_raw_roster_snapshots_deduplicates_repeated_pitcher_in_payload(tmp_path, monkeypatch):
+    # Regresión del fallo real en la corrida de 2025: la API devolvió el
+    # MISMO pitcher dos veces en un solo payload de roster (equipo 134,
+    # 2025-09-16, pitcher 677952) -- sin dedupe, el INSERT violaba
+    # uq_raw_roster_snapshot y tumbaba la ingesta a mitad de temporada.
+    Session = _fresh_session(tmp_path, "roster_repeated_pitcher")
+    _seed_games(Session)
+
+    def fake_get(url, params=None, timeout=None):
+        return _FakeResponse({"roster": [
+            {"person": {"id": 677952}, "position": {"abbreviation": "P"}},
+            {"person": {"id": 677952}, "position": {"abbreviation": "P"}},  # duplicado real
+        ]})
+
+    _install_fake_session(monkeypatch, fake_get)
+    result = raw_ingestion.ingest_raw_roster_snapshots(2024, run_id=1, session_factory=Session)
+
+    assert result["n_errors"] == 0
+    session = Session()
+    rows = session.query(historical_db.HistoricalRawRosterSnapshot).filter_by(team_id=100, as_of_date="2024-05-01").all()
+    session.close()
+    assert len(rows) == 1
+
+
 def test_ingest_raw_roster_snapshots_deduplicates_doubleheader_dates(tmp_path, monkeypatch):
     # Dos juegos el mismo día para el mismo equipo (misma game_date) no
     # deben generar dos llamadas al roster -- mismo (team_id, as_of_date).
