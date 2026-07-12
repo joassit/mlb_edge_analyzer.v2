@@ -1,6 +1,7 @@
 """
-Pruebas de data/odds_api.py — mockean requests.get, nunca tocan la red real
-(igual que el resto de la suite: pruebas puras, sin depender de internet).
+Pruebas de data/odds_api.py — mockean _session.get (la sesión compartida
+con retry, ver PASO 2), nunca tocan la red real (igual que el resto de la
+suite: pruebas puras, sin depender de internet).
 """
 
 import pytest
@@ -77,7 +78,7 @@ def test_fetch_moneyline_odds_returns_empty_without_api_key(monkeypatch):
 
 def test_fetch_moneyline_odds_parses_expected_shape(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
 
     events = odds_api.fetch_moneyline_odds()
 
@@ -95,7 +96,7 @@ def test_fetch_moneyline_odds_drops_malformed_price_but_keeps_the_rest(monkeypat
     broken[0]["bookmakers"][0]["markets"][0]["outcomes"][0]["price"] = 999999
 
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(broken))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(broken))
 
     events = odds_api.fetch_moneyline_odds()
 
@@ -112,7 +113,7 @@ def test_fetch_moneyline_odds_tags_old_quotes_as_not_fresh(monkeypatch):
     old[0]["bookmakers"][1]["markets"][0]["last_update"] = datetime.now(timezone.utc).isoformat()
 
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(old))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(old))
 
     events = odds_api.fetch_moneyline_odds()
     prices_by_book = {p["book"]: p for p in events[0]["prices"]}
@@ -130,7 +131,7 @@ def test_fetch_moneyline_odds_does_not_consume_budget_on_failed_request(monkeypa
     def fail(*a, **k):
         raise real_requests.ConnectionError("red caída")
 
-    monkeypatch.setattr(odds_api.requests, "get", fail)
+    monkeypatch.setattr(odds_api._session, "get", fail)
 
     events = odds_api.fetch_moneyline_odds()
     assert events == []
@@ -145,7 +146,7 @@ def test_fetch_moneyline_odds_does_not_consume_budget_on_failed_request(monkeypa
 def test_fetch_moneyline_odds_skips_malformed_events(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
     broken_payload = [{"sport_key": "baseball_mlb"}]  # sin home_team/away_team
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(broken_payload))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(broken_payload))
 
     events = odds_api.fetch_moneyline_odds()
 
@@ -295,7 +296,7 @@ def test_fetch_moneyline_odds_uses_cache_instead_of_a_second_call(monkeypatch):
         calls["n"] += 1
         return _FakeResponse(FAKE_PAYLOAD)
 
-    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+    monkeypatch.setattr(odds_api._session, "get", fake_get)
 
     odds_api.fetch_moneyline_odds()
     odds_api.fetch_moneyline_odds()  # debe venir del caché, no de una segunda llamada real
@@ -310,7 +311,7 @@ def test_fetch_moneyline_odds_returns_empty_when_budget_exhausted_and_no_prior_c
     def fail_if_called(*a, **k):
         raise AssertionError("no debería intentar una llamada real sin presupuesto")
 
-    monkeypatch.setattr(odds_api.requests, "get", fail_if_called)
+    monkeypatch.setattr(odds_api._session, "get", fail_if_called)
 
     assert odds_api.fetch_moneyline_odds() == []
 
@@ -318,7 +319,7 @@ def test_fetch_moneyline_odds_returns_empty_when_budget_exhausted_and_no_prior_c
 def test_budget_guard_falls_back_to_stale_cache_when_exhausted(monkeypatch, tmp_path):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
     monkeypatch.setattr(odds_api, "ODDS_API_MONTHLY_BUDGET", 1)
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
 
     odds_api.fetch_moneyline_odds()  # consume el único request del presupuesto y escribe caché
 
@@ -329,7 +330,7 @@ def test_budget_guard_falls_back_to_stale_cache_when_exhausted(monkeypatch, tmp_
     def fail_if_called(*a, **k):
         raise AssertionError("no debería intentar una llamada real sin presupuesto")
 
-    monkeypatch.setattr(odds_api.requests, "get", fail_if_called)
+    monkeypatch.setattr(odds_api._session, "get", fail_if_called)
 
     events = odds_api.fetch_moneyline_odds()
     # Se degrada al caché vencido en vez de quedarse sin nada.
@@ -375,7 +376,7 @@ def test_fetch_moneyline_odds_skips_key_whose_local_budget_is_exhausted(monkeypa
         calls["keys_used"].append(params["apiKey"])
         return _FakeResponse(FAKE_PAYLOAD)
 
-    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+    monkeypatch.setattr(odds_api._session, "get", fake_get)
 
     events = odds_api.fetch_moneyline_odds()
 
@@ -393,7 +394,7 @@ def test_fetch_moneyline_odds_rotates_to_next_key_on_401(monkeypatch):
             return _FakeResponse(None, status_code=401)
         return _FakeResponse(FAKE_PAYLOAD)
 
-    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+    monkeypatch.setattr(odds_api._session, "get", fake_get)
 
     events = odds_api.fetch_moneyline_odds()
 
@@ -410,10 +411,26 @@ def test_fetch_moneyline_odds_rotates_to_next_key_on_429(monkeypatch):
             return _FakeResponse(None, status_code=429)
         return _FakeResponse(FAKE_PAYLOAD)
 
-    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+    monkeypatch.setattr(odds_api._session, "get", fake_get)
 
     events = odds_api.fetch_moneyline_odds()
     assert len(events) == 1
+
+
+def test_session_retries_5xx_but_not_429():
+    """PASO 2: _session debe reintentar automáticamente 500/502/503/504
+    (fallas transitorias de servidor) pero NUNCA 429 -- 429 ya tiene su
+    propio manejo explícito (rotar a la siguiente key, ver el test de
+    arriba) y reintentar la MISMA key contra un rate-limit real gastaría
+    presupuesto pagado en vano. Antes de este fix no había ningún
+    Retry/HTTPAdapter configurado en absoluto (requests.get() plano)."""
+    adapter = odds_api._session.get_adapter("https://api.the-odds-api.com/v4/sports/baseball_mlb/odds")
+    retry = adapter.max_retries
+
+    assert retry.total == 3
+    assert retry.backoff_factor == 1.5
+    assert 429 not in retry.status_forcelist
+    assert {500, 502, 503, 504}.issubset(set(retry.status_forcelist))
 
 
 def test_fetch_moneyline_odds_rotation_never_logs_any_key_in_plaintext(monkeypatch, caplog):
@@ -426,7 +443,7 @@ def test_fetch_moneyline_odds_rotation_never_logs_any_key_in_plaintext(monkeypat
             return _FakeResponse(None, status_code=401)
         return _FakeResponse(FAKE_PAYLOAD)
 
-    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+    monkeypatch.setattr(odds_api._session, "get", fake_get)
 
     with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
         events = odds_api.fetch_moneyline_odds()
@@ -449,7 +466,7 @@ def test_fetch_moneyline_odds_stops_at_first_working_key_without_trying_the_rest
             raise AssertionError("no debería probar la segunda key si la primera funcionó")
         return _FakeResponse(FAKE_PAYLOAD)
 
-    monkeypatch.setattr(odds_api.requests, "get", fake_get)
+    monkeypatch.setattr(odds_api._session, "get", fake_get)
 
     odds_api.fetch_moneyline_odds()
     assert calls["n"] == 1
@@ -458,7 +475,7 @@ def test_fetch_moneyline_odds_stops_at_first_working_key_without_trying_the_rest
 def test_fetch_moneyline_odds_falls_back_to_stale_cache_when_all_keys_fail(monkeypatch):
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.setenv("ODDS_API_KEYS", "key-uno,key-dos")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
 
     odds_api.fetch_moneyline_odds()  # escribe caché con key-uno
 
@@ -468,7 +485,7 @@ def test_fetch_moneyline_odds_falls_back_to_stale_cache_when_all_keys_fail(monke
     def always_fail(url, params=None, **kwargs):
         return _FakeResponse(None, status_code=401)
 
-    monkeypatch.setattr(odds_api.requests, "get", always_fail)
+    monkeypatch.setattr(odds_api._session, "get", always_fail)
 
     events = odds_api.fetch_moneyline_odds()
     # Mismo comportamiento de hoy: se degrada al caché vencido en vez de [].
@@ -478,7 +495,7 @@ def test_fetch_moneyline_odds_falls_back_to_stale_cache_when_all_keys_fail(monke
 def test_fetch_moneyline_odds_returns_empty_when_all_keys_fail_and_no_cache(monkeypatch):
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.setenv("ODDS_API_KEYS", "key-uno,key-dos")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(None, status_code=401))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(None, status_code=401))
 
     assert odds_api.fetch_moneyline_odds() == []
 
@@ -511,7 +528,7 @@ def test_record_budget_usage_reads_remaining_from_response_headers(monkeypatch):
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.setenv("ODDS_API_KEYS", "key-uno")
     monkeypatch.setattr(
-        odds_api.requests, "get",
+        odds_api._session, "get",
         lambda *a, **k: _FakeResponse(FAKE_PAYLOAD, headers={"x-requests-remaining": "485", "x-requests-used": "15"}),
     )
 
@@ -559,7 +576,7 @@ def test_get_last_fetch_meta_reports_none_without_api_key(monkeypatch):
 
 def test_get_last_fetch_meta_reports_api_live_after_fresh_call(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
 
     odds_api.fetch_moneyline_odds()
 
@@ -570,7 +587,7 @@ def test_get_last_fetch_meta_reports_api_live_after_fresh_call(monkeypatch):
 
 def test_get_last_fetch_meta_reports_api_cache_when_served_from_cache(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
 
     odds_api.fetch_moneyline_odds()  # primera llamada real, escribe caché
     odds_api.fetch_moneyline_odds()  # segunda: debe venir del caché
@@ -583,7 +600,7 @@ def test_get_last_fetch_meta_reports_api_cache_when_served_from_cache(monkeypatc
 def test_get_last_fetch_meta_reports_api_stale_cache_when_budget_exhausted(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "fake-key-for-tests")
     monkeypatch.setattr(odds_api, "ODDS_API_MONTHLY_BUDGET", 1)
-    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
+    monkeypatch.setattr(odds_api._session, "get", lambda *a, **k: _FakeResponse(FAKE_PAYLOAD))
 
     odds_api.fetch_moneyline_odds()  # consume el único request del presupuesto
 
@@ -592,7 +609,7 @@ def test_get_last_fetch_meta_reports_api_stale_cache_when_budget_exhausted(monke
     def fail_if_called(*a, **k):
         raise AssertionError("no debería intentar una llamada real sin presupuesto")
 
-    monkeypatch.setattr(odds_api.requests, "get", fail_if_called)
+    monkeypatch.setattr(odds_api._session, "get", fail_if_called)
 
     odds_api.fetch_moneyline_odds()
 
@@ -646,7 +663,7 @@ def test_fetch_moneyline_odds_sanitizes_api_key_from_error_log(monkeypatch, capl
             "/v4/sports/baseball_mlb/odds?apiKey=SECRETO123&regions=us (403 Forbidden)"
         )
 
-    monkeypatch.setattr(odds_api.requests, "get", fail)
+    monkeypatch.setattr(odds_api._session, "get", fail)
 
     with caplog.at_level(logging.WARNING, logger="mlb_edge_analyzer"):
         events = odds_api.fetch_moneyline_odds()

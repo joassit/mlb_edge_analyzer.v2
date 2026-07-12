@@ -16,14 +16,18 @@ import csv
 import os
 
 from model.edge import implied_prob
+from db.enums import MarketPriceSource, PickResult
 
 _DATO_NO_DISPONIBLE = "Dato no disponible"
 
+# Claves como Enum (no string crudo) -- MarketPriceSource hereda de (str, Enum),
+# así que una fila vieja con el string crudo "api_live" sigue matcheando esta
+# clave sin ninguna migración de datos (ver db/enums.py).
 _MARKET_SOURCE_LABELS = {
-    "api_live": "API en vivo",
-    "api_cache": "API (caché)",
-    "api_stale_cache": "API (caché vencido)",
-    "manual": "Manual",
+    MarketPriceSource.API_LIVE: "API en vivo",
+    MarketPriceSource.API_CACHE: "API (caché)",
+    MarketPriceSource.API_STALE_CACHE: "API (caché vencido)",
+    MarketPriceSource.MANUAL: "Manual",
 }
 
 
@@ -127,7 +131,7 @@ def team_label(pick: dict, game: dict) -> str:
 
 
 _MARKET_REVIEW_LABELS = {"moneyline": "ML", "run_line": "Handicap", "totals": "Totales"}
-_OUTCOME_LABELS = {"win": "✅ ACERTÓ", "loss": "❌ FALLÓ", "push": "➖ PUSH"}
+_OUTCOME_LABELS = {PickResult.WIN: "✅ ACERTÓ", PickResult.LOSS: "❌ FALLÓ", PickResult.PUSH: "➖ PUSH"}
 _PROB_SOURCE_LABELS = {"heuristic": "Heurístico", "skellam": "Skellam", "negbin": "Bin. Neg."}
 
 
@@ -392,7 +396,7 @@ def print_report(rows: list[dict], picks_by_game: dict | None = None,
                       f"(momio {_format_odds(odds_used)}, prob. implícita {implied_txt}, "
                       f"prob. mercado usada para el edge {market_prob_txt} (sin vig si hay "
                       f"consenso en vivo, si no implícita del momio), "
-                      f"edge {p['edge']:+.1%}, EV {p['ev']:+.2f}, Kelly {_DATO_NO_DISPONIBLE})"
+                      f"edge {p['edge']:+.1%}, EV {p['ev']:+.2f})"
                       f"{tag}{source_tag}{discrepancy_tag}")
 
         print("-" * 70)

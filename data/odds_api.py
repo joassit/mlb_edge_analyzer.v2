@@ -32,14 +32,30 @@ import time
 from datetime import date, datetime, timedelta
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config import ODDS_API_CACHE_TTL_SECONDS, ODDS_API_MONTHLY_BUDGET, ODDS_CACHE_DIR, resolve_odds_api_keys
 from data.contracts import require, SchemaError
 from data.quote_gate import gate_quote
+from db.enums import MarketPriceSource
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+
+# Mismo patrón de reintentos que data/http.py (MLB Stats API) y
+# data/weather.py (Open-Meteo) -- pero SIN 429 en status_forcelist a
+# propósito: 429 ya tiene su propio manejo explícito más abajo (rotar a la
+# siguiente key configurada, ver _try_key), y reintentar automáticamente la
+# MISMA key contra un 429 real gastaría hasta 3 llamadas de presupuesto
+# mensual pagado en reintentos inútiles contra un rate-limit, además de
+# sumar ~10s de backoff antes de poder rotar. 500/502/503/504 sí son fallas
+# transitorias de servidor -- ahí el reintento normal aplica.
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=3, backoff_factor=1.5, status_forcelist=[500, 502, 503, 504]
+)))
 
 # Enmascara el VALOR de cualquier parámetro de query cuyo nombre contenga
 # "key" o "token" (case-insensitive) -- requests.RequestException incluye
@@ -308,7 +324,7 @@ def _try_key(key: str, key_label: str) -> list | None:
         "dateFormat": "iso",
     }
     try:
-        resp = requests.get(ODDS_API_BASE, params=params, timeout=15)
+        resp = _session.get(ODDS_API_BASE, params=params, timeout=15)
         if resp.status_code in (401, 429):
             logger.warning(
                 f"The Odds API rechazó la key {key_label} (HTTP {resp.status_code}) -- "
@@ -355,20 +371,20 @@ def fetch_moneyline_odds() -> list[dict]:
 
     cached = _read_cache()
     if cached is not None:
-        _last_fetch_meta.update(source="api_cache", fetched_at=_cache_fetched_at())
+        _last_fetch_meta.update(source=MarketPriceSource.API_CACHE, fetched_at=_cache_fetched_at())
         return _parse_payload(cached)
 
     for idx, key in enumerate(api_keys):
         key_label = f"#{idx + 1} ({_hash_key(key)})"
         payload = _try_key(key, key_label)
         if payload is not None:
-            _last_fetch_meta.update(source="api_live", fetched_at=_cache_fetched_at())
+            _last_fetch_meta.update(source=MarketPriceSource.API_LIVE, fetched_at=_cache_fetched_at())
             return _parse_payload(payload)
 
     stale = _read_cache(ignore_ttl=True)
     if stale is not None:
         logger.warning("Usando el último caché de odds conocido (vencido) -- ninguna key configurada funcionó.")
-        _last_fetch_meta.update(source="api_stale_cache", fetched_at=_cache_fetched_at())
+        _last_fetch_meta.update(source=MarketPriceSource.API_STALE_CACHE, fetched_at=_cache_fetched_at())
         return _parse_payload(stale)
     _last_fetch_meta.update(source="none", fetched_at=None)
     return []

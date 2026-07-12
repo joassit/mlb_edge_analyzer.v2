@@ -120,6 +120,19 @@ def get_game_result(game_pk: int) -> dict | None:
     away_score = linescore.get("away", {}).get("runs")
 
     if home_score is None or away_score is None:
+        # abstractGameState="Final" con linescore vacío -- visto en la práctica en
+        # juegos pospuestos que la API deja de considerar "en curso" (a veces bajo
+        # una fecha distinta a la original, ver detailedState) sin nunca completar
+        # un marcador bajo este game_pk. Se sigue devolviendo None (el caller
+        # reintenta) pero se deja constancia en el log -- sin esto, estas filas
+        # parecen "todavía no jugadas" indefinidamente en vez de "pospuestas sin
+        # marcador reconciliable", que es la causa real.
+        logger.warning(
+            f"game_pk={game_pk}: abstractGameState=Final pero sin linescore "
+            f"(detailedState={game['status'].get('detailedState')!r}) -- probable "
+            f"juego pospuesto que no se completó bajo este game_pk, no un juego "
+            f"todavía pendiente."
+        )
         return None
 
     return {

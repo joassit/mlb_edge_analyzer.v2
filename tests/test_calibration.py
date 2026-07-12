@@ -115,6 +115,10 @@ def test_gap_calculation_known_case(tmp_path, monkeypatch):
     assert abs(bucket["hit_rate"] - 0.5) < 1e-9
     assert abs(bucket["avg_confidence"] - 0.6) < 1e-9
     assert abs(bucket["gap"] - (-0.1)) < 1e-9
+    # ECE/MCE (historical_engine/stats_utils.py, reutilizado -- ver PASO 1):
+    # único bucket poblado con gap=-0.1 -> ECE = |gap| = MCE = 0.1.
+    assert abs(cal["heuristic"]["ece"] - 0.1) < 1e-9
+    assert abs(cal["heuristic"]["mce"] - 0.1) < 1e-9
 
 
 def test_empty_buckets_return_none_without_division_by_zero(tmp_path, monkeypatch):
@@ -124,6 +128,8 @@ def test_empty_buckets_return_none_without_division_by_zero(tmp_path, monkeypatc
 
     for model_cal in cal.values():
         assert model_cal["n_games"] == 0
+        assert model_cal["ece"] is None
+        assert model_cal["mce"] is None
         for bucket in model_cal["buckets"]:
             assert bucket["n"] == 0
             assert bucket["hit_rate"] is None
@@ -155,6 +161,26 @@ def test_rows_missing_a_models_probability_are_skipped_not_broken(tmp_path, monk
     assert cal["skellam"]["n_games"] == 1
     assert cal["negbin"]["n_games"] == 0
     assert cal["negbin"]["n_skipped"] == 1
+
+
+def test_print_calibration_report_includes_ece_and_mce(tmp_path, monkeypatch, capsys):
+    Session = _fresh_session(tmp_path, monkeypatch, "cal_print_ece")
+    session = Session()
+    session.add(database.GameAnalysis(
+        game_pk=1, game_date=date.today().isoformat(), away_team="A", home_team="B",
+        away_model_prob=0.4, home_model_prob=0.6,
+    ))
+    session.add(database.ActualResult(
+        game_pk=1, game_date=date.today().isoformat(), home_score=5, away_score=2, winner="home", total_runs=7,
+    ))
+    session.commit()
+    session.close()
+
+    results_tracker.print_calibration_report(days=90)
+    out = capsys.readouterr().out
+
+    assert "ECE" in out
+    assert "MCE" in out
 
 
 def test_three_models_calibrate_independently_on_same_rows(tmp_path, monkeypatch):

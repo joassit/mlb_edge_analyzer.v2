@@ -20,14 +20,25 @@ from db.database import (
     SessionLocal, GameAnalysis, ActualResult, Bet, Pick,
     save_result, get_predictions_without_result, settle_bets_for_game, settle_picks_for_game,
 )
+# ECE/MCE ya viven en historical_engine/stats_utils.py (funciones puras, sin
+# DB ni estado) -- se reutilizan acá en vez de duplicar la fórmula. Esto NO
+# viola el aislamiento de historical_engine/ (ver tests/test_historical_isolation.py):
+# esa suite prohíbe que historical_engine importe DE producción, no que
+# producción importe una función matemática pura de historical_engine.
+from historical_engine.stats_utils import expected_calibration_error, maximum_calibration_error
+from db.enums import BetResult, PickResult
 
 logger = logging.getLogger("mlb_edge_analyzer")
 
 
-def update_results(days_back: int = 5) -> int:
+def update_results(days_back: int = 21) -> int:
     """
     Busca resultados reales para predicciones pasadas que aún no los
     tienen. Devuelve cuántos juegos se actualizaron.
+
+    days_back en 21 (antes 5) -- ver get_predictions_without_result() en
+    db/database.py: una ventana corta deja huérfanos para siempre a los
+    juegos pospuestos que tardan más de esos días en reanudarse.
     """
     pending = get_predictions_without_result(days_back=days_back)
     updated = 0
@@ -298,7 +309,7 @@ def count_liquidated_picks_with_market_odds() -> int:
     try:
         picks = (
             session.query(Pick)
-            .filter(Pick.odds_used.isnot(None), Pick.result != "pending")
+            .filter(Pick.odds_used.isnot(None), Pick.result != PickResult.PENDING)
             .all()
         )
     finally:
@@ -386,7 +397,11 @@ def _compute_model_calibration(rows: list, home_field: str) -> dict:
             "gap": hit_rate - avg_confidence,
         })
 
-    return {"n_games": n_games, "n_skipped": n_skipped, "buckets": buckets}
+    return {
+        "n_games": n_games, "n_skipped": n_skipped, "buckets": buckets,
+        "ece": expected_calibration_error(buckets, n_games),
+        "mce": maximum_calibration_error(buckets),
+    }
 
 
 def compute_calibration(days: int = 90) -> dict:
@@ -441,7 +456,7 @@ def compute_bet_performance(days: int = 30) -> dict:
     try:
         settled = (
             session.query(Bet)
-            .filter(Bet.game_date >= cutoff, Bet.result.in_(["win", "loss"]))
+            .filter(Bet.game_date >= cutoff, Bet.result.in_([BetResult.WIN, BetResult.LOSS]))
             .all()
         )
     finally:
@@ -452,7 +467,7 @@ def compute_bet_performance(days: int = 30) -> dict:
 
     total_staked = sum(b.stake for b in settled)
     total_profit = sum(b.profit for b in settled)
-    wins = sum(1 for b in settled if b.result == "win")
+    wins = sum(1 for b in settled if b.result == BetResult.WIN)
 
     return {
         "n_bets": len(settled),
@@ -474,8 +489,8 @@ def _summarize_picks(subset: list) -> dict:
     """
     if not subset:
         return {"n_picks": 0, "win_rate": None, "roi": None}
-    decided = [p for p in subset if p.result != "push"]
-    wins = sum(1 for p in decided if p.result == "win")
+    decided = [p for p in subset if p.result != PickResult.PUSH]
+    wins = sum(1 for p in decided if p.result == PickResult.WIN)
     total_profit = sum(p.profit_unit for p in subset if p.profit_unit is not None)
     return {
         "n_picks": len(subset),
@@ -510,7 +525,7 @@ def compute_pick_performance(days: int = 30) -> dict:
     try:
         picks = (
             session.query(Pick)
-            .filter(Pick.game_date >= cutoff, Pick.result.in_(["win", "loss", "push"]))
+            .filter(Pick.game_date >= cutoff, Pick.result.in_([PickResult.WIN, PickResult.LOSS, PickResult.PUSH]))
             .all()
         )
     finally:
@@ -594,7 +609,7 @@ def compute_daily_review(review_date: str) -> dict:
         }
         picks = (
             session.query(Pick)
-            .filter(Pick.game_date == review_date, Pick.result != "pending")
+            .filter(Pick.game_date == review_date, Pick.result != PickResult.PENDING)
             .all()
         )
     finally:
@@ -834,6 +849,10 @@ def print_calibration_report(days: int = 90) -> None:
 
         if model_cal["n_skipped"]:
             print(f"({model_cal['n_skipped']} predicción(es) sin probabilidad de este modelo, omitidas de arriba)")
+
+        if model_cal.get("ece") is not None:
+            print(f"ECE (error de calibración esperado): {model_cal['ece']:.1%}   "
+                  f"MCE (peor bucket): {model_cal['mce']:.1%}")
     print()
 
 

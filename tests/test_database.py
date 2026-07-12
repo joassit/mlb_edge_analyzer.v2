@@ -384,6 +384,114 @@ def test_save_picks_allows_multiple_markets_same_game(isolated_db):
         session.close()
 
 
+def test_save_game_results_persists_all_three_together(isolated_db):
+    row = {
+        "game_pk": 1, "game_date": "2026-07-05", "away_team": "A", "home_team": "B",
+        "away_model_prob": 0.6, "home_model_prob": 0.4,
+    }
+    snapshot = {"away_era": 3.5}
+    picks = [_make_pick("moneyline", "home")]
+
+    isolated_db.save_game_results(row, snapshot, picks, "v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        assert session.query(isolated_db.GameAnalysis).filter_by(game_pk=1).count() == 1
+        assert session.query(isolated_db.FeatureSnapshot).filter_by(game_pk=1).count() == 1
+        assert session.query(isolated_db.Pick).filter_by(game_pk=1).count() == 1
+    finally:
+        session.close()
+
+
+def test_save_game_results_rolls_back_all_three_if_picks_fail(isolated_db, monkeypatch):
+    """PASO 4: reproduce el problema original de la auditoría -- si guardar
+    los picks falla DESPUÉS de que el análisis ya se procesó en la misma
+    transacción, antes (3 sesiones/commits separados) el análisis ya
+    quedaba comiteado en disco sin sus picks. Ahora comparten sesión: un
+    fallo en cualquiera revierte los 3, no queda nada a medias."""
+    def _boom(*a, **k):
+        raise RuntimeError("fallo simulado guardando picks")
+
+    monkeypatch.setattr(isolated_db, "_upsert_picks", _boom)
+
+    row = {
+        "game_pk": 1, "game_date": "2026-07-05", "away_team": "A", "home_team": "B",
+        "away_model_prob": 0.6, "home_model_prob": 0.4,
+    }
+    snapshot = {"away_era": 3.5}
+    picks = [_make_pick("moneyline", "home")]
+
+    with pytest.raises(RuntimeError, match="fallo simulado"):
+        isolated_db.save_game_results(row, snapshot, picks, "v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        # NINGUNO de los 3 debe haber quedado grabado -- ni siquiera el
+        # análisis, que en la lógica vieja (3 llamadas separadas) ya
+        # habría comiteado exitosamente antes de llegar a los picks.
+        assert session.query(isolated_db.GameAnalysis).filter_by(game_pk=1).count() == 0
+        assert session.query(isolated_db.FeatureSnapshot).filter_by(game_pk=1).count() == 0
+        assert session.query(isolated_db.Pick).filter_by(game_pk=1).count() == 0
+    finally:
+        session.close()
+
+
+def test_settle_picks_for_game_works_on_pre_existing_row_with_raw_string_result(isolated_db):
+    """PASO 3 (Enums): una fila ya persistida ANTES de este cambio tiene
+    result="pending" como string crudo de Python, nunca el Enum -- esto
+    inserta esa fila exactamente como quedaría en una DB vieja (bypaseando
+    save_picks(), que ahora sí usaría PickResult) y confirma que
+    settle_picks_for_game() -- que ahora compara/asigna con PickResult --
+    la sigue liquidando bien, sin ninguna migración de datos."""
+    session = isolated_db.SessionLocal()
+    try:
+        session.add(isolated_db.Pick(
+            game_pk=1, game_date="2026-07-05", market="moneyline", selection="away",
+            model_prob=0.6, market_prob=0.5, edge=0.05, ev=0.06, odds_used=-150,
+            result="pending",  # string crudo, no PickResult.PENDING -- simula fila vieja
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    settled = isolated_db.settle_picks_for_game(1, {
+        "home_score": 2, "away_score": 5, "winner": "away", "total_runs": 7,
+    })
+    assert settled == 1
+
+    session = isolated_db.SessionLocal()
+    try:
+        pick = session.query(isolated_db.Pick).filter_by(game_pk=1, market="moneyline").one()
+        assert pick.result == "win"
+        assert pick.result == isolated_db.PickResult.WIN  # compara igual que el Enum, sin migración
+    finally:
+        session.close()
+
+
+def test_settle_bets_for_game_works_on_pre_existing_row_with_raw_string_result(isolated_db):
+    session = isolated_db.SessionLocal()
+    try:
+        session.add(isolated_db.Bet(
+            game_pk=1, game_date="2026-07-05", market="moneyline", side="away",
+            odds=130, model_prob=0.6, stake=1.0,
+            result="pending",  # string crudo -- simula fila vieja, no BetResult.PENDING
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    settled = isolated_db.settle_bets_for_game(1, winner="away")
+    assert settled == 1
+
+    session = isolated_db.SessionLocal()
+    try:
+        bet = session.query(isolated_db.Bet).filter_by(game_pk=1).one()
+        assert bet.result == "win"
+        assert bet.result == isolated_db.BetResult.WIN
+    finally:
+        session.close()
+
+
 def test_settle_picks_for_game_moneyline(isolated_db):
     isolated_db.save_picks(1, "2026-07-05", [_make_pick("moneyline", "away", odds_used=-150)], "v1")
 
@@ -725,3 +833,56 @@ def test_auto_add_missing_columns_alter_statement_is_ansi_compatible():
     col_type = database.Pick.__table__.columns["favorite_side"].type.compile(dialect=dialect)
     statement = f"ALTER TABLE picks ADD COLUMN favorite_side {col_type}"
     assert statement == "ALTER TABLE picks ADD COLUMN favorite_side VARCHAR"
+
+
+# --- get_predictions_without_result: ventana de 21 días (antes 5) ---
+# Un juego pospuesto que tarda más de 5 días en reanudarse bajo el mismo
+# game_pk quedaba huérfano (winner=None) para siempre, porque
+# update_results() nunca volvía a mirarlo una vez que su game_date caía
+# fuera de la ventana -- ver el hallazgo documentado en el informe técnico
+# del 2026-07-11 (dos filas huérfanas: 07-07 y 07-10).
+
+def test_get_predictions_without_result_default_window_is_21_days(isolated_db):
+    from datetime import date, timedelta
+
+    old_date = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    isolated_db.save_analysis({
+        "game_pk": 111, "game_date": old_date,
+        "away_team": "A", "home_team": "B",
+    })
+
+    pending = isolated_db.get_predictions_without_result()
+
+    assert any(p["game_pk"] == 111 for p in pending)
+
+
+def test_get_predictions_without_result_excludes_games_older_than_window(isolated_db):
+    from datetime import date, timedelta
+
+    too_old_date = (date.today() - timedelta(days=25)).strftime("%Y-%m-%d")
+    isolated_db.save_analysis({
+        "game_pk": 112, "game_date": too_old_date,
+        "away_team": "A", "home_team": "B",
+    })
+
+    pending = isolated_db.get_predictions_without_result()
+
+    assert all(p["game_pk"] != 112 for p in pending)
+
+
+def test_get_predictions_without_result_excludes_games_with_saved_result(isolated_db):
+    from datetime import date, timedelta
+
+    recent_date = (date.today() - timedelta(days=2)).strftime("%Y-%m-%d")
+    isolated_db.save_analysis({
+        "game_pk": 113, "game_date": recent_date,
+        "away_team": "A", "home_team": "B",
+    })
+    isolated_db.save_result({
+        "game_pk": 113, "game_date": recent_date,
+        "home_score": 4, "away_score": 2, "winner": "home", "total_runs": 6,
+    })
+
+    pending = isolated_db.get_predictions_without_result()
+
+    assert all(p["game_pk"] != 113 for p in pending)

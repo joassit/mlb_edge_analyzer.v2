@@ -1,0 +1,56 @@
+name: historical-ingest
+
+# Infraestructura permanente de historical_engine/ -- completamente
+# aislada de daily_pipeline.yml (producción, ver test_historical_isolation.py
+# ::test_daily_pipeline_workflow_does_not_reference_historical_engine). Este
+# workflow nunca corre por schedule ni se invoca desde otro workflow: solo
+# a mano, una temporada a la vez, cuando se necesita (re)ingerir historial.
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Año de temporada a ingerir (ej. 2024)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-season:
+    runs-on: ubuntu-latest
+    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
+    # para jobs en runners hosteados que ningún timeout-minutes puede
+    # superar. Con el fix de climatología point-in-time (WEATHER_
+    # CLIMATOLOGY_YEARS=3 + cache dentro de la corrida, ver
+    # point_in_time_provider.py) una temporada completa toma ~4h30m-4h50m
+    # -- 300 llegó a cortar una corrida real a mitad de camino antes de
+    # bajar de 5 a 3 años de climatología (run 29101406176, temporada
+    # 2025). 340 deja margen real sin acercarse al tope de la plataforma.
+    timeout-minutes: 340
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest season
+        run: python -m historical_engine.cli season ${{ inputs.season }}
+
+      # Nombre con la temporada incluida a propósito: sin esto, correr dos
+      # temporadas distintas (ej. 2023 y 2024) pisaría el mismo artifact --
+      # con el año en el nombre, cada corrida deja su propia base separada.
+      - name: Upload historical_backtest.db
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-backtest-db-${{ inputs.season }}
+          path: historical_backtest.db
+          if-no-files-found: warn
+          retention-days: 30
