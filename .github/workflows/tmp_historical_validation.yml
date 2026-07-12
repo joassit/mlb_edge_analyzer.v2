@@ -1,33 +1,27 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada mientras historical_ingest.yml/
-# historical_ingest_simple.yml (los archivos permanentes) terminan de
-# indexarse. Se retira/reemplaza según haga falta en cada uso.
+# indexado de workflow_dispatch para archivos nuevos). Modo actual:
+# experimento de forma reciente (ventana móvil) de UNA temporada, usando el
+# artifact historical-raw-logs-{season} de esa temporada (cada uno vive en
+# el run que lo generó, ver el mapeo abajo) -- se restaura a modo ingesta
+# de temporada cuando termine este uso.
 on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'Año de temporada a ingerir (ej. 2025)'
+        description: 'Año de temporada (2022/2023/2024/2025)'
         required: true
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  ingest-season:
+  recent-form-experiment:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
-    # para jobs en runners hosteados que ningún timeout-minutes puede
-    # superar. 300 min cortó la corrida de 2025 a mitad de camino (el fix
-    # de climatología del Paso 4 de la auditoría de look-ahead bias subió
-    # el costo real por juego). Con WEATHER_CLIMATOLOGY_YEARS bajado de 5
-    # a 3 + cache de climatología dentro de la corrida, una temporada
-    # completa debería entrar cómoda en ~4h30m-4h50m -- 340 deja margen
-    # real sin acercarse al tope de la plataforma.
-    timeout-minutes: 340
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -37,12 +31,20 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
+      - id: artifact-run
+        run: |
+          case "${{ inputs.season }}" in
+            2022) echo "run_id=29178320584" >> "$GITHUB_OUTPUT" ;;
+            2023) echo "run_id=29177971869" >> "$GITHUB_OUTPUT" ;;
+            2024) echo "run_id=29177975360" >> "$GITHUB_OUTPUT" ;;
+            2025) echo "run_id=29178323416" >> "$GITHUB_OUTPUT" ;;
+            *) echo "temporada no soportada: ${{ inputs.season }}" >&2; exit 1 ;;
+          esac
 
-      - if: always()
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v6
         with:
-          name: historical-backtest-db-${{ inputs.season }}
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+          name: historical-raw-logs-${{ inputs.season }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.artifact-run.outputs.run_id }}
+
+      - run: python scratchpad_recent_form_experiment.py ${{ inputs.season }}
