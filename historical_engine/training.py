@@ -20,7 +20,9 @@ from model.predictor import predict_from_raw_inputs
 from model.runs_projection import HOME_FIELD_RUNS_BONUS
 from model.skellam_model import skellam_win_prob
 
-from historical_engine.db import HistoricalAnalysis, HistoricalGame, HistoricalSimulation, SessionLocal
+from historical_engine.db import (
+    HistoricalAnalysis, HistoricalGame, HistoricalPrediction, HistoricalSimulation, SessionLocal,
+)
 from historical_engine.stats_utils import brier_score
 
 # league_ops/league_era/league_avg_runs_per_game point-in-time SÍ se usan al
@@ -363,4 +365,89 @@ def propose_starter_weight_recalibration(
         "best_candidate": best,
         "applied": False,
         "note": "Ninguna propuesta se aplicó a producción -- config.STARTER_WEIGHT no fue modificado.",
+    }
+
+
+def propose_probability_shrinkage(
+    source: str, season_year: int, run_id: int, candidate_values: list[float] | None = None,
+    session_factory=None,
+) -> dict:
+    """
+    Calibración por contracción hacia 0.5: p_cal = 0.5 + alpha * (p_cruda - 0.5),
+    con alpha ajustado contra el histórico minimizando Brier. Motivación: el
+    análisis de selectividad sobre 2022-2025 mostró que Skellam está
+    estructuralmente SOBRECONFIADO (declarando >= 70% de confianza acierta
+    solo ~59.5%, n=824) -- la causa de fondo es que skellam_win_prob trata
+    los mu proyectados como exactos, sin propagar la incertidumbre de la
+    estimación, dejando las colas demasiado extremas. alpha < 1 corrige
+    exactamente esa firma; alpha == 1.0 es la identidad (baseline actual,
+    sin calibración en producción).
+
+    Mismo contrato que el resto de este módulo: guarda una fila por
+    candidato en HistoricalSimulation con applied=False. NUNCA modifica
+    producción -- aplicar una contracción al pipeline en vivo es una
+    decisión manual aparte (afectaría edge/EV de los picks, no solo
+    métricas de tracking).
+    """
+    baseline_alpha = 1.0  # producción hoy no aplica ninguna contracción
+    candidate_values = candidate_values or [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    session_factory = session_factory or SessionLocal
+    session = session_factory()
+    try:
+        predictions = (
+            session.query(HistoricalPrediction)
+            .filter_by(season_year=season_year, source=source)
+            .filter(HistoricalPrediction.actual_winner.isnot(None))
+            .all()
+        )
+        home_probs = [p.home_prob for p in predictions]
+        outcomes = [1 if p.actual_winner == "home" else 0 for p in predictions]
+
+        def _brier_for(alpha):
+            calibrated = [0.5 + alpha * (p - 0.5) for p in home_probs]
+            return brier_score(calibrated, outcomes), len(calibrated)
+
+        baseline_brier, baseline_n = _brier_for(baseline_alpha)
+
+        proposals = []
+        for alpha in candidate_values:
+            candidate_brier, n = _brier_for(alpha)
+            improved = (
+                candidate_brier is not None and baseline_brier is not None and candidate_brier < baseline_brier
+            )
+            sim = HistoricalSimulation(
+                run_id=run_id, season_year=season_year,
+                param_name=f"PROB_SHRINKAGE_{source.upper()}",
+                baseline_value=baseline_alpha, proposed_value=alpha,
+                based_on_metric="brier_score", baseline_metric_value=baseline_brier,
+                proposed_metric_value=candidate_brier, improved=improved,
+                notes=(
+                    f"n={n} juegos con resultado real en {season_year}, motor {source}. "
+                    f"p_cal = 0.5 + alpha*(p-0.5). Propuesta generada por "
+                    f"historical_engine/training.py -- NO aplicada automáticamente; aplicar "
+                    f"una contracción en vivo afectaría edge/EV de los picks y requiere su "
+                    f"propia decisión y revisión."
+                ),
+                applied=False,
+            )
+            session.add(sim)
+            proposals.append({
+                "param_value": alpha, "brier_score": candidate_brier, "n_sample": n, "improved_over_baseline": improved,
+            })
+        session.commit()
+    finally:
+        session.close()
+
+    best = min(
+        (p for p in proposals if p["brier_score"] is not None),
+        key=lambda p: p["brier_score"], default=None,
+    )
+
+    return {
+        "season_year": season_year, "source": source,
+        "baseline_value": baseline_alpha, "baseline_brier_score": baseline_brier, "baseline_n_sample": baseline_n,
+        "proposals": proposals,
+        "best_candidate": best,
+        "applied": False,
+        "note": "Ninguna contracción se aplicó a producción -- las probabilidades en vivo siguen sin calibrar.",
     }

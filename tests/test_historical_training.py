@@ -12,6 +12,7 @@ import config as production_config
 import historical_engine.db as historical_db
 from historical_engine.training import (
     propose_dispersion_recalibration,
+    propose_probability_shrinkage,
     propose_runs_projection_recalibration,
     propose_starter_weight_recalibration,
     _recompute_mu_with_candidate,
@@ -328,3 +329,68 @@ def test_raw_inputs_for_starter_weight_candidate_sets_the_candidate_weight():
     )
     raw = _raw_inputs_for_starter_weight_candidate(analysis, 0.42)
     assert raw["starter_weight"] == 0.42
+
+
+# --- propose_probability_shrinkage (calibración por contracción hacia 0.5) ---
+#
+# Se siembra un motor deliberadamente SOBRECONFIADO: declara 0.80/0.20 en
+# juegos que en realidad se ganan ~50/50 -- la contracción (alpha < 1) debe
+# mejorar el Brier, y alpha == 1.0 debe reproducir el baseline exacto.
+
+def _seeded_with_overconfident_predictions(tmp_path, name, source="skellam"):
+    engine = create_engine(f"sqlite:///{tmp_path}/{name}.db")
+    historical_db.HistoricalBase.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    # 4 juegos: el motor declara 0.80 para el local en todos, pero el local
+    # gana solo 2 de 4 -- sobreconfianza pura.
+    winners = ["home", "away", "home", "away"]
+    for game_pk, winner in enumerate(winners, start=1):
+        session.add(historical_db.HistoricalPrediction(
+            run_id=1, game_pk=game_pk, game_date="2024-05-01", season_year=2024,
+            source=source, home_prob=0.80, away_prob=0.20,
+            predicted_winner="home", actual_winner=winner, correct=(winner == "home"),
+        ))
+    session.commit()
+    session.close()
+    return Session
+
+
+def test_shrinkage_never_modifies_production_and_marks_applied_false(tmp_path):
+    Session = _seeded_with_overconfident_predictions(tmp_path, "shrink_applied_false")
+    result = propose_probability_shrinkage(
+        source="skellam", season_year=2024, run_id=1, candidate_values=[0.5, 1.0], session_factory=Session,
+    )
+    assert result["applied"] is False
+
+    session = Session()
+    sims = session.query(historical_db.HistoricalSimulation).all()
+    session.close()
+    assert len(sims) > 0
+    assert all(sim.applied is False for sim in sims)
+    assert all(sim.param_name == "PROB_SHRINKAGE_SKELLAM" for sim in sims)
+
+
+def test_shrinkage_improves_brier_for_overconfident_model(tmp_path):
+    Session = _seeded_with_overconfident_predictions(tmp_path, "shrink_improves")
+    result = propose_probability_shrinkage(
+        source="skellam", season_year=2024, run_id=1,
+        candidate_values=[0.0, 0.5, 1.0], session_factory=Session,
+    )
+    by_alpha = {p["param_value"]: p for p in result["proposals"]}
+    # alpha=1.0 es la identidad: mismo Brier que el baseline.
+    assert by_alpha[1.0]["brier_score"] == pytest.approx(result["baseline_brier_score"])
+    # Con aciertos 50/50 y probs 0.80, encoger SIEMPRE mejora -- y alpha=0.0
+    # (todo a 0.5) es el óptimo teórico para esta semilla.
+    assert by_alpha[0.5]["improved_over_baseline"] is True
+    assert result["best_candidate"]["param_value"] == 0.0
+
+
+def test_shrinkage_only_uses_predictions_of_the_requested_source(tmp_path):
+    Session = _seeded_with_overconfident_predictions(tmp_path, "shrink_source_filter", source="negbin")
+    result = propose_probability_shrinkage(
+        source="skellam", season_year=2024, run_id=1, candidate_values=[0.5], session_factory=Session,
+    )
+    # No hay filas de skellam sembradas -- n debe ser 0 y ningún Brier calculable.
+    assert result["baseline_n_sample"] == 0
+    assert result["baseline_brier_score"] is None
