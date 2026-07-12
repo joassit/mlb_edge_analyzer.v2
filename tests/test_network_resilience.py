@@ -73,3 +73,31 @@ def test_get_schedule_returns_empty_list_on_malformed_json(monkeypatch):
 
     monkeypatch.setattr(mlb_api_mod.session, "get", lambda *a, **k: _FakeResp())
     assert get_schedule() == []
+
+
+def test_get_game_result_logs_warning_when_final_but_postponed_with_no_linescore(monkeypatch, caplog):
+    # Encontrado auditando 2 filas huérfanas reales (informe técnico del
+    # 2026-07-11): abstractGameState=Final pero detailedState=Postponed y
+    # linescore={} -- el juego nunca completó un marcador bajo este game_pk.
+    # Sigue devolviendo None (mismo contrato, el caller reintenta), pero
+    # ahora queda en el log en vez de parecer "todavía no jugado".
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "dates": [{
+                    "games": [{
+                        "status": {"abstractGameState": "Final", "detailedState": "Postponed"},
+                        "linescore": {"teams": {}},
+                    }]
+                }]
+            }
+
+    monkeypatch.setattr(mlb_api_mod.session, "get", lambda *a, **k: _FakeResp())
+    with caplog.at_level("WARNING"):
+        result = get_game_result(823062)
+
+    assert result is None
+    assert any("game_pk=823062" in r.message and "Postponed" in r.message for r in caplog.records)
