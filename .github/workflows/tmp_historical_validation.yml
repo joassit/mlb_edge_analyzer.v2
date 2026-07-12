@@ -1,33 +1,26 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada mientras historical_ingest.yml/
-# historical_ingest_simple.yml (los archivos permanentes) terminan de
-# indexarse. Se retira/reemplaza según haga falta en cada uso.
+# Uso temporal (ver historial del archivo). Modo actual: auditoría
+# científica AVANZADA (bootstrap, LOSO, estabilidad de parámetros,
+# interacciones, techo predictivo, kNN de evidencia) sobre las 4
+# historical_backtest.db reales. Se restaura a modo season-ingest al
+# terminar.
 on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'Año de temporada a ingerir (ej. 2025)'
-        required: true
+        description: 'Ignorado en este modo (advanced-audit corre las 4)'
+        required: false
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  ingest-season:
+  advanced-audit:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
-    # para jobs en runners hosteados que ningún timeout-minutes puede
-    # superar. 300 min cortó la corrida de 2025 a mitad de camino (el fix
-    # de climatología del Paso 4 de la auditoría de look-ahead bias subió
-    # el costo real por juego). Con WEATHER_CLIMATOLOGY_YEARS bajado de 5
-    # a 3 + cache de climatología dentro de la corrida, una temporada
-    # completa debería entrar cómoda en ~4h30m-4h50m -- 340 deja margen
-    # real sin acercarse al tope de la plataforma.
-    timeout-minutes: 340
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -37,12 +30,37 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
-
-      - if: always()
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v6
         with:
-          name: historical-backtest-db-${{ inputs.season }}
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+          name: historical-raw-logs-2022
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29178320584
+          path: dbs/2022
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-raw-logs-2023
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29177971869
+          path: dbs/2023
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-raw-logs-2024
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29177975360
+          path: dbs/2024
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: historical-raw-logs-2025
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29178323416
+          path: dbs/2025
+
+      - run: |
+          python scratchpad_advanced_audit.py \
+            2022=dbs/2022/historical_backtest.db \
+            2023=dbs/2023/historical_backtest.db \
+            2024=dbs/2024/historical_backtest.db \
+            2025=dbs/2025/historical_backtest.db
