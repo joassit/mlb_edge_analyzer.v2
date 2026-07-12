@@ -1,26 +1,32 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos). Modo actual: ingesta
-# de logs crudos (bateo/pitcheo/roster) de UNA temporada sobre el histórico
-# consolidado 2022-2025 (artifact historical-backtest-db-consolidated-
-#2022-2025) -- se restaura a modo ingesta de temporada cuando termine este
-# uso.
+# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
+# real de una temporada mientras historical_ingest.yml/
+# historical_ingest_simple.yml (los archivos permanentes) terminan de
+# indexarse. Se retira/reemplaza según haga falta en cada uso.
 on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'Año de temporada (2022/2023/2024/2025) o "selectivity" para el análisis de umbral de confianza'
+        description: 'Año de temporada a ingerir (ej. 2025)'
         required: true
         type: string
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  raw-logs-ingest:
+  ingest-season:
     runs-on: ubuntu-latest
+    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
+    # para jobs en runners hosteados que ningún timeout-minutes puede
+    # superar. 300 min cortó la corrida de 2025 a mitad de camino (el fix
+    # de climatología del Paso 4 de la auditoría de look-ahead bias subió
+    # el costo real por juego). Con WEATHER_CLIMATOLOGY_YEARS bajado de 5
+    # a 3 + cache de climatología dentro de la corrida, una temporada
+    # completa debería entrar cómoda en ~4h30m-4h50m -- 340 deja margen
+    # real sin acercarse al tope de la plataforma.
     timeout-minutes: 340
     steps:
       - uses: actions/checkout@v7
@@ -31,25 +37,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - uses: actions/download-artifact@v6
-        with:
-          name: historical-backtest-db-consolidated-2022-2025
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: 29166468139
+      - run: python -m historical_engine.cli season ${{ inputs.season }}
 
-      - if: ${{ inputs.season != 'selectivity' && inputs.season != 'shrinkage' }}
-        run: python scratchpad_raw_logs_ingest.py ${{ inputs.season }}
-
-      - if: ${{ inputs.season == 'selectivity' }}
-        run: python scratchpad_selectivity_analysis.py
-
-      - if: ${{ inputs.season == 'shrinkage' }}
-        run: python scratchpad_shrinkage_sweep.py
-
-      - if: ${{ always() && inputs.season != 'selectivity' && inputs.season != 'shrinkage' }}
+      - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: historical-raw-logs-${{ inputs.season }}
+          name: historical-backtest-db-${{ inputs.season }}
           path: historical_backtest.db
           if-no-files-found: warn
           retention-days: 30
