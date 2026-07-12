@@ -59,13 +59,13 @@ WEATHER_CORRECTION = 0.0
 # scripts/calibrate_dispersion.py) en cuanto haya ~100 juegos con resultado
 # en la base de datos.
 #
-# Valor actual: 7.0 -- PRIOR de literatura sabermétrica, sin calibrar
-# todavía contra datos propios (0 juegos con resultado real disponibles al
-# momento de fijar esto). k entre 5 y 10 es el rango típico reportado para
-# carreras por equipo por juego en MLB. Recalibrar corriendo
-# scripts/calibrate_dispersion.py apenas se acumulen suficientes resultados,
-# y actualizar este comentario con la fecha y el número de juegos usados.
-NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "7.0"))
+# Valor actual: 3.0 -- recalibrado 2026-07-12 con historical_engine contra las
+# 4 temporadas consolidadas (2022-2025, ~9,700 juegos con resultado real):
+# propose_dispersion_recalibration() confirmó que k=3.0 mejora el Brier score
+# de NegBin sobre el prior original de 7.0 en las 4 temporadas individualmente.
+# No afecta los picks en vivo (PICK_PROBABILITY_SOURCE="skellam" es el modelo
+# activo) -- este valor solo alimenta el tracking/comparación de NegBin.
+NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "3.0"))
 
 # --- Fuente de probabilidad para picks de moneyline ---
 # Qué modelo alimenta la probabilidad de moneyline en model/picks.py:
