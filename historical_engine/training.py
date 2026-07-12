@@ -14,13 +14,25 @@ pasado con k=X" se calcule con la matemática EXACTA de producción, nunca
 una reimplementación paralela que pudiera divergir.
 """
 
-from config import NEGBIN_DISPERSION, PARK_FACTOR_WEIGHT, WEATHER_CORRECTION
+from config import NEGBIN_DISPERSION, PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, HOME_FIELD_ADVANTAGE, STARTER_WEIGHT
 from model.negbin_model import negbin_win_prob
+from model.predictor import predict_from_raw_inputs
 from model.runs_projection import HOME_FIELD_RUNS_BONUS
 from model.skellam_model import skellam_win_prob
 
 from historical_engine.db import HistoricalAnalysis, HistoricalGame, HistoricalSimulation, SessionLocal
 from historical_engine.stats_utils import brier_score
+
+# league_ops/league_era/league_avg_runs_per_game point-in-time SÍ se usan al
+# ingerir (historical_engine/pipeline.py) pero no se persisten por fila en
+# HistoricalAnalysis -- propose_starter_weight_recalibration() usa estos
+# defaults de liga para TODOS los candidatos (baseline incluido), así que la
+# comparación ENTRE candidatos es justa (mismo supuesto para todos), aunque
+# el nivel absoluto de Brier no reproduce exactamente el de producción (que
+# sí tuvo el valor real point-in-time). Ver docstring de la función.
+_DEFAULT_LEAGUE_OPS = 0.750
+_DEFAULT_LEAGUE_ERA = 4.30
+_DEFAULT_LEAGUE_RUNS_PER_GAME = 4.4
 
 
 def _actual_outcomes_by_game(run_id: int, session) -> dict:
@@ -224,4 +236,131 @@ def propose_runs_projection_recalibration(
         "best_candidate": best,
         "applied": False,
         "note": f"Ninguna propuesta se aplicó a producción -- config.{param_name} no fue modificado.",
+    }
+
+
+def _raw_inputs_for_starter_weight_candidate(a: HistoricalAnalysis, starter_weight: float) -> dict | None:
+    """
+    Arma el dict `raw` que espera model.predictor.py::predict_from_raw_inputs
+    a partir de una fila de HistoricalAnalysis, con `starter_weight` como
+    único parámetro variable -- todo lo demás (ERA/OPS/bullpen/park_factor/
+    temp_f, point-in-time) viene tal cual se congeló en la ingesta.
+
+    league_ops/league_era/league_avg_runs_per_game usan el default de
+    config.py (no el valor real point-in-time de ese juego, que no se
+    persiste) -- ver nota al inicio del módulo. None si falta algún insumo
+    obligatorio para predict_from_raw_inputs (era/ops/bullpen_era/park_factor).
+    """
+    required = (a.away_era, a.home_era, a.away_ops, a.home_ops, a.away_bullpen_era, a.home_bullpen_era, a.park_factor)
+    if any(v is None for v in required):
+        return None
+
+    return {
+        "away_era": a.away_era, "home_era": a.home_era,
+        "away_ops": a.away_ops, "home_ops": a.home_ops,
+        "away_bullpen_era": a.away_bullpen_era, "home_bullpen_era": a.home_bullpen_era,
+        "away_innings_pitched": a.away_innings_pitched, "home_innings_pitched": a.home_innings_pitched,
+        "away_k_pct": a.away_k_pct, "home_k_pct": a.home_k_pct,
+        "away_bb_pct": a.away_bb_pct, "home_bb_pct": a.home_bb_pct,
+        "away_days_rest": a.away_days_rest, "home_days_rest": a.home_days_rest,
+        "park_factor": a.park_factor, "temp_f": a.temp_f,
+        "starter_weight": starter_weight,
+        "league_ops": _DEFAULT_LEAGUE_OPS, "league_era": _DEFAULT_LEAGUE_ERA,
+        "league_avg_runs_per_game": _DEFAULT_LEAGUE_RUNS_PER_GAME,
+        "park_factor_weight": PARK_FACTOR_WEIGHT, "weather_correction": WEATHER_CORRECTION,
+        "home_field_advantage": HOME_FIELD_ADVANTAGE, "negbin_dispersion": NEGBIN_DISPERSION,
+    }
+
+
+def propose_starter_weight_recalibration(
+    season_year: int, run_id: int, candidate_values: list[float] | None = None,
+    session_factory=None,
+) -> dict:
+    """
+    Compara el Brier score de Skellam con config.STARTER_WEIGHT vigente
+    (0.65, nunca calibrado contra datos reales -- ver config.py) contra
+    valores candidatos, llamando DIRECTAMENTE a
+    model.predictor.py::predict_from_raw_inputs (la función real de
+    producción, no una reimplementación) con cada candidato.
+
+    A diferencia de propose_dispersion_recalibration/
+    propose_runs_projection_recalibration, aquí SÍ se recalcula mu desde
+    cero en vez de partir de home_proj_runs/away_proj_runs congelados,
+    porque STARTER_WEIGHT determina cómo se pondera ERA de abridor vs.
+    bullpen ANTES de multiplicar por el resto de factores -- no se puede
+    despejar por álgebra simple como con el peso de parque. Usa
+    league_ops/league_era/league_avg_runs_per_game default de config.py
+    para TODOS los candidatos (ver nota al inicio del módulo) -- el Brier
+    absoluto de este barrido no es comparable 1:1 con el de
+    validate_source()/compare_models(), pero la comparación ENTRE
+    candidatos (qué tan sensible es Brier a STARTER_WEIGHT) sí es válida,
+    porque todos comparten el mismo supuesto de liga.
+
+    Mismo criterio de siempre: guarda una fila por candidato en
+    HistoricalSimulation con `applied=False`. NUNCA modifica config.py.
+    """
+    candidate_values = candidate_values or [0.3, 0.4, 0.5, 0.6, 0.65, 0.7, 0.8, 0.9]
+    session_factory = session_factory or SessionLocal
+    session = session_factory()
+    try:
+        analyses = session.query(HistoricalAnalysis).filter_by(season_year=season_year).all()
+        outcomes_by_game = _actual_outcomes_by_game(run_id, session)
+
+        def _brier_for(weight):
+            probs, actuals = [], []
+            for a in analyses:
+                winner = outcomes_by_game.get(a.game_pk)
+                if winner is None:
+                    continue
+                raw = _raw_inputs_for_starter_weight_candidate(a, weight)
+                if raw is None:
+                    continue
+                prediction = predict_from_raw_inputs(raw)
+                probs.append(prediction["home_skellam_prob"])
+                actuals.append(1 if winner == "home" else 0)
+            return brier_score(probs, actuals), len(probs)
+
+        baseline_brier, baseline_n = _brier_for(STARTER_WEIGHT)
+
+        proposals = []
+        for weight in candidate_values:
+            candidate_brier, n = _brier_for(weight)
+            improved = (
+                candidate_brier is not None and baseline_brier is not None and candidate_brier < baseline_brier
+            )
+            sim = HistoricalSimulation(
+                run_id=run_id, season_year=season_year, param_name="STARTER_WEIGHT",
+                baseline_value=STARTER_WEIGHT, proposed_value=weight,
+                based_on_metric="brier_score", baseline_metric_value=baseline_brier,
+                proposed_metric_value=candidate_brier, improved=improved,
+                notes=(
+                    f"n={n} juegos con resultado real en {season_year}. league_ops/league_era "
+                    f"default de config.py (no point-in-time real, ver nota en training.py) -- "
+                    f"Brier absoluto no comparable con validate_source(), solo la comparación "
+                    f"ENTRE candidatos de este barrido. Propuesta generada por "
+                    f"historical_engine/training.py, NO aplicada automáticamente, requiere "
+                    f"edición manual de config.STARTER_WEIGHT y su propia revisión."
+                ),
+                applied=False,
+            )
+            session.add(sim)
+            proposals.append({
+                "param_value": weight, "brier_score": candidate_brier, "n_sample": n, "improved_over_baseline": improved,
+            })
+        session.commit()
+    finally:
+        session.close()
+
+    best = min(
+        (p for p in proposals if p["brier_score"] is not None),
+        key=lambda p: p["brier_score"], default=None,
+    )
+
+    return {
+        "season_year": season_year,
+        "baseline_value": STARTER_WEIGHT, "baseline_brier_score": baseline_brier, "baseline_n_sample": baseline_n,
+        "proposals": proposals,
+        "best_candidate": best,
+        "applied": False,
+        "note": "Ninguna propuesta se aplicó a producción -- config.STARTER_WEIGHT no fue modificado.",
     }
