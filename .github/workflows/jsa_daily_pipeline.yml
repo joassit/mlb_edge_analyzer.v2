@@ -1,0 +1,171 @@
+name: jsa-daily-pipeline
+
+on:
+  schedule:
+    # Mismas lecciones operativas que mlb_edge_analyzer.v2/.github/workflows/
+    # daily_pipeline.yml (ver ese archivo para la evidencia real completa):
+    # GitHub documenta `schedule` como best-effort y puede retrasarse o
+    # saltarse durante picos de carga -- confirmado en produccion (solo 1
+    # de 3 corridas programadas de una semana se disparo a horario, con
+    # mas de 6h de retraso). Ambos crons desplazados del minuto en punto
+    # (11 y 41, no 0) a proposito, por la misma razon. El segundo cron es
+    # un respaldo por si el principal no se disparo -- ver el step "Check
+    # if today already ran" mas abajo, que evita que el respaldo vuelva a
+    # evaluar el mismo dia si el principal ya corrio.
+    - cron: "11 15 * * *"  # principal, ~15:00 UTC
+    - cron: "41 17 * * *"  # respaldo, ~17:41 UTC (~2h40m despues)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # El contexto `secrets` NO esta disponible dentro de `if:` a nivel de
+    # step -- se resuelve UNA vez aqui, a nivel de job, en `env:` (que si
+    # es un contexto valido en `if:`); los steps de abajo solo leen
+    # env.HAS_EXTERNAL_DB, nunca `secrets` directamente en un `if:`.
+    env:
+      HAS_EXTERNAL_DB: ${{ secrets.JSA_DATABASE_URL != '' }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      # Persistencia best-effort de jsa.db entre corridas -- best-effort de
+      # verdad: GitHub puede liberar la cache en silencio (7+ dias sin
+      # tocarla, o si se excede el limite de 10GB del repo). Se salta por
+      # completo si configuras el secret JSA_DATABASE_URL (Postgres
+      # administrado) -- ahi el pipeline usa esa base persistente real y
+      # esta cache ya no hace falta. La key incluye github.run_id (siempre
+      # unica) para nunca chocar con una key existente; restore-keys
+      # recupera el snapshot mas reciente por prefijo.
+      - name: Restore previous jsa.db (best-effort, solo sin JSA_DATABASE_URL externo)
+        if: ${{ env.HAS_EXTERNAL_DB != 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: jsa.db
+          key: jsa-db-${{ github.run_id }}
+          restore-keys: |
+            jsa-db-
+
+      - name: Warn about best-effort SQLite persistence
+        if: ${{ env.HAS_EXTERNAL_DB != 'true' }}
+        run: |
+          echo "::warning::JSA_DATABASE_URL no esta configurado -- jsa.db persiste via actions/cache, que GitHub puede liberar en silencio (7+ dias sin uso, o >10GB en el repo). Si eso pasa, el Feature Store/Results Store/Registries completos desaparecen sin error visible. Configura el secret JSA_DATABASE_URL (Postgres administrado) para eliminar este riesgo."
+
+      # Guarda de idempotencia SOLO para corridas por cron -- ver
+      # jsa/scripts/check_already_ran_today.py para el porque completo.
+      # Nunca se salta en un workflow_dispatch manual: quien dispara a
+      # mano siempre quiere que corra, sin importar si ya hay datos de hoy.
+      - name: Check if today already ran (idempotency guard for backup cron)
+        id: idempotency-check
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+        run: |
+          if [ -n "$JSA_DATABASE_URL_SECRET" ]; then
+            export JSA_DATABASE_URL="$JSA_DATABASE_URL_SECRET"
+          fi
+          ALREADY_RAN=$(python -m jsa.scripts.check_already_ran_today)
+          echo "already_ran=$ALREADY_RAN" >> "$GITHUB_OUTPUT"
+          if [ "$ALREADY_RAN" = "true" ]; then
+            echo "::notice::Ya existen reportes de hoy para todos los juegos elegibles -- se asume que otra corrida ya proceso el dia. Esta corrida se salta."
+          fi
+
+      - name: Run pipeline
+        id: run-pipeline
+        if: ${{ steps.idempotency-check.outputs.already_ran != 'true' }}
+        env:
+          JSA_ODDS_API_KEY: ${{ secrets.JSA_ODDS_API_KEY }}
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+        run: |
+          if [ -n "$JSA_DATABASE_URL_SECRET" ]; then
+            export JSA_DATABASE_URL="$JSA_DATABASE_URL_SECRET"
+          fi
+          python -m jsa.main
+
+      - name: Save jsa.db for the next run (best-effort, solo sin JSA_DATABASE_URL externo)
+        if: ${{ always() && env.HAS_EXTERNAL_DB != 'true' && steps.idempotency-check.outputs.already_ran != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: jsa.db
+          key: jsa-db-${{ github.run_id }}
+
+      - name: Upload today's logs and database
+        if: ${{ always() && steps.idempotency-check.outputs.already_ran != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-daily-output-${{ github.run_id }}
+          path: |
+            jsa/logs/*.log
+            jsa.db
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Verificacion automatica de que la corrida fue real, no un no-op
+      # silencioso: confirma que el proceso llego a su resumen final
+      # (no solo que "run jsa.main" no lanzo una excepcion) y expone en una
+      # anotacion visible los conteos de invalidados/errores. No hace
+      # fallar el job por errores o corridas INVALIDATED de un solo juego
+      # (aislados a proposito, ver engine/orchestrator.py -- un juego con
+      # datos inesperados o INVALIDATED no debe tumbar el resto del dia),
+      # pero SI hace fallar el job si el paso "Run pipeline" fallo, o si
+      # nunca llego a imprimir el resumen final (senal de que se salio
+      # antes de completar el ciclo).
+      - name: Validate run
+        if: always()
+        run: |
+          echo "--- Validando la corrida ---"
+
+          if [ "${{ steps.idempotency-check.outputs.already_ran }}" = "true" ]; then
+            echo "✅ Corrida saltada a proposito -- ya existian reportes de hoy (ver 'Check if today already ran' arriba). No hay nada mas que validar."
+            exit 0
+          fi
+
+          if [ "${{ steps.run-pipeline.outcome }}" != "success" ]; then
+            echo "::error::El paso 'Run pipeline' termino con outcome=${{ steps.run-pipeline.outcome }} -- ver el log de ese paso para la causa raiz exacta."
+            exit 1
+          fi
+
+          LOG_FILE=$(ls -t jsa/logs/jsa_*.log 2>/dev/null | head -n 1)
+          if [ -z "$LOG_FILE" ]; then
+            echo "::error::No se genero ningun archivo jsa/logs/jsa_*.log -- setup_logging() no corrio o el proceso termino antes de tiempo."
+            exit 1
+          fi
+          echo "Log encontrado: $LOG_FILE"
+
+          SUMMARY_LINE=$(grep "run_daily() completo en" "$LOG_FILE" | tail -n 1)
+          if [ -z "$SUMMARY_LINE" ]; then
+            echo "::error::El log no contiene la linea de resumen final ('run_daily() completo en...') -- el pipeline no llego a terminar su ciclo completo aunque el proceso haya salido con codigo 0."
+            exit 1
+          fi
+          echo "Resumen final encontrado: $SUMMARY_LINE"
+
+          ERRORS=$(echo "$SUMMARY_LINE" | grep -oP 'errores=\K[0-9]+' || echo "0")
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::warning::$ERRORS juego(s) tuvieron un error aislado durante el procesamiento (ver 'Error inesperado procesando' en $LOG_FILE) -- no hizo fallar el job a proposito, pero requiere revision."
+          fi
+
+          INVALIDATED=$(echo "$SUMMARY_LINE" | grep -oP 'invalidados=\K[0-9]+' || echo "0")
+          if [ "$INVALIDATED" -gt 0 ]; then
+            echo "::warning::$INVALIDATED corrida(s) de juego salieron INVALIDATED (Seccion 15 del spec JSA v3.0) -- ver 'INVALIDATED:' en $LOG_FILE para la razon exacta de cada una. No hace fallar el job a proposito (una corrida INVALIDATED ya queda excluida de reportes/registries/Gate por diseno), pero requiere revision si la razon no es la esperada."
+          fi
+
+          if [ ! -f jsa.db ] && [ -z "${{ secrets.JSA_DATABASE_URL }}" ]; then
+            echo "::error::jsa.db no existe despues de la corrida -- init_storage()/init_registries() no se ejecutaron o la ruta es invalida."
+            exit 1
+          fi
+
+          echo "✅ Validacion completa: el pipeline corrio de principio a fin y genero su resumen final."
