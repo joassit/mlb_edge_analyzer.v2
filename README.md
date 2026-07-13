@@ -3,6 +3,15 @@
 Sistema propio para comparar la probabilidad de tu modelo contra el mercado
 de apuestas de MLB. Construido por etapas, empezando 100% gratis.
 
+> **Proyecto hermano:** [`jsa/`](jsa/README.md) es una reconstruccion
+> completa de este pipeline sobre una arquitectura de investigacion
+> reproducible y auditable (JSA v3.0 — Manifest firmado, Confidence Gate,
+> Registries de extensibilidad), aplicando las lecciones operativas reales
+> de este proyecto (ver `jsa/README.md` y `jsa/docs/ROADMAP.md`). Vive en
+> este mismo repo, corre en su propio workflow de GitHub Actions
+> (`.github/workflows/jsa_daily_pipeline.yml`) y no comparte codigo ni base
+> de datos con lo de abajo.
+
 ## Etapa 1 (esta versión) — 100% gratuita
 
 - ✅ Obtener partidos del día (MLB Stats API, oficial y gratuita)

@@ -9,3 +9,5 @@ logs/*.log
 .streamlit/secrets.toml
 .cache/
 backups/
+jsa/reports/*.csv
+jsa/logs/*.log
