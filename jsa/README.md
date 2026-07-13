@@ -66,9 +66,56 @@ para nada (Principio 14, sin excepciones).
 `engine/orchestrator.py::evaluate_game()` es el **unico punto de
 evaluacion real** -- una funcion pura de un `GameSnapshot` ya congelado
 mas el estado de los registries, sin I/O. Es la funcion que
-`jsa/main.py` llama en vivo, y la misma que un futuro motor de backtest
-(Fase 3-5, ver ROADMAP) deberia reusar sin modificarla -- exactamente la
-leccion de `model/predictor.py` en el proyecto hermano.
+`jsa/main.py` llama en vivo, y la misma que `jsa/historical/pipeline.py`
+reusa sin modificarla para reevaluar juegos de 2022-2026 -- exactamente la
+leccion de `model/predictor.py` en el proyecto hermano, ya confirmada en
+la practica.
+
+## Motor historico + Monte Carlo (`jsa/historical/`)
+
+JSA tiene autonomia tecnica completa frente a `mlb_edge_analyzer.v2`: no
+importa nada de ese proyecto, y es JSA quien controla su propio
+backtesting historico y sus propias simulaciones. `jsa/historical/`
+reconstruye `GameSnapshot`s punto-en-el-tiempo (nunca `stats=season`,
+siempre `stats=byDateRange` con corte estricto antes del juego) para
+temporadas ya jugadas y los evalua con la misma funcion pura de
+produccion.
+
+```bash
+# Ingerir una temporada completa (horas de duracion real -- ver el
+# workflow de GitHub Actions, no correrlo localmente salvo para pruebas
+# chicas)
+python -m jsa.historical.cli season 2022
+
+# Benchmarking (Seccion 12.3): JSA vs. baselines ingenuos vs. modelos legado
+python -c "from jsa.historical.validation import benchmark_season; \
+  from jsa.historical.config import HISTORICAL_DATABASE_URL; \
+  print(benchmark_season(2022, HISTORICAL_DATABASE_URL))"
+
+# Monte Carlo Audit (Seccion 13.7bis): sensibilidad de pesos, nunca predice juegos
+python -c "from jsa.historical.monte_carlo import run_monte_carlo_audit; \
+  from jsa.historical.config import HISTORICAL_DATABASE_URL; \
+  print(run_monte_carlo_audit(2022, HISTORICAL_DATABASE_URL, n_simulations=200))"
+```
+
+Base de datos propia (`JSA_HISTORICAL_DATABASE_URL`, default
+`sqlite:///jsa_historical.db`), completamente separada de `JSA_DATABASE_URL`
+(produccion) -- solo lee los Registries de produccion (metadata
+compartida, nunca datos de juego). Ver `.github/workflows/
+jsa_historical_ingest.yml` para correr una temporada real (2022-2026)
+via `workflow_dispatch`.
+
+## Modelos legado (`jsa/legacy/`)
+
+Los modelos ya calibrados de `mlb_edge_analyzer.v2` (heuristico ERA/OPS,
+Skellam, Binomial Negativo NB2, con sus constantes recalibradas contra 4
+temporadas reales) se preservan como **rama secundaria de benchmarking**
+-- nunca el motor primario. Se usan desde `jsa/historical/validation.py`
+para responder la pregunta de la Seccion 12.3: ¿el Evidence Score de JSA
+supera a estos modelos ya calibrados? `jsa/main.py` y `jsa/engine/` tienen
+prohibido importar de aqui (`tests/test_production_isolation.py` lo
+verifica en CI). Ver `jsa/legacy/README.md` para la procedencia exacta de
+cada constante.
 
 ## Instalacion y uso
 
@@ -120,6 +167,47 @@ invalidacion automatica de la Seccion 15 corren sobre **toda** corrida
 desde el primer commit -- ver `governance/manifest.py` y
 `tests/test_invalidation_rules.py` (una por regla).
 
+## Migrar a Postgres
+
+JSA esta diseñado desde el dia 1 para poder migrar 100% a Postgres --
+Git/SQLite no son una solucion adecuada de persistencia a largo plazo
+(principio rector de esta entrega). Las tres bases de JSA son
+independientes y cada una migra por separado, solo cambiando su variable
+de entorno:
+
+| Base | Variable | Default |
+|---|---|---|
+| Produccion (Registries + Feature/Results Store + Reportes) | `JSA_DATABASE_URL` | `sqlite:///jsa.db` |
+| Historica (`jsa/historical/`) | `JSA_HISTORICAL_DATABASE_URL` | `sqlite:///jsa_historical.db` |
+
+Pasos:
+
+1. Crea la base en un proveedor administrado (Neon, Supabase, RDS, etc.)
+   y anota el connection string (`postgresql://usuario:password@host:5432/nombre_db`).
+2. `pip install psycopg2-binary` (no es una dependencia dura de
+   `requirements.txt` a proposito -- SQLite sigue siendo el default
+   cero-configuracion).
+3. `export JSA_DATABASE_URL="postgresql+psycopg2://..."` (y/o
+   `JSA_HISTORICAL_DATABASE_URL`) y corre `python -m jsa.main` /
+   `python -m jsa.historical.cli season <año>` -- las tablas se crean
+   solas (`init_storage`/`init_registries`/`init_historical_storage`),
+   no hace falta ninguna migracion manual de esquema.
+4. En GitHub Actions, configura el mismo valor como secret
+   (`JSA_DATABASE_URL`/`JSA_HISTORICAL_DATABASE_URL`) -- los workflows ya
+   lo leen y saltan la cache de SQLite automaticamente cuando el secret
+   existe.
+
+**Por que esto no es solo una promesa:** `storage/dialect_utils.py::
+insert_ignore_duplicates()` es el unico punto donde los tres motores de
+storage (`registries`, `storage`, `historical`) resuelven upserts
+idempotentes, y es dialect-aware de verdad (SQLite `ON CONFLICT DO
+NOTHING` y Postgres `ON CONFLICT DO NOTHING` via
+`sqlalchemy.dialects.postgresql.insert`) -- se encontro y corrigio un gap
+real en esta misma entrega (`.prefix_with("OR IGNORE", dialect="sqlite")`
+no hacia nada en Postgres) y **se verifico contra un Postgres real**, no
+solo en teoria (`tests/test_postgres_compat.py`, se salta automaticamente
+si `TEST_POSTGRES_URL` no esta configurado).
+
 ## GitHub Actions
 
 - `.github/workflows/jsa_tests.yml`: pytest en cada push/PR que toque `jsa/`.
@@ -133,16 +221,22 @@ desde el primer commit -- ver `governance/manifest.py` y
   best-effort (o `JSA_DATABASE_URL` para Postgres real), y un step final
   que falla fuerte ante un no-op silencioso pero no ante errores/
   invalidaciones aisladas de un solo juego.
+- `.github/workflows/jsa_historical_ingest.yml`: ingesta de una temporada
+  (2022-2026) via `workflow_dispatch`, timeout 340 min -- solo a mano,
+  nunca por schedule.
 
 Secrets opcionales a configurar en GitHub (Settings → Secrets and
-variables → Actions): `JSA_DATABASE_URL` (Postgres, recomendado para
-produccion continua -- ver la nota de riesgo de `actions/cache` en el
-workflow).
+variables → Actions): `JSA_DATABASE_URL` / `JSA_HISTORICAL_DATABASE_URL`
+(Postgres, recomendado para produccion continua -- ver "Migrar a
+Postgres" arriba y la nota de riesgo de `actions/cache` en el workflow).
 
 ## Que falta y por que
 
-Ver `docs/ROADMAP.md` -- lista explicita de las Fases 3, 5, 6 y 7 del
-spec (Experiment Engine con significancia estadistica, Drift Detection,
-Monte Carlo Audit, Gate Threshold Sweep validado, Quality Gates
-consolidados) que requieren historial de produccion acumulado para tener
-sentido real, y que por eso no se fingen aqui.
+Ver `docs/ROADMAP.md` -- lista explicita de lo que requiere mas historial
+de produccion YA ingerido (no solo el mecanismo para ingerirlo, que ya
+existe) para tener sentido real: significancia estadistica formal
+(Seccion 12.8), calibracion isotonica real, Drift Detection, Gate
+Threshold Sweep validado, Quality Gates consolidados. Tambien documenta
+que la migracion de los ~100 picks historicos reales de
+`mlb_edge_analyzer.v2` esta bloqueada por falta de acceso a esos datos
+desde este entorno, no por falta de codigo.

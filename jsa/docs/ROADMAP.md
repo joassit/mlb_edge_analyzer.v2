@@ -32,24 +32,82 @@ la especificacion maestra ("JSA v3.0 — Especificación Maestra Unificada").
   lecciones operativas de `mlb_edge_analyzer.v2` aplicadas desde el dia 1
   (ver README).
 
+## Construido en la segunda entrega (motor historico + Monte Carlo + legado)
+
+JSA paso a ser el proyecto principal, con autonomia tecnica completa
+frente a `mlb_edge_analyzer.v2` (cero dependencias de codigo, solo
+patrones de diseño reusados por su merito). Se agrego:
+
+- `jsa/historical/`: motor de ingesta historica propio (temporadas
+  2022-2026, mismo rango que `historical_engine` del proyecto hermano),
+  con proveedor de estadisticas punto-en-el-tiempo (`stats=byDateRange`,
+  climatologia en vez de clima real, roster con fecha de corte -- nunca
+  `stats=season`). Reconstruye un `GameSnapshot` por juego y lo evalua con
+  **la misma funcion pura de produccion** (`engine.orchestrator.
+  evaluate_game()`, sin duplicar logica) -- confirmacion practica de que
+  el diseño "una unica funcion de evaluacion, en vivo y en backtest" si
+  funciona. Resumible (una temporada cortada a medias no re-procesa lo ya
+  hecho), aislado en su propia base de datos (Seccion 4.2).
+- `jsa/historical/validation.py`: Brier, LogLoss, ECE, MCE, Home Bias
+  Audit (13.3) sobre resultados reales, mas benchmarking obligatorio
+  (12.3) contra baselines ingenuos (constante, siempre-local, mejor-OPS,
+  mejor-ERA-abridor) y los 3 modelos legado.
+- `jsa/historical/monte_carlo.py`: Monte Carlo Audit (13.7bis) real --
+  N simulaciones perturbando `PillarWeights`, Critical Failure Factor
+  (correlacion peso-vs-Brier por pilar), Feature Stability, Weight
+  Stability, Probability Collapse (sobre una pseudo-probabilidad proxy,
+  nunca expuesta como calibracion real).
+- `jsa/legacy/`: heuristico ERA/OPS, Skellam, NegBin + las constantes ya
+  calibradas de `mlb_edge_analyzer.v2` (`NEGBIN_DISPERSION=3.0`,
+  `SKELLAM_SHRINKAGE_ALPHA=0.5`), preservadas como rama secundaria de
+  benchmarking -- nunca el motor primario (`tests/test_production_isolation.py`
+  lo hace cumplir).
+- `.github/workflows/jsa_historical_ingest.yml`: ingesta por temporada via
+  `workflow_dispatch`, timeout 340 min (misma leccion de
+  `historical_ingest.yml` del proyecto hermano).
+- Postgres desde el dia 1, para real: se encontro y corrigio un gap real
+  (`storage/database.py::persist_run()` usaba
+  `.prefix_with("OR IGNORE", dialect="sqlite")`, que en Postgres no hacia
+  nada) -- ahora `storage/dialect_utils.py::insert_ignore_duplicates()` es
+  dialect-aware (SQLite y Postgres), compartido por los 3 motores de
+  storage (`registries`, `storage`, `historical`), y **verificado contra
+  un Postgres real** en esta sesion (`tests/test_postgres_compat.py`, skip
+  automatico si `TEST_POSTGRES_URL` no esta configurado).
+
+**Pendiente, bloqueado por falta de acceso a datos (no por falta de
+codigo):** migrar los ~100 picks historicos reales que ya genera el
+pipeline diario de `mlb_edge_analyzer.v2` -- viven en su `mlb_edge.db`/
+Postgres, fuera del alcance de este sandbox. Cuando ese acceso exista, el
+mapeo es directo: cada `Pick` ya tiene `game_pk`/`game_date`/`market`/
+`model_prob`/`result` -- se puede alinear 1:1 contra un
+`GameSnapshot` reconstruido por `jsa/historical/` para el mismo `game_pk`
+y usarse en `validation.py` como un dataset adicional (picks reales, no
+solo resultados). No se sintetiza ni se aproxima este dataset mientras
+tanto.
+
 ## Explicitamente NO construido todavia (y por que)
 
-Estas piezas requieren historial de produccion acumulado para tener
-sentido real -- construirlas ahora, sin datos, significaria fingir una
+Estas piezas requieren mas historial de produccion real acumulado (varias
+temporadas YA ingeridas via `jsa/historical/`, no solo el mecanismo para
+ingerirlas) para tener sentido -- construirlas ahora seria fingir una
 validacion que el propio spec prohibe declarar sin evidencia (Seccion
 10.4: n>=50 juegos/temporada, walk-forward de >=3 temporadas; Seccion
 13.6: ventanas moviles mensuales).
 
-### Fase 3 — Experimentacion y Benchmarking (Secciones 12, 13)
-- Experiment Engine real corriendo experimentos (tabla `experiment_registry`
-  ya existe, vacia).
-- Benchmarking obligatorio contra reglas ingenuas (12.3).
-- Significancia estadistica -- bootstrap, McNemar, permutation test (12.8).
-- Sin esto, ninguna regla puede graduar de `experimental` a `active`
-  (ver `engine/rule_engine.py`) -- es el primer paso real pendiente.
+### Fase 3 — Significancia estadistica formal (Seccion 12.8)
+- Bootstrap, McNemar, permutation test sobre los resultados de
+  `historical/validation.py` -- el benchmarking numerico YA existe (ver
+  arriba), lo que falta es la prueba formal de que una diferencia de
+  Brier no es ruido de muestra chica antes de graduar nada de
+  `experimental` a `active` (ver `engine/rule_engine.py`).
+- Experiment Engine completo con `experiment_registry` poblado (la tabla
+  ya existe, todavia vacia) -- requiere que la ingesta de al menos una
+  temporada real ya haya corrido.
 
 ### Fase 4 — Calibracion y validacion de varianza (Secciones 8.4.1, 9.2)
-- Calibracion isotonica con leave-one-season-out + reliability diagrams.
+- Calibracion isotonica con leave-one-season-out + reliability diagrams,
+  ahora si posible en la practica una vez que `jsa/historical/` ingiera
+  2022-2026 (antes de esta entrega no habia de donde sacar los datos).
   Mientras no exista, `JSAReport.calibration.calibration_status` se
   mantiene en `"uncalibrated"` y el Confidence Gate nunca pasa -- por
   diseno, no por bug (ver `engine/confidence_gate.py`,
@@ -57,11 +115,13 @@ validacion que el propio spec prohibe declarar sin evidencia (Seccion
 - Validacion de desviacion estandar del margen proyectado vs. la real
   (`ProjectedRunsOutput.variance_validated` se mantiene en `False`).
 
-### Fase 5 — Validacion Cientifica Completa (Secciones 13.1-13.4, 13.7bis)
-- Backtesting historico y Walk-Forward Validation.
-- Home Bias Audit (13.3), Calibration Audit (13.4).
-- Monte Carlo Audit ampliado (13.7bis) -- `JSAReport.monte_carlo_summary`
-  se mantiene en `None`.
+### Fase 5 — Validacion Cientifica Completa (Seccion 13.1)
+- Walk-Forward Validation formal sobre las 5 temporadas.
+- Calibration Audit (13.4) -- una vez que exista una curva de calibracion
+  real que auditar.
+- `JSAReport.monte_carlo_summary` sigue en `None` en el reporte diario:
+  el Monte Carlo Audit YA se puede correr (ver arriba), pero conectar su
+  resultado mas reciente al reporte de cada juego es el siguiente paso.
 
 ### Fase 6 — Confidence Gate y Produccion (Seccion 10.3-10.4)
 - Gate Threshold Sweep real sobre >=3 temporadas.
