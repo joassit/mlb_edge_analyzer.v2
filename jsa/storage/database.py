@@ -24,6 +24,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from jsa.domain.models import GameSnapshot, JSAReport, RunManifest
+from jsa.storage.dialect_utils import insert_ignore_duplicates
 
 metadata = MetaData()
 
@@ -88,25 +89,22 @@ def persist_run(engine: Engine, snapshot: GameSnapshot, report: JSAReport, manif
     for attempt in range(2):
         try:
             with engine.begin() as conn:
-                conn.execute(
-                    game_snapshots.insert().values(
-                        recorded_at=datetime.now(timezone.utc), game_id=snapshot.game_id, game_pk=snapshot.game_pk,
-                        game_date=snapshot.game_date, season=snapshot.season, snapshot_hash=snapshot.snapshot_hash,
-                        schema_version=snapshot.schema_version, payload=snapshot.model_dump(mode="json"),
-                    ).prefix_with("OR IGNORE", dialect="sqlite")
+                insert_ignore_duplicates(
+                    conn, game_snapshots,
+                    recorded_at=datetime.now(timezone.utc), game_id=snapshot.game_id, game_pk=snapshot.game_pk,
+                    game_date=snapshot.game_date, season=snapshot.season, snapshot_hash=snapshot.snapshot_hash,
+                    schema_version=snapshot.schema_version, payload=snapshot.model_dump(mode="json"),
                 )
-                conn.execute(
-                    run_manifests.insert().values(
-                        recorded_at=datetime.now(timezone.utc), run_id=manifest.run_id, invalidated=manifest.invalidated,
-                        invalidation_reasons=manifest.invalidation_reasons, payload=manifest.model_dump(mode="json"),
-                    ).prefix_with("OR IGNORE", dialect="sqlite")
+                insert_ignore_duplicates(
+                    conn, run_manifests,
+                    recorded_at=datetime.now(timezone.utc), run_id=manifest.run_id, invalidated=manifest.invalidated,
+                    invalidation_reasons=manifest.invalidation_reasons, payload=manifest.model_dump(mode="json"),
                 )
-                conn.execute(
-                    jsa_reports.insert().values(
-                        recorded_at=datetime.now(timezone.utc), run_id=report.run_id, game_id=report.game_id,
-                        game_date=report.game_date, manifest_status=report.manifest_status,
-                        output_hash=report.output_hash, payload=report.model_dump(mode="json"),
-                    ).prefix_with("OR IGNORE", dialect="sqlite")
+                insert_ignore_duplicates(
+                    conn, jsa_reports,
+                    recorded_at=datetime.now(timezone.utc), run_id=report.run_id, game_id=report.game_id,
+                    game_date=report.game_date, manifest_status=report.manifest_status,
+                    output_hash=report.output_hash, payload=report.model_dump(mode="json"),
                 )
             return
         except IntegrityError:
@@ -120,11 +118,10 @@ def record_result(engine: Engine, game_pk: int, game_date: date, home_score: int
     winner = "home" if home_score > away_score else "away"
     try:
         with engine.begin() as conn:
-            conn.execute(
-                results.insert().values(
-                    recorded_at=datetime.now(timezone.utc), game_pk=game_pk, game_date=game_date,
-                    home_score=home_score, away_score=away_score, winner=winner, total_runs=home_score + away_score,
-                ).prefix_with("OR IGNORE", dialect="sqlite")
+            insert_ignore_duplicates(
+                conn, results,
+                recorded_at=datetime.now(timezone.utc), game_pk=game_pk, game_date=game_date,
+                home_score=home_score, away_score=away_score, winner=winner, total_runs=home_score + away_score,
             )
     except IntegrityError:
         pass
