@@ -13,7 +13,15 @@ import os
 # de entorno propia, nunca JSA_DATABASE_URL. Si se comparte por error de
 # config, un valor SQLite apuntaria al mismo archivo -- lo hacemos
 # estructuralmente imposible por default (archivo distinto).
-HISTORICAL_DATABASE_URL = os.getenv("JSA_HISTORICAL_DATABASE_URL", "sqlite:///jsa_historical.db")
+#
+# `os.getenv(key) or default`, no `os.getenv(key, default)`: la segunda
+# forma solo aplica el default cuando la variable esta AUSENTE, no cuando
+# existe pero esta VACIA -- y un workflow que asigna
+# `env: X: ${{ secrets.X }}` sin el secret configurado exporta justamente
+# eso. Le tumbo la primera corrida real de esta ingesta (season 2022, run
+# 29260616665, "Could not parse SQLAlchemy URL from given URL string")
+# antes de que se corrigiera este patron aqui y en jsa_historical_ingest.yml.
+HISTORICAL_DATABASE_URL = os.getenv("JSA_HISTORICAL_DATABASE_URL") or "sqlite:///jsa_historical.db"
 
 # Mismo rango que historical_engine/config.py::SUPPORTED_SEASONS del
 # proyecto hermano -- coincidencia deliberada (mismo universo de datos
@@ -23,7 +31,7 @@ SUPPORTED_SEASONS: list[int] = [2022, 2023, 2024, 2025, 2026]
 # La temporada en curso nunca se trata como "historico cerrado": su
 # muestra crece cada dia. La ingesta de CURRENT_SEASON se acota siempre a
 # juegos ya `Final` a la fecha de la corrida (ver pipeline.py).
-CURRENT_SEASON = int(os.getenv("JSA_SEASON", "2026"))
+CURRENT_SEASON = int(os.getenv("JSA_SEASON") or "2026")
 
 # Deliberadamente mas bajo que produccion: una corrida de ingesta
 # historica barre cientos/miles de juegos y no debe golpear la MLB Stats

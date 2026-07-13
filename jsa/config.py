@@ -12,13 +12,21 @@ from __future__ import annotations
 import os
 
 # --- Temporada / base de datos ---
-SEASON = int(os.getenv("JSA_SEASON", "2026"))
+# `os.getenv(key) or default` en vez de `os.getenv(key, default)`: la
+# segunda forma solo aplica el default cuando la variable esta AUSENTE, no
+# cuando existe pero esta VACIA -- y un workflow de GitHub Actions que
+# asigna `env: X: ${{ secrets.X }}` sin el secret configurado exporta
+# justamente eso: una variable presente con valor "". Le tumbo una corrida
+# real a `jsa_historical_ingest.yml` (season 2022, run 29260616665,
+# "Could not parse SQLAlchemy URL from given URL string") antes de que
+# este patron se corrigiera aqui.
+SEASON = int(os.getenv("JSA_SEASON") or "2026")
 
 # Nombre de secret/env distinto al DATABASE_URL de mlb_edge_analyzer.v2 a
 # proposito -- son dos proyectos hermanos con historiales independientes;
 # compartir el nombre de variable arriesgaria que alguien apunte por error
 # ambos pipelines a la misma base de datos y mezcle sus tablas.
-DATABASE_URL = os.getenv("JSA_DATABASE_URL", "sqlite:///jsa.db")
+DATABASE_URL = os.getenv("JSA_DATABASE_URL") or "sqlite:///jsa.db"
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
@@ -112,9 +120,9 @@ GATE_DOMINANCE_THRESHOLD = 0.40
 MARKET_IDS: tuple[str, ...] = ("moneyline_home", "moneyline_away", "run_line", "totals")
 
 # --- Odds API (mismo patron probado de proteccion de presupuesto) ---
-ODDS_API_CACHE_TTL_SECONDS = int(os.getenv("JSA_ODDS_API_CACHE_TTL_SECONDS", "900"))
-ODDS_API_MONTHLY_BUDGET = int(os.getenv("JSA_ODDS_API_MONTHLY_BUDGET", "500"))
-ODDS_CACHE_DIR = os.getenv("JSA_ODDS_CACHE_DIR", "jsa/.cache/odds")
+ODDS_API_CACHE_TTL_SECONDS = int(os.getenv("JSA_ODDS_API_CACHE_TTL_SECONDS") or "900")
+ODDS_API_MONTHLY_BUDGET = int(os.getenv("JSA_ODDS_API_MONTHLY_BUDGET") or "500")
+ODDS_CACHE_DIR = os.getenv("JSA_ODDS_CACHE_DIR") or "jsa/.cache/odds"
 
 
 def resolve_odds_api_keys() -> list[str]:

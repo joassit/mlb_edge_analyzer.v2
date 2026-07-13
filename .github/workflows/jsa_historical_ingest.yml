@@ -30,9 +30,6 @@ jobs:
     # hacen que una temporada completa tome varias horas). 340 deja margen
     # real sin acercarse al tope de la plataforma.
     timeout-minutes: 340
-    env:
-      JSA_DATABASE_URL: ${{ secrets.JSA_DATABASE_URL }}
-      JSA_HISTORICAL_DATABASE_URL: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -45,8 +42,28 @@ jobs:
       - name: Install dependencies
         run: pip install -r jsa/requirements.txt
 
+      # NUNCA asignar secrets.X directo a env: a nivel de job/step -- si el
+      # secret no existe, GitHub lo resuelve a cadena VACIA y la exporta
+      # igual (la variable EXISTE con valor ""), rompiendo el fallback de
+      # os.getenv(key, default) en jsa/historical/config.py y jsa/config.py
+      # (ese default solo aplica cuando la variable esta AUSENTE, no cuando
+      # esta vacia) -- esto tumbo la primera corrida real de esta ingesta
+      # (season 2022, run 29260616665) en 2 segundos con "Could not parse
+      # SQLAlchemy URL from given URL string". Mismo patron ya usado en
+      # jsa_daily_pipeline.yml -- se decide en shell si realmente hay que
+      # exportar la variable.
       - name: Ingest season
-        run: python -m jsa.historical.cli season ${{ inputs.season }}
+        env:
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -n "$JSA_DATABASE_URL_SECRET" ]; then
+            export JSA_DATABASE_URL="$JSA_DATABASE_URL_SECRET"
+          fi
+          if [ -n "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            export JSA_HISTORICAL_DATABASE_URL="$JSA_HISTORICAL_DATABASE_URL_SECRET"
+          fi
+          python -m jsa.historical.cli season ${{ inputs.season }}
 
       # Nombre con la temporada incluida a proposito: sin esto, correr dos
       # temporadas distintas pisaria el mismo artifact -- con el año en el
