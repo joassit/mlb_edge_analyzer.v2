@@ -1,0 +1,66 @@
+name: jsa-historical-ingest
+
+# Infraestructura permanente de jsa/historical/ -- aislada de
+# jsa_daily_pipeline.yml (produccion, ver tests/test_production_isolation.py).
+# Este workflow nunca corre por schedule ni se invoca desde otro workflow:
+# solo a mano, una temporada a la vez, cuando se necesita (re)ingerir
+# historial. Mismo patron que
+# mlb_edge_analyzer.v2/.github/workflows/historical_ingest.yml (el
+# proyecto hermano), reescrito sobre jsa/historical/cli.py -- cero
+# dependencia tecnica del proyecto hermano.
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Temporada a ingerir (2022-2026)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-season:
+    runs-on: ubuntu-latest
+    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
+    # para runners hosteados que ningun timeout-minutes puede superar.
+    # Misma leccion real que historical_ingest.yml del proyecto hermano:
+    # 300 llego a cortar una corrida real a mitad de camino (climatologia
+    # de 3 años de OpenMeteo + byDateRange de MLB Stats API por juego
+    # hacen que una temporada completa tome varias horas). 340 deja margen
+    # real sin acercarse al tope de la plataforma.
+    timeout-minutes: 340
+    env:
+      JSA_DATABASE_URL: ${{ secrets.JSA_DATABASE_URL }}
+      JSA_HISTORICAL_DATABASE_URL: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Ingest season
+        run: python -m jsa.historical.cli season ${{ inputs.season }}
+
+      # Nombre con la temporada incluida a proposito: sin esto, correr dos
+      # temporadas distintas pisaria el mismo artifact -- con el año en el
+      # nombre, cada corrida deja su propia base separada. if-no-files-found
+      # es "warn" (no "error") porque si JSA_HISTORICAL_DATABASE_URL apunta
+      # a un Postgres externo, no hay ningun jsa_historical.db local que subir
+      # -- eso es exito, no una corrida rota.
+      - name: Upload jsa_historical.db and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-historical-db-${{ inputs.season }}-${{ github.run_id }}
+          path: |
+            jsa_historical.db
+            jsa/logs/jsa_historical_*.log
+          if-no-files-found: warn
+          retention-days: 30
