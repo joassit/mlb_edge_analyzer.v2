@@ -1,0 +1,65 @@
+name: jsa-historical-pillar-contribution
+
+# One-off complementario a jsa_historical_ingest.yml/jsa_historical_validate.yml
+# -- corre PillarContributionAnalyzer directo contra JSA_HISTORICAL_DATABASE_URL
+# (la base ya unificada, sin necesidad de descargar/fusionar artifacts por
+# temporada como jsa_historical_validate.yml, que existe para el caso en
+# que NO hay una base compartida todavia). Solo tiene sentido una vez que
+# las temporadas pedidas ya estan ingeridas ahi.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a analizar, separadas por coma (ej. 2022,2023,2024,2025,2026)'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+
+permissions:
+  contents: read
+
+jobs:
+  pillar-contribution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      # Mismo patron shell-conditional que jsa_historical_ingest.yml -- ver
+      # ese workflow para el detalle real del bug que esto evita (secret
+      # sin configurar se exporta como cadena vacia, no ausente).
+      - name: Run pillar-contribution analysis
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          python -m jsa.historical.cli pillar-contribution \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            --out jsa_pillar_contribution_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-pillar-contribution-${{ github.run_id }}
+          path: jsa_pillar_contribution_result.json
+          if-no-files-found: warn
+          retention-days: 30
