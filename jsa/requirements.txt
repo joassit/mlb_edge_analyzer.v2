@@ -1,5 +1,6 @@
 pydantic==2.12.4
 sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
 requests==2.33.1
 scipy==1.17.1
 numpy==2.4.6
