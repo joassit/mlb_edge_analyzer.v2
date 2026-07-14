@@ -184,9 +184,11 @@ Pasos:
 
 1. Crea la base en un proveedor administrado (Neon, Supabase, RDS, etc.)
    y anota el connection string (`postgresql://usuario:password@host:5432/nombre_db`).
-2. `pip install psycopg2-binary` (no es una dependencia dura de
-   `requirements.txt` a proposito -- SQLite sigue siendo el default
-   cero-configuracion).
+2. `psycopg2-binary` ya es parte de `requirements.txt` (no opcional --
+   los runners de GitHub Actions no pueden instalar un driver ad hoc a
+   mitad de un workflow como si fuera un shell de desarrollo local, y el
+   principio rector de esta entrega es que JSA sea Postgres-ready desde
+   el dia 1, no "instalable a mano si alguien lo necesita").
 3. `export JSA_DATABASE_URL="postgresql+psycopg2://..."` (y/o
    `JSA_HISTORICAL_DATABASE_URL`) y corre `python -m jsa.main` /
    `python -m jsa.historical.cli season <año>` -- las tablas se crean
