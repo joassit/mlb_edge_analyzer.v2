@@ -16,6 +16,7 @@ from datetime import date
 from jsa.historical.config import SUPPORTED_SEASONS
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
+from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
 from jsa.historical.pipeline import run_season_ingestion
 from jsa.historical.validation import benchmark_season
 
@@ -48,11 +49,16 @@ def main() -> None:
     merge_parser.add_argument("--source", action="append", required=True, dest="sources", help="URL SQLAlchemy de una base fuente (repetible, una por temporada)")
     merge_parser.add_argument("--target", required=True, help="URL SQLAlchemy de la base destino fusionada")
 
-    validate_parser = subparsers.add_parser("validate", help="Corre benchmark_season() + Monte Carlo Audit sobre una base ya ingerida")
+    validate_parser = subparsers.add_parser("validate", help="Corre benchmark_season() + Monte Carlo Audit + PillarContributionAnalyzer sobre una base ya ingerida")
     validate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base a validar (tipicamente la fusionada)")
     validate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a validar (repetible)")
     validate_parser.add_argument("--monte-carlo-sims", type=int, default=200, help="Cantidad de simulaciones de Monte Carlo Audit por temporada")
     validate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    pillar_parser = subparsers.add_parser("pillar-contribution", help="Corre PillarContributionAnalyzer sobre una base ya ingerida (standalone, sin benchmark/Monte Carlo)")
+    pillar_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base a analizar")
+    pillar_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a analizar (repetible)")
+    pillar_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -75,8 +81,25 @@ def main() -> None:
         for season in args.seasons:
             benchmark = benchmark_season(season, args.db)
             audit = run_monte_carlo_audit(season, args.db, n_simulations=args.monte_carlo_sims)
-            result["seasons"][season] = {"benchmark": benchmark, "monte_carlo_audit": asdict(audit)}
+            pillar_contribution = analyze_season_pillar_contribution(season, args.db)
+            result["seasons"][season] = {
+                "benchmark": benchmark, "monte_carlo_audit": asdict(audit),
+                "pillar_contribution": asdict(pillar_contribution),
+            }
             logger.info("validate(%s) completo -- n_games_scored=%s", season, benchmark.get("n_games_scored"))
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "pillar-contribution":
+        setup_plain_logging()
+        result = {"seasons": {}}
+        for season in args.seasons:
+            report = analyze_season_pillar_contribution(season, args.db)
+            result["seasons"][season] = asdict(report)
+            logger.info("pillar-contribution(%s) completo -- n_games=%s, most_dominant_pillar=%s", season, report.n_games, report.most_dominant_pillar)
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:

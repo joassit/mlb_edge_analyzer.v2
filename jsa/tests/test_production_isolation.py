@@ -54,6 +54,17 @@ def test_no_engine_module_imports_historical_or_legacy():
             assert forbidden not in source, f"{py_file.relative_to(_JSA_ROOT)} no debe importar '{forbidden}'"
 
 
+def test_no_analytics_module_imports_historical_or_legacy():
+    """`jsa/analytics/` (agregacion pura, ej. PillarContributionAnalyzer)
+    esta pensado para ser importable desde produccion algun dia -- debe
+    quedar tan limpio de `historical`/`legacy` como `jsa/engine/`."""
+    analytics_dir = _JSA_ROOT / "analytics"
+    for py_file in analytics_dir.rglob("*.py"):
+        source = py_file.read_text()
+        for forbidden in FORBIDDEN_IMPORT_STATEMENTS:
+            assert forbidden not in source, f"{py_file.relative_to(_JSA_ROOT)} no debe importar '{forbidden}'"
+
+
 def test_legacy_readme_declares_isolation_rule():
     """`jsa/legacy/README.md` debe declarar explicitamente la regla de
     aislamiento -- documentacion viva, no solo un test escondido."""
