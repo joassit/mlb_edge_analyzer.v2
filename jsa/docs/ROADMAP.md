@@ -119,9 +119,10 @@ en la practica). Se agrego:
   historico) para poder importarse desde produccion el dia que haga falta
   sin violar el aislamiento que `tests/test_production_isolation.py` hace
   cumplir. Reporta, por pilar: media/mediana/desvio/p10/p90 de
-  contribucion porcentual, tasa de `dominance_warning`, tasa de ser el
-  pilar argmax del juego, tasa de `advantage==0` (pilar "mudo") y tasa de
-  contribucion despreciable. El lado con I/O que lee `historical_report`
+  contribucion porcentual, tasa de `dominance_warning`, `top_contributor_rate`
+  (tasa de ser el pilar con mayor contribucion del juego), tasa de
+  `advantage==0` (pilar "mudo") y tasa de contribucion despreciable. El
+  lado con I/O que lee `historical_report`
   vive en `jsa/historical/pillar_contribution.py` (`cli.py
   pillar-contribution`, y ya integrado como paso extra de `cli.py
   validate`).

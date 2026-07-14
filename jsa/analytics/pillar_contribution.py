@@ -53,7 +53,7 @@ class PillarContributionStats:
     dominance_warning_rate: float
     """Fraccion de juegos donde este pilar disparo `dominance_warning`
     (>GATE_DOMINANCE_THRESHOLD del Evidence Score, Seccion 7.2/10.2)."""
-    argmax_rate: float
+    top_contributor_rate: float
     """Fraccion de juegos donde este pilar tuvo la MAYOR contribucion
     porcentual de los 7 -- señal complementaria a `dominance_warning_rate`:
     identifica que pilar domina la decision en la practica aunque ningun
@@ -102,11 +102,11 @@ class PillarContributionAnalyzer:
                 pct_contrib[row, col] = entry.percentage_contribution
                 dominance[row, col] = entry.dominance_warning
 
-        # argmax por fila (juego) -- que pilar tuvo la mayor contribucion
-        # porcentual en cada juego. ddof=0 para std (poblacional, no
-        # muestral: estamos describiendo el conjunto completo analizado,
-        # no estimando a partir de una muestra de un universo mayor).
-        argmax_per_game = np.argmax(pct_contrib, axis=1)
+        # Pilar con mayor contribucion porcentual en cada juego (una fila =
+        # un juego). ddof=0 para std (poblacional, no muestral: estamos
+        # describiendo el conjunto completo analizado, no estimando a
+        # partir de una muestra de un universo mayor).
+        top_contributor_per_game = np.argmax(pct_contrib, axis=1)
 
         stats_by_pillar: dict[str, PillarContributionStats] = {}
         for pillar, col in pillar_index.items():
@@ -121,7 +121,7 @@ class PillarContributionAnalyzer:
                 p10_percentage_contribution=float(np.percentile(pct_contrib[:, col], 10)),
                 p90_percentage_contribution=float(np.percentile(pct_contrib[:, col], 90)),
                 dominance_warning_rate=float(np.mean(dominance[:, col])),
-                argmax_rate=float(np.mean(argmax_per_game == col)),
+                top_contributor_rate=float(np.mean(top_contributor_per_game == col)),
                 zero_advantage_rate=float(np.mean(advantage[:, col] == 0)),
                 negligible_contribution_rate=float(np.mean(pct_contrib[:, col] < NEGLIGIBLE_CONTRIBUTION_THRESHOLD)),
             )

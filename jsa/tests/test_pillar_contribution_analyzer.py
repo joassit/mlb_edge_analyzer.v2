@@ -45,12 +45,12 @@ def test_most_dominant_pillar_identified_correctly():
     assert report.stats_by_pillar["starter"].mean_percentage_contribution > 0.5
 
 
-def test_argmax_rate_reflects_which_pillar_wins_each_game():
+def test_top_contributor_rate_reflects_which_pillar_wins_each_game():
     games = [_game_with_dominant_pillar("starter")] * 3 + [_game_with_dominant_pillar("bullpen")] * 2
     report = PillarContributionAnalyzer().analyze(games)
-    assert report.stats_by_pillar["starter"].argmax_rate == 3 / 5
-    assert report.stats_by_pillar["bullpen"].argmax_rate == 2 / 5
-    assert report.stats_by_pillar["offense"].argmax_rate == 0.0
+    assert report.stats_by_pillar["starter"].top_contributor_rate == 3 / 5
+    assert report.stats_by_pillar["bullpen"].top_contributor_rate == 2 / 5
+    assert report.stats_by_pillar["offense"].top_contributor_rate == 0.0
 
 
 def test_dominance_warning_rate_counts_only_flagged_games():

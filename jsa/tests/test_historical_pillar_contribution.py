@@ -47,9 +47,9 @@ def test_analyze_season_pillar_contribution_percentages_are_bounded(ingested_sea
     for stats in report.stats_by_pillar.values():
         assert 0.0 <= stats.mean_percentage_contribution <= 1.0
         assert 0.0 <= stats.dominance_warning_rate <= 1.0
-        assert 0.0 <= stats.argmax_rate <= 1.0
+        assert 0.0 <= stats.top_contributor_rate <= 1.0
         # cada juego tiene exactamente un pilar argmax -- las 7 tasas suman 1.
-    assert sum(s.argmax_rate for s in report.stats_by_pillar.values()) == pytest.approx(1.0)
+    assert sum(s.top_contributor_rate for s in report.stats_by_pillar.values()) == pytest.approx(1.0)
 
 
 def test_analyze_season_pillar_contribution_empty_season_returns_zero_games(tmp_path):
