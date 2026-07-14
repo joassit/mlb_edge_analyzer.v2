@@ -1,0 +1,138 @@
+name: jsa-historical-validate
+
+# One-off complementario a jsa_historical_ingest.yml -- fusiona los N
+# artifacts jsa_historical.db de temporadas YA ingeridas por separado
+# (una corrida de jsa_historical_ingest.yml por temporada, cada una con su
+# propio SQLite efimero mientras no exista JSA_HISTORICAL_DATABASE_URL) en
+# una unica base combinada, y corre validation.py + monte_carlo.py sobre
+# esa base fusionada. Existe porque este repo no tiene salida de red hacia
+# Azure Blob Storage (donde viven los artifacts de GitHub Actions) desde
+# fuera de un runner de Actions -- fusionar los 5 .db localmente en un
+# sandbox no es posible, pero SI lo es dentro de un job de Actions, que
+# tiene acceso nativo a sus propios artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id_2022:
+        description: 'Run ID de jsa_historical_ingest.yml para 2022'
+        required: true
+        type: string
+        default: '29266909744'
+      run_id_2023:
+        description: 'Run ID de jsa_historical_ingest.yml para 2023'
+        required: true
+        type: string
+        default: '29298429081'
+      run_id_2024:
+        description: 'Run ID de jsa_historical_ingest.yml para 2024'
+        required: true
+        type: string
+        default: '29298430042'
+      run_id_2025:
+        description: 'Run ID de jsa_historical_ingest.yml para 2025'
+        required: true
+        type: string
+        default: '29298431640'
+      run_id_2026:
+        description: 'Run ID de jsa_historical_ingest.yml para 2026'
+        required: true
+        type: string
+        default: '29298432529'
+      monte_carlo_sims:
+        description: 'Simulaciones de Monte Carlo Audit por temporada'
+        required: true
+        type: string
+        default: '200'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  merge-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      # Cada temporada vive en un run/artifact distinto (ver
+      # jsa_historical_ingest.yml) -- una descarga explicita por temporada,
+      # cada una a su propia carpeta, para no pisar el mismo nombre de
+      # archivo (jsa_historical.db) entre descargas.
+      - name: Download 2022 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: jsa-historical-db-2022-${{ inputs.run_id_2022 }}
+          path: downloads/2022
+          run-id: ${{ inputs.run_id_2022 }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download 2023 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: jsa-historical-db-2023-${{ inputs.run_id_2023 }}
+          path: downloads/2023
+          run-id: ${{ inputs.run_id_2023 }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download 2024 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: jsa-historical-db-2024-${{ inputs.run_id_2024 }}
+          path: downloads/2024
+          run-id: ${{ inputs.run_id_2024 }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download 2025 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: jsa-historical-db-2025-${{ inputs.run_id_2025 }}
+          path: downloads/2025
+          run-id: ${{ inputs.run_id_2025 }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download 2026 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: jsa-historical-db-2026-${{ inputs.run_id_2026 }}
+          path: downloads/2026
+          run-id: ${{ inputs.run_id_2026 }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge 5 season databases into one
+        run: |
+          python -m jsa.historical.cli merge \
+            --source "sqlite:///downloads/2022/jsa_historical.db" \
+            --source "sqlite:///downloads/2023/jsa_historical.db" \
+            --source "sqlite:///downloads/2024/jsa_historical.db" \
+            --source "sqlite:///downloads/2025/jsa_historical.db" \
+            --source "sqlite:///downloads/2026/jsa_historical.db" \
+            --target "sqlite:///jsa_historical_merged.db"
+
+      - name: Run validation.py + monte_carlo.py on merged database
+        run: |
+          python -m jsa.historical.cli validate \
+            --db "sqlite:///jsa_historical_merged.db" \
+            --season 2022 --season 2023 --season 2024 --season 2025 --season 2026 \
+            --monte-carlo-sims ${{ inputs.monte_carlo_sims }} \
+            --out jsa_historical_validation_result.json
+
+      - name: Upload merged database and validation results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-historical-merged-and-validated-${{ github.run_id }}
+          path: |
+            jsa_historical_merged.db
+            jsa_historical_validation_result.json
+          if-no-files-found: warn
+          retention-days: 30
