@@ -85,6 +85,48 @@ y usarse en `validation.py` como un dataset adicional (picks reales, no
 solo resultados). No se sintetiza ni se aproxima este dataset mientras
 tanto.
 
+## Construido en la tercera entrega (unificacion historica, Postgres real, contribucion de pilares)
+
+Las 5 temporadas 2022-2026 quedaron ingeridas dos veces: primero contra
+SQLite efimero (una base separada por corrida de `jsa_historical_ingest.yml`,
+sin `JSA_HISTORICAL_DATABASE_URL` configurado todavia), y luego contra un
+Postgres real ya configurado (mismo workflow, mismo codigo, sin cambios --
+la promesa de "Postgres desde el dia 1" de la segunda entrega se confirmo
+en la practica). Se agrego:
+
+- `jsa/historical/merge.py` + `cli.py merge`: fusiona N bases historicas
+  separadas (una por temporada) en una sola, idempotente
+  (`insert_ignore_duplicates`) -- necesario porque `validation.py`/
+  `monte_carlo.py` comparan temporadas desde UNA base, y sin
+  `JSA_HISTORICAL_DATABASE_URL` cada temporada vivia aislada en su propio
+  artifact de GitHub Actions.
+- `.github/workflows/jsa_historical_validate.yml`: descarga N artifacts de
+  temporada, los fusiona, corre `validate` sobre la base combinada -- vive
+  en Actions (no en un sandbox local) porque el egress a Azure Blob
+  Storage (donde GitHub aloja los artifacts) puede estar bloqueado fuera
+  de un runner de Actions.
+- `psycopg2-binary` paso de opcional a dependencia real de
+  `requirements.txt` -- un runner de GitHub Actions no puede instalarlo
+  ad hoc a mitad de un workflow como si fuera un shell de desarrollo
+  local; sin esto, cualquier workflow apuntado a Postgres fallaba en el
+  primer connect.
+- `jsa/analytics/pillar_contribution.py` (`PillarContributionAnalyzer`):
+  agrega, sobre N juegos, la contribucion por pilar que
+  `evidence_engine.compute_feature_contribution()` YA calcula por juego
+  individual (Seccion 7.2) y que ya vive en todo `JSAReport.
+  feature_contribution` -- vectorizado con numpy, deliberadamente puro y
+  ubicado junto a `engine/`/`domain/`/`storage/` (no junto al paquete
+  historico) para poder importarse desde produccion el dia que haga falta
+  sin violar el aislamiento que `tests/test_production_isolation.py` hace
+  cumplir. Reporta, por pilar: media/mediana/desvio/p10/p90 de
+  contribucion porcentual, tasa de `dominance_warning`, `top_contributor_rate`
+  (tasa de ser el pilar con mayor contribucion del juego), tasa de
+  `advantage==0` (pilar "mudo") y tasa de contribucion despreciable. El
+  lado con I/O que lee `historical_report`
+  vive en `jsa/historical/pillar_contribution.py` (`cli.py
+  pillar-contribution`, y ya integrado como paso extra de `cli.py
+  validate`).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

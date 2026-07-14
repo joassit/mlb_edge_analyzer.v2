@@ -61,3 +61,36 @@ def test_insert_ignore_duplicates_actually_ignores_on_postgres():
             select(storage_db.results).where(storage_db.results.c.game_pk == 999999999)
         ).mappings().all()
     assert len(rows) == 1  # no se duplico
+
+
+def test_pillar_contribution_analyzer_gives_identical_results_on_postgres_and_sqlite(tmp_path):
+    """`PillarContributionAnalyzer` en si es puro (sin I/O), pero su lector
+    (`historical/pillar_contribution.py`) si depende del dialecto via
+    `historical_db.get_engine()`/`reports_for_season()` -- este test ingiere
+    la MISMA temporada sintetica contra SQLite y contra Postgres real y
+    exige resultados bit-a-bit identicos, no solo "que no explote"."""
+    from dataclasses import asdict
+    from unittest.mock import patch
+
+    from jsa.historical import pipeline
+    from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
+    from jsa.tests.test_historical_point_in_time import FakeProvider
+
+    games = [
+        {"game_pk": 5100000 + i, "season": 2022, "game_date": f"2022-07-{10 + i:02d}",
+         "home_team": "New York Yankees", "away_team": "Boston Red Sox", "home_team_id": 147, "away_team_id": 111,
+         "home_pitcher_id": 1000 + i, "away_pitcher_id": 2000 + i, "is_double_header": False,
+         "home_score": 5 if i % 2 == 0 else 2, "away_score": 3 if i % 2 == 0 else 6}
+        for i in range(6)
+    ]
+    sqlite_url = f"sqlite:///{tmp_path}/parity_hist.db"
+    prod_url = f"sqlite:///{tmp_path}/parity_prod.db"
+
+    with patch("jsa.historical.pipeline.fetch_season_games", return_value=games):
+        pipeline.run_season_ingestion(2022, provider=FakeProvider(), historical_database_url=sqlite_url, registries_database_url=prod_url)
+        pipeline.run_season_ingestion(2022, provider=FakeProvider(), historical_database_url=TEST_POSTGRES_URL, registries_database_url=prod_url)
+
+    report_sqlite = analyze_season_pillar_contribution(2022, sqlite_url)
+    report_postgres = analyze_season_pillar_contribution(2022, TEST_POSTGRES_URL)
+
+    assert asdict(report_sqlite) == asdict(report_postgres)
