@@ -1,0 +1,84 @@
+name: spike-mlb-transactions-injuries
+
+# SPIKE de validacion, no infraestructura permanente -- confirma si
+# statsapi.mlb.com/api/v1/transactions sirve como fuente point-in-time de
+# lesiones (IL) para activar el pilar team_quality, antes de comprometer
+# el esfuerzo de construir jsa/historical/injuries_provider.py de verdad.
+# No escribe nada, no usa secrets, no toca ninguna base de datos -- solo
+# imprime en el log lo que la API devuelve para poder inspeccionarlo.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Query transactions endpoint for all 5 seasons
+        run: |
+          python3 - <<'PY'
+          import requests
+
+          BASE = "https://statsapi.mlb.com/api/v1/transactions"
+          # Dos semanas tempranas de cada temporada, sportId=1 (MLB, todos
+          # los equipos) -- suficiente para que aparezcan varios movimientos
+          # de IL reales sin depender de recordar una lesion especifica.
+          WINDOWS = [
+              (2022, "2022-04-10", "2022-04-24"),
+              (2023, "2023-04-10", "2023-04-24"),
+              (2024, "2024-04-10", "2024-04-24"),
+              (2025, "2025-04-10", "2025-04-24"),
+              (2026, "2026-04-10", "2026-04-24"),
+          ]
+
+          for season, start, end in WINDOWS:
+              print(f"\n=== {season}: {start} a {end} ===")
+              try:
+                  resp = requests.get(BASE, params={"startDate": start, "endDate": end, "sportId": 1}, timeout=20)
+                  resp.raise_for_status()
+                  data = resp.json()
+              except Exception as e:
+                  print(f"ERROR consultando {season}: {e}")
+                  continue
+
+              transactions = data.get("transactions", [])
+              print(f"Total transacciones: {len(transactions)}")
+
+              il_related = [
+                  t for t in transactions
+                  if "injured list" in (t.get("description") or "").lower()
+                  or "injured list" in (t.get("typeDesc") or "").lower()
+              ]
+              print(f"Con 'injured list' en description/typeDesc: {len(il_related)}")
+
+              type_descs = sorted({t.get("typeDesc") for t in transactions if t.get("typeDesc")})
+              print(f"typeDesc distintos vistos: {type_descs}")
+
+              print("Muestra de hasta 3 movimientos de IL (estructura completa):")
+              for t in il_related[:3]:
+                  print({
+                      "date": t.get("date"),
+                      "effectiveDate": t.get("effectiveDate"),
+                      "resolutionDate": t.get("resolutionDate"),
+                      "typeCode": t.get("typeCode"),
+                      "typeDesc": t.get("typeDesc"),
+                      "person": t.get("person"),
+                      "fromTeam": t.get("fromTeam"),
+                      "toTeam": t.get("toTeam"),
+                      "description": t.get("description"),
+                  })
+          PY
