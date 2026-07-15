@@ -71,6 +71,13 @@ class HistoricalStatsProvider:
     def team_ops_as_of(self, team_id: int, as_of_date: str, season: int) -> tuple[float, int | None] | None:
         raise NotImplementedError
 
+    def team_fielding_pct_as_of(self, team_id: int, as_of_date: str, season: int) -> float | None:
+        """Fielding percentage de equipo, acumulado de temporada
+        point-in-time -- mismo patron que `team_ops_as_of()`. Alimenta la
+        senal defensiva de `team_quality` (Seccion team_quality). `None`
+        si no hay datos."""
+        raise NotImplementedError
+
     def bullpen_era_as_of(self, team_id: int, as_of_date: str, season: int) -> dict | None:
         """{"era": float|None, "closer_pitcher_id": int|None} -- el cerrador
         se identifica DENTRO del mismo loop roster+pitcher que ya calcula el
@@ -162,6 +169,23 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             return float(ops), (int(pa_raw) if pa_raw is not None else None)
         except (requests.RequestException, KeyError, IndexError, ValueError) as e:
             logger.debug("OPS as-of fallo para equipo %s @ %s: %s", team_id, as_of_date, e)
+            return None
+
+    def team_fielding_pct_as_of(self, team_id, as_of_date, season):
+        try:
+            params = {
+                "stats": "byDateRange", "group": "fielding",
+                "startDate": _season_start(season), "endDate": self._end_date(as_of_date),
+            }
+            resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=INGESTION_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            splits = resp.json()["stats"][0]["splits"]
+            if not splits:
+                return None
+            fielding = splits[0]["stat"].get("fielding")
+            return float(fielding) if fielding is not None else None
+        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+            logger.debug("Fielding%% as-of fallo para equipo %s @ %s: %s", team_id, as_of_date, e)
             return None
 
     def bullpen_era_as_of(self, team_id, as_of_date, season):

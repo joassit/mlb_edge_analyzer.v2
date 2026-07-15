@@ -257,6 +257,62 @@ de Context arriba) -- revisado explicitamente campo por campo contra
 consumido por un pilar o por una regla del Rule Engine queda sin fuente
 real de este lado.
 
+## Señal defensiva en `team_quality` (fielding%, `team_quality@1.1.0`)
+
+`team_quality` solo consideraba lesiones clave y `closer_available` --
+muy cerca de ser un pilar mudo. Se evaluo agregar OAA (Statcast) o DRS
+(Baseball Info Solutions) primero, pero ninguno esta expuesto por
+`statsapi.mlb.com` -- OAA vive en Baseball Savant vía endpoints no
+documentados sin soporte confiable de filtro point-in-time por equipo,
+DRS es propietario sin API publica. Se descartaron ambos a favor de
+fielding stats basicos, oficiales y ya validados por un spike real
+(`spike_mlb_fielding_and_groundball.yml`, confirmado contra las 5
+temporadas): `teams/{id}/stats?stats=byDateRange&group=fielding` expone
+`errors`, `doublePlays`, `fielding` (fielding percentage), entre otros,
+de forma estable y consistente en todas las temporadas.
+
+**Diseño acordado explicitamente antes de implementar**:
+- Se usa `fielding%` solo -- ya viene normalizado por MLB (errores sobre
+  chances totales), comparable directo entre equipos sin ajustar por
+  volumen de juegos. `errors`/`doublePlays` quedan fuera (`doublePlays`
+  depende demasiado de oportunidades/GB rate del staff para ser una señal
+  limpia por si sola).
+- Ventana: acumulado de temporada point-in-time (mismo patron que
+  `team_ops_as_of()`/`bullpen_era_as_of()`, no una ventana de 30 dias --
+  con 30 dias la muestra seria demasiado ruidosa).
+- Magnitud acotada: la diferencia de fielding% home/away contribuye como
+  MAXIMO ±1 nivel (`_FIELDING_PCT_UNIT=0.006`, heuristico de partida
+  basado en la variacion observada en el spike, no calibrado todavia),
+  sumado aditivamente a lesiones+closer, con el mismo clip final -2..2
+  del contrato del pilar -- nunca domina el pilar por si sola.
+
+**Implementacion** (Seccion 3.3, migracion aditiva `schema-3.1-to-3.2` --
+`SCHEMA_VERSION` sube de "3.1" a "3.2", campos nuevos `home/away_fielding_pct`
+en `GameSnapshot`, `pillar_contract_version` de `team_quality` sube de
+`@1.0.0` a `@1.1.0`):
+- `historical/point_in_time_provider.py::team_fielding_pct_as_of()` /
+  `data_sources/stats.py::get_team_fielding_pct()`: mismo patron exacto
+  que `team_ops_as_of()`/`get_team_ops()`, mismo costo de red (una
+  llamada por equipo por juego, igual que OPS hoy).
+- `engine/pillars/team_quality.py`: nueva logica de blend, ver arriba.
+
+**GB/AO en `starter`**: tambien confirmado disponible en el spike
+(`groundOuts`/`airOuts`/`groundOutsToAirouts` vienen en el MISMO payload
+que ya se pide para ERA/IP, costo de red cero) -- explicitamente NO
+agregado en esta entrega. El diagnostico ya establecio que el problema
+principal de `starter` es el shrinkage agresivo (`SHRINKAGE_K_IP=60`) mas
+que falta de datos; agregar GB% ahora, antes de revisar shrinkage,
+mezclaria dos tipos de cambio distintos sin poder atribuir despues que
+movio los resultados. Ni siquiera se captura el campo sin usar -- mismo
+criterio de no dejar datos sin logica real detras. Se revisa junto con el
+shrinkage de `starter`/`bullpen`, despues de ver los resultados de esta
+re-ingesta con `team_quality` ya activo.
+
+**Bundle final de la re-ingesta combinada de las 5 temporadas**: Context
+(travel_distance + weather_wind_speed) + `team_quality` (lesiones +
+closer_available + fielding%) + `starter_projected_ip`. Cierre explicito
+del alcance -- no se agrega nada mas antes de disparar la re-ingesta.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

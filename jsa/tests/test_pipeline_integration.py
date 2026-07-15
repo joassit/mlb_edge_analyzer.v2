@@ -58,6 +58,7 @@ def _run_with_mocks(sqlite_url: str):
          patch("jsa.data_sources.snapshot_builder.stats.get_pitcher_command", return_value={}), \
          patch("jsa.data_sources.snapshot_builder.stats.get_team_ops", return_value=0.75), \
          patch("jsa.data_sources.snapshot_builder.stats.get_team_ops_pa_sample", return_value=300), \
+         patch("jsa.data_sources.snapshot_builder.stats.get_team_fielding_pct", return_value=0.987), \
          patch(
              "jsa.data_sources.snapshot_builder.stats.get_bullpen_era",
              return_value={"era": 4.0, "closer_pitcher_id": 999},

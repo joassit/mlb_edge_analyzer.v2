@@ -16,8 +16,9 @@ Limitaciones honestas de esta entrega (documentadas, no escondidas -- ver
   sin fuente wireada todavia -- quedan en su valor por defecto
   (`False`/`None`), nunca inventados. Esto baja el CRI de forma
   realista en vez de aparentar mas confiabilidad de la que hay.
-  `travel_distance`, `weather_wind_speed`, `home/away_key_injuries` y
-  `home/away_closer_available` SI tienen fuente real (ver abajo).
+  `travel_distance`, `weather_wind_speed`, `home/away_key_injuries`,
+  `home/away_closer_available` y `home/away_fielding_pct` SI tienen fuente
+  real (ver abajo).
 """
 
 from __future__ import annotations
@@ -68,6 +69,8 @@ def build_snapshot_from_game(
     away_ops = stats.get_team_ops(away_id, season)
     home_pa = stats.get_team_ops_pa_sample(home_id, season)
     away_pa = stats.get_team_ops_pa_sample(away_id, season)
+    home_fielding_pct = stats.get_team_fielding_pct(home_id, season)
+    away_fielding_pct = stats.get_team_fielding_pct(away_id, season)
 
     home_bullpen = stats.get_bullpen_era(home_id, season) or {}
     away_bullpen = stats.get_bullpen_era(away_id, season) or {}
@@ -114,6 +117,8 @@ def build_snapshot_from_game(
         away_ops=away_ops,
         home_ops_pa_sample=home_pa,
         away_ops_pa_sample=away_pa,
+        home_fielding_pct=home_fielding_pct,
+        away_fielding_pct=away_fielding_pct,
         home_bullpen_era=home_bullpen.get("era"),
         away_bullpen_era=away_bullpen.get("era"),
         home_bullpen_ip_last_3_days=None,

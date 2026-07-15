@@ -125,6 +125,26 @@ def get_team_ops(team_id: int, season: int) -> float | None:
         return None
 
 
+def get_team_fielding_pct(team_id: int, season: int) -> float | None:
+    """Fielding percentage de temporada -- misma senal defensiva de bajo
+    esfuerzo que `historical/point_in_time_provider.py::team_fielding_pct_as_of()`,
+    validada via spike real contra `stats=season&group=fielding` antes de
+    comprometer el esfuerzo (OAA/DRS descartados: no expuestos por
+    statsapi.mlb.com)."""
+    try:
+        params = {"stats": "season", "group": "fielding", "season": season}
+        resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=15)
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+        if not splits:
+            return None
+        fielding = splits[0]["stat"].get("fielding")
+        return float(fielding) if fielding is not None else None
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+        logger.warning("No se pudo obtener fielding%% del equipo %s: %s", team_id, e)
+        return None
+
+
 def get_team_ops_pa_sample(team_id: int, season: int) -> int | None:
     try:
         params = {"stats": "season", "group": "hitting", "season": season}

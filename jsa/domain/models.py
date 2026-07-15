@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jsa.domain.hashing import hash_model_excluding
 
-SCHEMA_VERSION = "3.1"
+SCHEMA_VERSION = "3.2"
 
 PillarName = Literal[
     "starter",
@@ -129,6 +129,18 @@ class GameSnapshot(BaseModel):
     league_avg_era: Optional[float] = None
     league_avg_ops: Optional[float] = None
     league_avg_runs_per_game: Optional[float] = None
+
+    # --- Aditivo 3.1 -> 3.2 (Seccion 3.3, ver Schema Migration Registry en
+    # registries/seed.py, migracion "schema-3.1-to-3.2") ---
+    # Fielding percentage de equipo, acumulado de temporada point-in-time
+    # (mismo patron que home/away_ops) -- validado via spike real contra
+    # teams/{id}/stats?stats=byDateRange&group=fielding antes de
+    # comprometer el esfuerzo (OAA/DRS descartados: no expuestos por
+    # statsapi.mlb.com). Alimenta una senal defensiva de bajo esfuerzo en
+    # el pilar team_quality, que hasta ahora solo consideraba lesiones y
+    # disponibilidad de closer.
+    home_fielding_pct: Optional[float] = None
+    away_fielding_pct: Optional[float] = None
 
     schema_version: str = SCHEMA_VERSION
 

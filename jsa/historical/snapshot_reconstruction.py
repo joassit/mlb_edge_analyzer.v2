@@ -55,6 +55,9 @@ def reconstruct_snapshot(
     home_ops_result = provider.team_ops_as_of(home_team_id, game_date, season)
     away_ops_result = provider.team_ops_as_of(away_team_id, game_date, season)
 
+    home_fielding_pct = provider.team_fielding_pct_as_of(home_team_id, game_date, season)
+    away_fielding_pct = provider.team_fielding_pct_as_of(away_team_id, game_date, season)
+
     home_bullpen = provider.bullpen_era_as_of(home_team_id, game_date, season) or {}
     away_bullpen = provider.bullpen_era_as_of(away_team_id, game_date, season) or {}
 
@@ -107,6 +110,8 @@ def reconstruct_snapshot(
         away_ops=away_ops_result[0] if away_ops_result else None,
         home_ops_pa_sample=home_ops_result[1] if home_ops_result else None,
         away_ops_pa_sample=away_ops_result[1] if away_ops_result else None,
+        home_fielding_pct=home_fielding_pct,
+        away_fielding_pct=away_fielding_pct,
         home_bullpen_era=home_bullpen.get("era"),
         away_bullpen_era=away_bullpen.get("era"),
         home_closer_available=home_closer_available,
