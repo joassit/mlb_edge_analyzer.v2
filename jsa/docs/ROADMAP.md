@@ -313,6 +313,28 @@ re-ingesta con `team_quality` ya activo.
 closer_available + fielding%) + `starter_projected_ip`. Cierre explicito
 del alcance -- no se agrega nada mas antes de disparar la re-ingesta.
 
+## `run_season_ingestion(..., force=True)` -- necesario para que la re-ingesta sea real
+
+Las 5 temporadas ya estaban completamente ingeridas ANTES de esta serie de
+arreglos. `already_ingested_game_pks()` (pensada para resumir una corrida
+cortada por un timeout de GitHub Actions, no para forzar un reproceso)
+hubiera saltado de largo cada juego ya presente en `historical_report` --
+disparar la ingesta tal cual habria procesado CERO juegos, dejando toda la
+logica nueva sin aplicar a los datos ya persistidos. Ademas, el
+`UniqueConstraint` de `historical_snapshot` (via `insert_ignore_duplicates`)
+habria ignorado en silencio cualquier insert nuevo mientras el snapshot
+VIEJO siguiera ahi.
+
+Se agrego `historical_db.clear_season(engine, season)` -- borra
+`historical_snapshot`/`historical_report`/`historical_season_run` de una
+temporada, **nunca** `historical_game` (schedule/resultados son hechos
+estables que no cambian con la logica de evaluacion) -- y un flag
+`force=True` en `run_season_ingestion()` (`--force` en `cli.py`, input
+`force` en `jsa_historical_ingest.yml`) que lo invoca antes de ingerir.
+`False` por default en los tres niveles -- nunca borra datos sin que se
+pida explicitamente, y el paso de borrado queda logueado (cuantas filas se
+borraron) antes de reprocesar.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

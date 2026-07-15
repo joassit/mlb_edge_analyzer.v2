@@ -56,6 +56,61 @@ def test_season_ingestion_is_resumable(isolated_dbs):
     assert second["processed"] == 0
 
 
+def test_season_ingestion_force_reprocesses_already_ingested_games(isolated_dbs):
+    """`force=True` debe ignorar la resumibilidad y volver a procesar
+    juegos ya ingeridos -- necesario para una re-ingesta real despues de
+    un cambio en `reconstruct_snapshot()`/`evaluate_game()` (ver
+    `historical_db.clear_season()`)."""
+    hist_url, prod_url = isolated_dbs
+    with patch("jsa.historical.pipeline.fetch_season_games", return_value=FAKE_GAMES):
+        first = pipeline.run_season_ingestion(2022, provider=FakeProvider(), historical_database_url=hist_url, registries_database_url=prod_url)
+        assert first["processed"] == 2
+
+        second_no_force = pipeline.run_season_ingestion(2022, provider=FakeProvider(), historical_database_url=hist_url, registries_database_url=prod_url)
+        assert second_no_force["processed"] == 0  # resumibilidad normal -- se saltan
+
+        third_forced = pipeline.run_season_ingestion(
+            2022, provider=FakeProvider(), historical_database_url=hist_url, registries_database_url=prod_url, force=True,
+        )
+    assert third_forced["processed"] == 2  # force=True reprocesa todo
+
+
+def test_season_ingestion_force_replaces_stale_snapshot_payload(isolated_dbs):
+    """Sin `clear_season()`, el UniqueConstraint de `historical_snapshot`
+    ignoraria silenciosamente el insert nuevo -- este test prueba que
+    `force=True` deja el payload NUEVO persistido, no el viejo."""
+    hist_url, prod_url = isolated_dbs
+    with patch("jsa.historical.pipeline.fetch_season_games", return_value=FAKE_GAMES):
+        pipeline.run_season_ingestion(
+            2022, provider=FakeProvider(fielding_pct=None), historical_database_url=hist_url, registries_database_url=prod_url,
+        )
+        pipeline.run_season_ingestion(
+            2022, provider=FakeProvider(fielding_pct=0.991), historical_database_url=hist_url, registries_database_url=prod_url,
+            force=True,
+        )
+
+    engine = historical_db.get_engine(hist_url)
+    snapshots = historical_db.snapshots_for_season(engine, 2022)
+    assert len(snapshots) == 2
+    for row in snapshots:
+        assert row["payload"]["home_fielding_pct"] == 0.991
+
+
+def test_clear_season_deletes_snapshots_and_reports_but_not_games(isolated_dbs):
+    hist_url, prod_url = isolated_dbs
+    with patch("jsa.historical.pipeline.fetch_season_games", return_value=FAKE_GAMES):
+        pipeline.run_season_ingestion(2022, provider=FakeProvider(), historical_database_url=hist_url, registries_database_url=prod_url)
+
+    engine = historical_db.get_engine(hist_url)
+    deleted = historical_db.clear_season(engine, 2022)
+    assert deleted == {"snapshots_deleted": 2, "reports_deleted": 2, "season_runs_deleted": 1}
+    assert historical_db.snapshots_for_season(engine, 2022) == []
+    assert historical_db.reports_for_season(engine, 2022) == []
+    # historical_game (schedule/resultados) nunca se borra -- son hechos
+    # estables, no cambian con la logica de reconstruccion.
+    assert len(historical_db.games_for_season(engine, 2022)) == 2
+
+
 def test_ingested_reports_are_valid_and_use_real_evidence_engine(isolated_dbs):
     hist_url, prod_url = isolated_dbs
     with patch("jsa.historical.pipeline.fetch_season_games", return_value=FAKE_GAMES):

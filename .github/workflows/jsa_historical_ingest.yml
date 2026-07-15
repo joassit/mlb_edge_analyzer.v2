@@ -15,6 +15,11 @@ on:
         description: 'Temporada a ingerir (2022-2026)'
         required: true
         type: string
+      force:
+        description: 'Borrar snapshot/report/season_run existentes de la temporada antes de ingerir (re-ingesta real tras un cambio de logica, no una ingesta inicial)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,7 +68,11 @@ jobs:
           if [ -n "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
             export JSA_HISTORICAL_DATABASE_URL="$JSA_HISTORICAL_DATABASE_URL_SECRET"
           fi
-          python -m jsa.historical.cli season ${{ inputs.season }}
+          if [ "${{ inputs.force }}" = "true" ]; then
+            python -m jsa.historical.cli season ${{ inputs.season }} --force
+          else
+            python -m jsa.historical.cli season ${{ inputs.season }}
+          fi
 
       # Nombre con la temporada incluida a proposito: sin esto, correr dos
       # temporadas distintas pisaria el mismo artifact -- con el año en el
