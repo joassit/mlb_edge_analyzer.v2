@@ -58,7 +58,14 @@ class HistoricalStatsProvider:
     implementacion real, y `tests/test_historical_point_in_time.py::FakeProvider`
     para la implementacion determinista usada en tests."""
 
-    def pitcher_era_ip_as_of(self, pitcher_id: int, as_of_date: str, season: int) -> tuple[float, float] | None:
+    def pitcher_era_ip_as_of(self, pitcher_id: int, as_of_date: str, season: int) -> dict | None:
+        """{"era": float, "ip": float, "projected_ip": float|None} -- `ip`
+        es la muestra acumulada point-in-time (para shrinkage), `projected_ip`
+        es IP por salida (ip / games started, mismo proxy que
+        `data_sources/stats.py::get_pitcher_command()` en produccion) --
+        alimenta `long_outing`/`short_outing_bullpen_game` en el Context
+        Detector (Seccion 5), que a su vez mueve pesos reales via el Rule
+        Engine (Seccion 6.3). `None` si no hay datos."""
         raise NotImplementedError
 
     def team_ops_as_of(self, team_id: int, as_of_date: str, season: int) -> tuple[float, int | None] | None:
@@ -131,7 +138,10 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         era, ip_str = stat.get("era"), stat.get("inningsPitched")
         if era is None or ip_str is None:
             return None
-        return float(era), _parse_innings(ip_str)
+        ip = _parse_innings(ip_str)
+        starts = stat.get("gamesStarted") or 0
+        projected_ip = (ip / starts) if starts > 0 else None
+        return {"era": float(era), "ip": ip, "projected_ip": projected_ip}
 
     def team_ops_as_of(self, team_id, as_of_date, season):
         try:

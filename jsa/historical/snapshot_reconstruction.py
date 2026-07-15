@@ -91,15 +91,16 @@ def reconstruct_snapshot(
         season=season,
         home_team=home_team,
         away_team=away_team,
-        home_starter_xera=home_era_ip[0] if home_era_ip else None,
-        away_starter_xera=away_era_ip[0] if away_era_ip else None,
-        home_starter_ip_sample=home_era_ip[1] if home_era_ip else None,
-        away_starter_ip_sample=away_era_ip[1] if away_era_ip else None,
-        # projected_ip no tiene una fuente point-in-time confiable en esta
-        # entrega (ver jsa/docs/ROADMAP.md) -- se deja None a proposito, no
-        # se aproxima con datos que podrian filtrar informacion futura.
-        home_starter_projected_ip=None,
-        away_starter_projected_ip=None,
+        home_starter_xera=home_era_ip.get("era") if home_era_ip else None,
+        away_starter_xera=away_era_ip.get("era") if away_era_ip else None,
+        home_starter_ip_sample=home_era_ip.get("ip") if home_era_ip else None,
+        away_starter_ip_sample=away_era_ip.get("ip") if away_era_ip else None,
+        # ip / games started point-in-time (mismo proxy que
+        # data_sources/stats.py::get_pitcher_command() en produccion) --
+        # alimenta long_outing/short_outing_bullpen_game en el Context
+        # Detector.
+        home_starter_projected_ip=home_era_ip.get("projected_ip") if home_era_ip else None,
+        away_starter_projected_ip=away_era_ip.get("projected_ip") if away_era_ip else None,
         home_starter_k_bb_pct=home_k_bb,
         away_starter_k_bb_pct=away_k_bb,
         home_ops=home_ops_result[0] if home_ops_result else None,
