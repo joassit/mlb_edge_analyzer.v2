@@ -127,6 +127,41 @@ en la practica). Se agrego:
   pillar-contribution`, y ya integrado como paso extra de `cli.py
   validate`).
 
+## Pilar Context desmudado (primer arreglo tras el diagnostico de PillarContributionAnalyzer)
+
+`PillarContributionAnalyzer` mostro `team_quality`/`context`/`trend`/`historical`
+con `zero_advantage_rate=100%` en las 5 temporadas. Diagnostico: `trend`/
+`historical` son stubs intencionales (quedan asi); `context` solo se
+movia con `extreme_travel`, que dependia de `travel_distance` -- un campo
+que ni `snapshot_reconstruction.py` (historico) ni `snapshot_builder.py`
+(produccion) poblaban nunca. Se corrigio en ambos lados (mismo principio
+de "una unica logica de evaluacion, en vivo y en backtest" ya aplicado en
+`engine/orchestrator.py`):
+
+- `data_sources/park_factors.py::distance_miles()`: haversine pura entre
+  los estadios de dos equipos, usando las coordenadas ya tabuladas.
+- `historical/ingestion.py::build_previous_park_index()`: para cada
+  (team_id, game_pk), el estadio donde ese equipo jugo su partido
+  inmediato anterior -- calculado en memoria a partir del schedule que
+  `fetch_season_games()` YA trae completo por temporada, **cero llamadas
+  de red adicionales** para el backfill historico.
+- `data_sources/mlb_api.py::get_previous_game_location()` +
+  `data_sources/travel.py::preload_travel_distances()`: equivalente para
+  produccion en vivo (que no tiene el schedule completo precargado) --
+  mismo patron de precarga por lote que `weather.py::preload_weather()`.
+- `historical/point_in_time_provider.py::historical_weather()` ahora
+  tambien pide `windspeed_10m` a Open-Meteo (ya estaba en la respuesta,
+  solo faltaba pedirla) -- `weather_wind_speed` ya funcionaba en
+  produccion (`data_sources/weather.py`), pero nunca en el lado historico.
+
+**Pendiente antes de recalibrar** (ver conversacion): `team_quality`
+(lesiones, via `statsapi.mlb.com/api/v1/transactions` -- spike de
+validacion ya confirmo cobertura real en las 5 temporadas) y la revision
+de la asimetria de shrinkage `starter` vs `bullpen` (`SHRINKAGE_K_IP=60`
+sin equivalente en `bullpen.py`, que ademas tiene el peso base mas alto de
+los 7 pilares) -- agrupar ambos con este cambio en una sola re-ingesta de
+las 5 temporadas contra Postgres, no una por cada arreglo.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

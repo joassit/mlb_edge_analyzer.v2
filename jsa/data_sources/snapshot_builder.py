@@ -13,10 +13,11 @@ Limitaciones honestas de esta entrega (documentadas, no escondidas -- ver
   Statcast. Se usa ERA real de temporada como proxy explicito.
 - `lineups_official`, `bullpen_usage_known`, `no_last_minute_changes`,
   `home_closer_available`/`away_closer_available`,
-  `home_bullpen_ip_last_3_days`/`away_...`, `home_key_injuries`/`away_...`,
-  `travel_distance`: sin fuente wireada todavia -- quedan en su valor por
-  defecto (`False`/`None`/`[]`), nunca inventados. Esto baja el CRI de
-  forma realista en vez de aparentar mas confiabilidad de la que hay.
+  `home_bullpen_ip_last_3_days`/`away_...`, `home_key_injuries`/`away_...`:
+  sin fuente wireada todavia -- quedan en su valor por defecto
+  (`False`/`None`/`[]`), nunca inventados. Esto baja el CRI de forma
+  realista en vez de aparentar mas confiabilidad de la que hay.
+  `travel_distance` y `weather_wind_speed` SI tienen fuente real (ver abajo).
 """
 
 from __future__ import annotations
@@ -35,13 +36,19 @@ def build_snapshot_from_game(
     weather_by_home_team: dict[int, dict],
     league_context: dict,
     season: int = SEASON,
+    travel_by_away_team: dict[int, float | None] | None = None,
 ) -> GameSnapshot:
     """`game`: un dict devuelto por `mlb_api.get_schedule()`. `league_context`:
     {"league_avg_era", "league_avg_ops", "league_avg_runs_per_game"} --
     calculado UNA vez por corrida (ver `main.py`) y congelado igual para
     todos los juegos del dia, nunca recalculado dentro de un pilar (ver
     comentario en `GameSnapshot.league_avg_era`). Hace las llamadas de stats
-    necesarias (bloqueantes) y devuelve un `GameSnapshot` ya hasheado."""
+    necesarias (bloqueantes) y devuelve un `GameSnapshot` ya hasheado.
+
+    `travel_by_away_team`: salida de `data_sources.travel.preload_travel_distances()`,
+    precalculada UNA vez por corrida igual que `weather_by_home_team` --
+    opcional (`None`) para no romper callers/tests existentes que todavia
+    no la pasan."""
     home_id, away_id = game["home_team_id"], game["away_team_id"]
     home_pid, away_pid = game.get("home_pitcher_id"), game.get("away_pitcher_id")
 
@@ -94,7 +101,7 @@ def build_snapshot_from_game(
         home_key_injuries=[],
         away_key_injuries=[],
         is_double_header=bool(game.get("is_double_header", False)),
-        travel_distance=None,
+        travel_distance=(travel_by_away_team or {}).get(away_id),
         weather_temp_f=game_weather.get("temp_f"),
         weather_wind_speed=game_weather.get("wind_mph"),
         park_factor=park["park_factor"],

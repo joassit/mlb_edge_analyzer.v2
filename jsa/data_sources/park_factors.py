@@ -6,8 +6,13 @@ consultarla por API. Debe actualizarse 1-2 veces por temporada desde una
 fuente publicada (FanGraphs Park Factors, Baseball Savant).
 
 park_factor: 1.00 = neutral. >1.00 favorece a los bateadores. <1.00
-favorece a los pitchers. Las coordenadas alimentan `weather.py`.
+favorece a los pitchers. Las coordenadas alimentan `weather.py` y
+`distance_miles()` (viaje del visitante, ver `engine/context_detector.py`).
 """
+
+from __future__ import annotations
+
+import math
 
 BALLPARKS: dict[int, dict] = {
     108: {"name": "Angel Stadium", "park_factor": 0.98, "lat": 33.8003, "lon": -117.8827},
@@ -52,3 +57,26 @@ def get_park_info(home_team_id: int) -> dict:
         home_team_id,
         {"name": "Desconocido", "park_factor": LEAGUE_AVG_PARK_FACTOR, "lat": None, "lon": None},
     )
+
+
+def distance_miles(from_team_id: int | None, to_team_id: int | None) -> float | None:
+    """Distancia entre los estadios de dos equipos (formula de haversine,
+    radio terrestre en millas) -- alimenta `GameSnapshot.travel_distance`
+    (Seccion 5: "el visitante es quien viaja", ver `engine/context_detector.py`).
+    `None` si falta alguno de los dos ids o alguno no esta en `BALLPARKS`."""
+    if from_team_id is None or to_team_id is None:
+        return None
+    from_park = get_park_info(from_team_id)
+    to_park = get_park_info(to_team_id)
+    if from_park["lat"] is None or to_park["lat"] is None:
+        return None
+    if from_team_id == to_team_id:
+        return 0.0
+
+    lat1, lon1 = math.radians(from_park["lat"]), math.radians(from_park["lon"])
+    lat2, lon2 = math.radians(to_park["lat"]), math.radians(to_park["lon"])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(min(1.0, math.sqrt(a)))
+    earth_radius_miles = 3958.8
+    return earth_radius_miles * c

@@ -187,17 +187,23 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
     def historical_weather(self, lat, lon, game_date, as_of_date):
         """Climatologia point-in-time -- NUNCA consulta el clima real de
         `game_date` (esa era la unica variable del proveedor original que
-        no respetaba un corte de fecha). Promedia la temperatura de la
-        MISMA ventana de calendario en los `WEATHER_CLIMATOLOGY_YEARS`
+        no respetaba un corte de fecha). Promedia temperatura Y viento de
+        la MISMA ventana de calendario en los `WEATHER_CLIMATOLOGY_YEARS`
         años ANTERIORES al año de `as_of_date` -- cada ventana cae
-        enteramente en un año pasado completo, imposible que se solape."""
-        result = {"temp_f": None}
+        enteramente en un año pasado completo, imposible que se solape.
+
+        `wind_speed` se agrega junto con `temp_f` en la misma llamada (ya
+        estaba disponible en la respuesta de Open-Meteo, solo faltaba
+        pedirla) -- antes de esto `context.py` nunca podia detectar viento
+        extremo en un juego historico porque `weather_wind_speed` quedaba
+        siempre en None."""
+        result = {"temp_f": None, "wind_speed": None}
         if lat is None or lon is None or not game_date:
             return result
 
         cache_key = (round(lat, 2), round(lon, 2), game_date, as_of_date)
         if cache_key in self._weather_cache:
-            return {"temp_f": self._weather_cache[cache_key]}
+            return dict(self._weather_cache[cache_key])
 
         try:
             cutoff_year = date.fromisoformat(as_of_date).year
@@ -206,6 +212,7 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             return result
 
         temps: list[float] = []
+        winds: list[float] = []
         for year_offset in range(1, WEATHER_CLIMATOLOGY_YEARS + 1):
             yr = cutoff_year - year_offset
             try:
@@ -220,16 +227,19 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
                 resp = session.get(OPEN_METEO_ARCHIVE_BASE, params={
                     "latitude": lat, "longitude": lon,
                     "start_date": window_start.isoformat(), "end_date": window_end.isoformat(),
-                    "hourly": "temperature_2m", "temperature_unit": "fahrenheit", "timezone": "UTC",
+                    "hourly": "temperature_2m,windspeed_10m", "temperature_unit": "fahrenheit",
+                    "wind_speed_unit": "mph", "timezone": "UTC",
                 }, timeout=INGESTION_REQUEST_TIMEOUT)
                 resp.raise_for_status()
-                vals = resp.json().get("hourly", {}).get("temperature_2m", [])
-                temps.extend(v for v in vals if v is not None)
+                hourly = resp.json().get("hourly", {})
+                temps.extend(v for v in hourly.get("temperature_2m", []) if v is not None)
+                winds.extend(v for v in hourly.get("windspeed_10m", []) if v is not None)
             except (requests.RequestException, KeyError, ValueError, TypeError) as e:
                 logger.debug("climatologia %s fallo para %s: %s", yr, game_date, e)
 
         result["temp_f"] = (sum(temps) / len(temps)) if temps else None
-        self._weather_cache[cache_key] = result["temp_f"]
+        result["wind_speed"] = (sum(winds) / len(winds)) if winds else None
+        self._weather_cache[cache_key] = dict(result)
         return result
 
     def league_averages_as_of(self, as_of_date, season):

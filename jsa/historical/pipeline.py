@@ -25,7 +25,7 @@ from jsa import config as production_config
 from jsa.engine.orchestrator import evaluate_game
 from jsa.historical import config as historical_config
 from jsa.historical import db as historical_db
-from jsa.historical.ingestion import fetch_season_games
+from jsa.historical.ingestion import build_previous_park_index, fetch_season_games
 from jsa.historical.point_in_time_provider import HistoricalStatsProvider, MLBStatsAPIProvider
 from jsa.historical.snapshot_reconstruction import reconstruct_snapshot
 from jsa.registries import db as registries_db
@@ -68,6 +68,7 @@ def run_season_ingestion(
     experiment_ids = set(registries_db.latest_by_id(registries_engine, registries_db.experiment_registry, "experiment_id").keys())
 
     games = fetch_season_games(season)
+    previous_park_index = build_previous_park_index(games)
     already_done = historical_db.already_ingested_game_pks(historical_engine, season)
     pending = [g for g in games if g["game_pk"] not in already_done]
     logger.info(
@@ -98,6 +99,7 @@ def run_season_ingestion(
                 home_team_id=game["home_team_id"], away_team_id=game["away_team_id"],
                 home_pitcher_id=game["home_pitcher_id"], away_pitcher_id=game["away_pitcher_id"],
                 is_double_header=game["is_double_header"], provider=provider,
+                away_team_previous_park_id=previous_park_index.get((game["away_team_id"], game["game_pk"])),
             )
 
             report = evaluate_game(

@@ -4,13 +4,16 @@ reescrito contra la interfaz de `jsa/historical/point_in_time_provider.py`."""
 
 from __future__ import annotations
 
+import pytest
+
 from jsa.historical.point_in_time_provider import HistoricalStatsProvider
 from jsa.historical.snapshot_reconstruction import reconstruct_snapshot
 
 
 class FakeProvider(HistoricalStatsProvider):
-    def __init__(self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0):
-        self.era, self.ip, self.ops, self.pa, self.bullpen_era, self.temp_f = era, ip, ops, pa, bullpen_era, temp_f
+    def __init__(self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0, wind_speed=None):
+        self.era, self.ip, self.ops, self.pa, self.bullpen_era = era, ip, ops, pa, bullpen_era
+        self.temp_f, self.wind_speed = temp_f, wind_speed
         self.calls: list[tuple] = []
 
     def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
@@ -29,7 +32,7 @@ class FakeProvider(HistoricalStatsProvider):
         return {"k_pct": 0.24, "bb_pct": 0.07}
 
     def historical_weather(self, lat, lon, game_date, as_of_date):
-        return {"temp_f": self.temp_f}
+        return {"temp_f": self.temp_f, "wind_speed": self.wind_speed}
 
     def league_averages_as_of(self, as_of_date, season):
         return {"league_ops": 0.750, "league_era": 4.30, "league_runs_per_game": 4.5}
@@ -85,3 +88,46 @@ def test_reconstruction_is_deterministic_for_same_inputs():
     a = _reconstruct(provider=FakeProvider())
     b = _reconstruct(provider=FakeProvider())
     assert a.snapshot_hash == b.snapshot_hash
+
+
+def test_reconstruction_populates_wind_speed_from_provider():
+    snap = _reconstruct(provider=FakeProvider(wind_speed=18.0))
+    assert snap.weather_wind_speed == 18.0
+
+
+def test_reconstruction_wind_speed_is_none_without_data():
+    snap = _reconstruct(provider=FakeProvider())
+    assert snap.weather_wind_speed is None
+
+
+def test_reconstruction_computes_travel_distance_from_previous_park_id():
+    from jsa.data_sources import park_factors
+
+    # away_team_id=111 (Red Sox) venia de jugar en Los Angeles (119) antes
+    # de este juego en Yankee Stadium (147).
+    snap = _reconstruct(away_team_previous_park_id=119)
+    expected = park_factors.distance_miles(119, 147)
+    assert snap.travel_distance == pytest.approx(expected)
+    assert snap.travel_distance > 2000  # cruza EXTREME_TRAVEL_MILES
+
+
+def test_reconstruction_travel_distance_is_none_without_previous_park():
+    snap = _reconstruct(away_team_previous_park_id=None)
+    assert snap.travel_distance is None
+
+
+def test_extreme_travel_from_historical_reconstruction_flows_into_context_pillar():
+    """Punta a punta: un `travel_distance` reconstruido desde un
+    `away_team_previous_park_id` real debe disparar `extreme_travel` en el
+    Context Detector y mover el advantage del pilar `context` -- antes de
+    este fix, `travel_distance` siempre era None y esto era estructuralmente
+    imposible sobre datos historicos."""
+    from jsa.engine.context_detector import detect_context
+    from jsa.engine.pillars.context import evaluate as evaluate_context
+
+    snap = _reconstruct(away_team_previous_park_id=119)  # LA -> Nueva York
+    context = detect_context(snap)
+    assert context.extreme_travel is True
+
+    advantage = evaluate_context(snap, context)
+    assert advantage.advantage == -1  # penaliza al visitante, ver context.py
