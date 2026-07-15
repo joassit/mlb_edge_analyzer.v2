@@ -107,7 +107,7 @@ def test_get_bullpen_era_falls_back_when_roster_fetch_fails():
     with patch("jsa.data_sources.stats.session.get", side_effect=requests.RequestException("boom")):
         result = stats.get_bullpen_era(team_id=999, season=2026)
 
-    assert result == {"era": FALLBACK_BULLPEN_ERA, "closer_pitcher_id": None}
+    assert result == {"era": FALLBACK_BULLPEN_ERA, "closer_pitcher_id": None, "ip": 0.0}
 
 
 def test_get_bullpen_era_excludes_pitchers_classified_as_starters():
