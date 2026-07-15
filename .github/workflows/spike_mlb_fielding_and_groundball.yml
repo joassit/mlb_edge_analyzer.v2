@@ -1,0 +1,116 @@
+name: spike-mlb-fielding-and-groundball
+
+# SPIKE de validacion, no infraestructura permanente -- confirma dos
+# candidatos evaluados para el usuario antes de comprometer esfuerzo de
+# construccion real:
+#
+# 1. Fielding de equipo point-in-time (candidato para una senal defensiva
+#    en el pilar team_quality, en vez de OAA/DRS -- no expuestos por
+#    statsapi.mlb.com): stats=byDateRange&group=fielding sobre
+#    teams/{id}/stats, mismo endpoint family que team_ops_as_of().
+# 2. Ground ball rate del abridor (candidato para el pilar starter, cero
+#    llamadas de red adicionales si esta en el MISMO payload que ya se
+#    pide para ERA/IP): busca groundOuts/airOuts/groundOutsToAirouts en
+#    people/{id}/stats?stats=byDateRange&group=pitching.
+#
+# No escribe nada, no usa secrets, no toca ninguna base de datos -- solo
+# imprime en el log lo que la API devuelve para poder inspeccionarlo.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Query team fielding + starter ground ball fields for all 5 seasons
+        run: |
+          python3 - <<'PY'
+          import requests
+
+          BASE = "https://statsapi.mlb.com/api/v1"
+          YANKEES = 147
+          # Gerrit Cole -- abridor de temporada completa en las 5 temporadas,
+          # buena muestra de IP acumulada para inspeccionar los campos.
+          CORBIN_OR_COLE = 543037
+
+          WINDOWS = [
+              (2022, "2022-04-01", "2022-05-15"),
+              (2023, "2023-04-01", "2023-05-15"),
+              (2024, "2024-04-01", "2024-05-15"),
+              (2025, "2025-04-01", "2025-05-15"),
+              (2026, "2026-04-01", "2026-05-15"),
+          ]
+
+          print("########## 1. TEAM FIELDING (candidato team_quality) ##########")
+          for season, start, end in WINDOWS:
+              print(f"\n=== {season}: Yankees fielding, {start} a {end} ===")
+              try:
+                  resp = requests.get(
+                      f"{BASE}/teams/{YANKEES}/stats",
+                      params={"stats": "byDateRange", "group": "fielding", "startDate": start, "endDate": end},
+                      timeout=20,
+                  )
+                  resp.raise_for_status()
+                  data = resp.json()
+              except Exception as e:
+                  print(f"ERROR consultando fielding {season}: {e}")
+                  continue
+
+              try:
+                  splits = data["stats"][0]["splits"]
+              except (KeyError, IndexError):
+                  print(f"Respuesta sin splits utilizables: {data}")
+                  continue
+              if not splits:
+                  print("Sin splits (0 juegos en la ventana).")
+                  continue
+              stat = splits[0]["stat"]
+              print(f"Campos disponibles: {sorted(stat.keys())}")
+              print(f"stat completo: {stat}")
+
+          print("\n\n########## 2. STARTER GROUND BALL FIELDS (candidato starter) ##########")
+          for season, start, end in WINDOWS:
+              print(f"\n=== {season}: pitcher {CORBIN_OR_COLE} pitching, {start} a {end} ===")
+              try:
+                  resp = requests.get(
+                      f"{BASE}/people/{CORBIN_OR_COLE}/stats",
+                      params={"stats": "byDateRange", "group": "pitching", "startDate": start, "endDate": end},
+                      timeout=20,
+                  )
+                  resp.raise_for_status()
+                  data = resp.json()
+              except Exception as e:
+                  print(f"ERROR consultando pitching {season}: {e}")
+                  continue
+
+              try:
+                  splits = data["stats"][0]["splits"]
+              except (KeyError, IndexError):
+                  print(f"Respuesta sin splits utilizables: {data}")
+                  continue
+              if not splits:
+                  print("Sin splits (0 salidas en la ventana).")
+                  continue
+              stat = splits[0]["stat"]
+              gb_fields = {k: v for k, v in stat.items() if k in (
+                  "groundOuts", "airOuts", "groundOutsToAirouts", "flyOuts",
+                  "inningsPitched", "era", "gamesStarted",
+              )}
+              print(f"Campos GB/AO relevantes: {gb_fields}")
+              print(f"Todos los campos disponibles: {sorted(stat.keys())}")
+          PY
