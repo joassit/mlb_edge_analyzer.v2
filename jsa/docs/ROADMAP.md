@@ -225,6 +225,38 @@ explicita, no automaticamente al mergear este cambio (ver "Regla dura"
 al final de este documento). La revision de shrinkage `starter`/`bullpen`
 queda para despues de ver esos resultados.
 
+## `starter_projected_ip` desmudado (tercer campo del mismo bundle)
+
+Revision final de campos "de valor y bajo/medio esfuerzo" antes de la
+re-ingesta combinada: `home/away_starter_projected_ip` (IP proyectada por
+salida) tenia fuente real en produccion
+(`data_sources/stats.py::get_pitcher_command()`, `ip / games started`)
+pero siempre quedaba en `None` sobre datos historicos -- misma asimetria
+que ya se corrigio con `travel_distance`/`weather_wind_speed`.
+
+Impacto real (no solo CRI): `projected_ip` alimenta `long_outing`/
+`short_outing_bullpen_game` en el Context Detector (Seccion 5), que a su
+vez disparan reglas del Rule Engine (Seccion 6.3) que mueven peso real
+entre `starter` y `bullpen` (`±0.06`/`±0.10`) -- exactamente el tipo de
+campo que el criterio acordado pedia ("impacto real en los pilares
+actuales"), a diferencia de `bullpen_ip_last_3_days` (unicamente
+Uncertainty Index, ya descartado).
+
+- `historical/point_in_time_provider.py::pitcher_era_ip_as_of()`: cambia
+  de tupla `(era, ip)` a `{"era", "ip", "projected_ip"}` -- `projected_ip`
+  se calcula del MISMO `stat` dict que ya se pedia para ERA/IP
+  (`gamesStarted` viene en el mismo payload), **cero llamadas de red
+  adicionales**.
+- `historical/snapshot_reconstruction.py`: puebla `home/away_starter_projected_ip`
+  desde ese mismo dict.
+
+Con este campo, el Context Detector queda completamente desmudado en el
+lado historico salvo `bullpen_fatigue` (excluido a proposito, ver seccion
+de Context arriba) -- revisado explicitamente campo por campo contra
+`engine/pillars/*.py` y `engine/context_detector.py`: ningun otro campo
+consumido por un pilar o por una regla del Rule Engine queda sin fuente
+real de este lado.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
