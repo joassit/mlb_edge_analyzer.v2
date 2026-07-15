@@ -41,13 +41,26 @@ def run_season_ingestion(
     *,
     historical_database_url: str | None = None,
     registries_database_url: str | None = None,
+    force: bool = False,
 ) -> dict:
     """`historical_database_url`/`registries_database_url` son parametros
     explicitos (no solo constantes de modulo) para que un test pueda
     aislar la corrida sin depender de parchear un nombre ya importado --
     caen a `historical.config.HISTORICAL_DATABASE_URL`/
     `config.DATABASE_URL` si no se pasan, que es el comportamiento real en
-    produccion (`cli.py` nunca los pasa)."""
+    produccion (`cli.py` nunca los pasa).
+
+    `force`: borra `historical_snapshot`/`historical_report`/
+    `historical_season_run` de la temporada ANTES de ingerir (via
+    `historical_db.clear_season()`) -- necesario para que una re-ingesta
+    real reprocese juegos ya ingeridos con una version VIEJA de
+    `reconstruct_snapshot()`/`evaluate_game()`. Sin esto,
+    `already_ingested_game_pks()` los saltaria de largo (resumibilidad
+    pensada para reanudar una corrida cortada, no para forzar un
+    reproceso) y ademas el `UniqueConstraint` de `historical_snapshot`
+    ignoraria silenciosamente el insert nuevo, dejando el snapshot VIEJO
+    persistido. `False` por default -- nunca borra datos sin que el
+    caller lo pida explicitamente."""
     start = time.monotonic()
     run_id = str(uuid.uuid4())
     provider = provider or MLBStatsAPIProvider()
@@ -56,6 +69,10 @@ def run_season_ingestion(
 
     historical_engine = historical_db.get_engine(historical_database_url)
     historical_db.init_historical_storage(historical_engine)
+
+    if force:
+        deleted = historical_db.clear_season(historical_engine, season)
+        logger.warning("run_season_ingestion(%s): force=True -- borrado antes de re-ingerir: %s", season, deleted)
 
     registries_engine = registries_db.get_engine(registries_database_url)
     # Idempotente (ver registries/seed.py) -- la ingesta historica puede

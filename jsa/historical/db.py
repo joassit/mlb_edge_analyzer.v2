@@ -174,3 +174,22 @@ def already_ingested_game_pks(engine: Engine, season: int) -> set[int]:
     with engine.connect() as conn:
         rows = conn.execute(select(historical_report.c.game_pk).where(historical_report.c.season == season)).all()
     return {r[0] for r in rows}
+
+
+def clear_season(engine: Engine, season: int) -> dict:
+    """Borra `historical_snapshot`/`historical_report`/`historical_season_run`
+    de una temporada -- usado por `run_season_ingestion(..., force=True)`
+    para forzar un reproceso completo cuando la logica de reconstruccion
+    cambio (ej. campos nuevos del snapshot) y la resumibilidad de
+    `already_ingested_game_pks()` saltaria de largo juegos ya evaluados con
+    la logica VIEJA. NUNCA borra `historical_game` (schedule/resultados son
+    hechos estables, no cambian con la logica de evaluacion)."""
+    with engine.begin() as conn:
+        snap_result = conn.execute(historical_snapshot.delete().where(historical_snapshot.c.season == season))
+        report_result = conn.execute(historical_report.delete().where(historical_report.c.season == season))
+        run_result = conn.execute(historical_season_run.delete().where(historical_season_run.c.season == season))
+    return {
+        "snapshots_deleted": snap_result.rowcount,
+        "reports_deleted": report_result.rowcount,
+        "season_runs_deleted": run_result.rowcount,
+    }

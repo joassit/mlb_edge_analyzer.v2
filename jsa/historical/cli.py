@@ -44,6 +44,10 @@ def main() -> None:
 
     season_parser = subparsers.add_parser("season", help="Ingiere una temporada completa")
     season_parser.add_argument("year", type=int, help=f"Temporada a ingerir, una de {SUPPORTED_SEASONS}")
+    season_parser.add_argument(
+        "--force", action="store_true",
+        help="Borra snapshot/report/season_run existentes de la temporada antes de ingerir, forzando un reproceso completo con la logica actual (usar para re-ingestas tras un cambio de reconstruct_snapshot()/evaluate_game(), no para una ingesta inicial)",
+    )
 
     merge_parser = subparsers.add_parser("merge", help="Fusiona N bases historicas separadas en una sola")
     merge_parser.add_argument("--source", action="append", required=True, dest="sources", help="URL SQLAlchemy de una base fuente (repetible, una por temporada)")
@@ -66,7 +70,7 @@ def main() -> None:
         if args.year not in SUPPORTED_SEASONS:
             parser.error(f"Temporada {args.year} no soportada -- SUPPORTED_SEASONS={SUPPORTED_SEASONS}")
         setup_logging(args.year)
-        summary = run_season_ingestion(args.year)
+        summary = run_season_ingestion(args.year, force=args.force)
         print(summary)
 
     elif args.command == "merge":
