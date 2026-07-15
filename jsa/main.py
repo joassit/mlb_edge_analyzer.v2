@@ -14,7 +14,7 @@ import uuid
 from datetime import date
 
 from jsa import config
-from jsa.data_sources import mlb_api, park_factors, weather
+from jsa.data_sources import mlb_api, park_factors, travel, weather
 from jsa.data_sources.snapshot_builder import build_league_context, build_snapshot_from_game
 from jsa.engine.orchestrator import evaluate_game
 from jsa.governance import provenance
@@ -56,11 +56,14 @@ def run_daily(target_date: date | None = None, is_production: bool = True) -> di
 
     league_context = build_league_context(config.SEASON)
     weather_by_home_team = weather.preload_weather(games, park_factors.get_park_info)
+    travel_by_away_team = travel.preload_travel_distances(games, target_date)
 
     processed, errors, invalidated_count = 0, 0, 0
     for game in games:
         try:
-            snapshot = build_snapshot_from_game(game, weather_by_home_team, league_context, config.SEASON)
+            snapshot = build_snapshot_from_game(
+                game, weather_by_home_team, league_context, config.SEASON, travel_by_away_team
+            )
             report = evaluate_game(
                 snapshot, run_id=run_id, model_version=config.MODEL_VERSION,
                 rule_registry_rows=rule_registry_rows, feature_registry_rows=feature_registry_rows,

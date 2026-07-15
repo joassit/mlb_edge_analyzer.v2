@@ -41,6 +41,7 @@ def _run_with_mocks(sqlite_url: str):
     with patch.object(config, "DATABASE_URL", sqlite_url), \
          patch("jsa.main.mlb_api.get_schedule", return_value=[FAKE_GAME]), \
          patch("jsa.main.weather.preload_weather", return_value={147: {"temp_f": 75, "wind_mph": 5}}), \
+         patch("jsa.main.travel.preload_travel_distances", return_value={111: 200.0}), \
          patch("jsa.data_sources.snapshot_builder.stats.get_pitcher_era_ip", return_value=None), \
          patch("jsa.data_sources.snapshot_builder.stats.get_pitcher_command", return_value={}), \
          patch("jsa.data_sources.snapshot_builder.stats.get_team_ops", return_value=0.75), \
@@ -109,6 +110,16 @@ def test_hashes_verify_against_independent_recomputation(sqlite_url):
 
     rebuilt = JSAReport(**report)
     assert rebuilt.compute_output_hash() == report["output_hash"]
+
+
+def test_travel_distance_from_preload_reaches_persisted_snapshot(sqlite_url):
+    _run_with_mocks(sqlite_url)
+    engine = registries_db.get_engine(sqlite_url)
+    from sqlalchemy import select
+
+    with engine.connect() as conn:
+        snap_row = conn.execute(select(storage_db.game_snapshots)).mappings().first()
+    assert snap_row["payload"]["travel_distance"] == 200.0
 
 
 def test_no_experimental_rule_moved_production_weights(sqlite_url):

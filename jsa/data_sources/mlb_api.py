@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import requests
 
@@ -97,6 +97,44 @@ def _parse_game(g: dict) -> dict | SchemaError:
         "abstract_state": abstract_state,
         "is_double_header": g.get("gameNumber", 1) > 1 or g.get("doubleHeader") == "Y",
     }
+
+
+def get_previous_game_location(team_id: int, before_date: date, lookback_days: int = 10) -> int | None:
+    """team_id del estadio donde `team_id` jugo su partido `Final` mas
+    reciente ANTES de `before_date` -- alimenta `travel_distance` (Seccion
+    5: "el visitante es quien viaja", ver `park_factors.py::distance_miles()`).
+    Ventana de `lookback_days` hacia atras (10 dias cubre cualquier
+    receso normal del calendario, incluido el All-Star break). `None` si
+    no hay ningun juego Final en la ventana (ej. primer juego de la
+    temporada) o si la API falla -- nunca se aproxima."""
+    start = before_date - timedelta(days=lookback_days)
+    end = before_date - timedelta(days=1)
+    params = {
+        "sportId": 1, "teamId": team_id,
+        "startDate": start.strftime("%Y-%m-%d"), "endDate": end.strftime("%Y-%m-%d"),
+        "hydrate": "team",
+    }
+    try:
+        resp = session.get(f"{MLB_API_BASE}/schedule", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("No se pudo obtener el schedule reciente de team_id=%s: %s", team_id, e)
+        return None
+
+    most_recent: tuple[str, int] | None = None  # (game_date, home_team_id)
+    for date_block in payload.get("dates", []):
+        for g in date_block.get("games", []):
+            if g.get("status", {}).get("abstractGameState") != "Final":
+                continue
+            game_date = date_block.get("date")
+            home_team_id = g.get("teams", {}).get("home", {}).get("team", {}).get("id")
+            if game_date is None or home_team_id is None:
+                continue
+            if most_recent is None or game_date > most_recent[0]:
+                most_recent = (game_date, home_team_id)
+
+    return most_recent[1] if most_recent else None
 
 
 def get_game_result(game_pk: int) -> dict | None:

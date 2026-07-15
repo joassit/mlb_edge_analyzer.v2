@@ -25,10 +25,19 @@ def reconstruct_snapshot(
     away_pitcher_id: int | None,
     is_double_header: bool,
     provider: HistoricalStatsProvider,
+    away_team_previous_park_id: int | None = None,
 ) -> GameSnapshot:
     """`game_date` es tambien `as_of_date`: todo dato pedido al provider
     queda estrictamente anterior a la fecha del juego (nunca incluye el
-    propio dia), igual que produccion en vivo solo ve datos hasta ayer."""
+    propio dia), igual que produccion en vivo solo ve datos hasta ayer.
+
+    `away_team_previous_park_id`: team_id del estadio donde el equipo
+    visitante jugo su partido inmediato anterior (Seccion 5: "el visitante
+    es quien viaja") -- se calcula UNA vez por temporada en `pipeline.py` a
+    partir del schedule ya fetcheado (`fetch_season_games`), nunca pide una
+    llamada de red adicional aqui. `None` si no hay partido anterior
+    conocido (primer juego de la temporada para ese equipo) -- en ese caso
+    `travel_distance` queda en None, no se aproxima."""
     home_era_ip = provider.pitcher_era_ip_as_of(home_pitcher_id, game_date, season) if home_pitcher_id else None
     away_era_ip = provider.pitcher_era_ip_as_of(away_pitcher_id, game_date, season) if away_pitcher_id else None
     home_cmd = provider.pitcher_command_as_of(home_pitcher_id, game_date, season) if home_pitcher_id else {}
@@ -78,6 +87,8 @@ def reconstruct_snapshot(
         away_bullpen_era=away_bullpen_era,
         is_double_header=is_double_header,
         weather_temp_f=weather.get("temp_f"),
+        weather_wind_speed=weather.get("wind_speed"),
+        travel_distance=park_factors.distance_miles(away_team_previous_park_id, home_team_id),
         park_factor=park["park_factor"],
         starters_confirmed=bool(home_pitcher_id and away_pitcher_id),
         lineups_official=False,

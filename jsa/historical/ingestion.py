@@ -66,6 +66,43 @@ def fetch_season_games(season: int) -> list[dict]:
     return games
 
 
+def build_previous_park_index(games: list[dict]) -> dict[tuple[int, int], int]:
+    """Para cada (team_id, game_pk), el team_id del estadio donde ese
+    equipo jugo su partido INMEDIATO anterior en la temporada -- alimenta
+    `travel_distance` (Seccion 5: "el visitante es quien viaja") sin pedir
+    ninguna llamada de red adicional: `games` ya viene de `fetch_season_games()`,
+    una sola vez por temporada, y este indice se calcula enteramente en
+    memoria a partir de ahi.
+
+    Ausente del dict (no `None` explicito) para el primer juego de la
+    temporada de un equipo -- no hay partido anterior que consultar.
+
+    Defensivo ante entradas malformadas (campos faltantes) -- se saltan en
+    vez de propagar, mismo criterio que el resto de la ingesta: un juego
+    con datos incompletos nunca debe tumbar el calculo de toda la
+    temporada (`pipeline.py` ya aisla fallas por juego DENTRO del loop
+    principal; este indice se construye ANTES de ese loop, asi que
+    necesita su propio aislamiento)."""
+    by_team: dict[int, list[tuple[str, int, int]]] = {}
+    for g in games:
+        game_date, game_pk = g.get("game_date"), g.get("game_pk")
+        home_team_id, away_team_id = g.get("home_team_id"), g.get("away_team_id")
+        if game_date is None or game_pk is None or home_team_id is None or away_team_id is None:
+            continue
+        for team_id in (home_team_id, away_team_id):
+            by_team.setdefault(team_id, []).append((game_date, game_pk, home_team_id))
+
+    index: dict[tuple[int, int], int] = {}
+    for team_id, entries in by_team.items():
+        entries.sort(key=lambda e: (e[0], e[1]))  # fecha, luego game_pk (orden estable en doble cartelera)
+        previous_location: int | None = None
+        for _game_date, game_pk, location_team_id in entries:
+            if previous_location is not None:
+                index[(team_id, game_pk)] = previous_location
+            previous_location = location_team_id
+    return index
+
+
 def _parse_finished_game(g: dict, season: int) -> dict | None:
     abstract_state = g.get("status", {}).get("abstractGameState")
     if abstract_state != "Final":
