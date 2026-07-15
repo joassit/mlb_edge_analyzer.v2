@@ -175,16 +175,24 @@ def _seed_markets(engine: Engine) -> None:
 
 def _seed_schema_migration(engine: Engine) -> None:
     existing = db.latest_by_id(engine, db.schema_migration_registry, "migration_id")
-    migration_id = "schema-3.0-to-3.1"
-    if migration_id in existing:
-        return
-    db.append(
-        engine, db.schema_migration_registry,
-        migration_id=migration_id, from_version="3.0", to_version="3.1", change_type="additive",
-        migration_function="identity -- campos nuevos son Optional, snapshots 3.0 los leen como None",
-        affected_fields=["league_avg_era", "league_avg_ops", "league_avg_runs_per_game"],
-        date=TODAY, backward_read_compatible=True,
-    )
+
+    if "schema-3.0-to-3.1" not in existing:
+        db.append(
+            engine, db.schema_migration_registry,
+            migration_id="schema-3.0-to-3.1", from_version="3.0", to_version="3.1", change_type="additive",
+            migration_function="identity -- campos nuevos son Optional, snapshots 3.0 los leen como None",
+            affected_fields=["league_avg_era", "league_avg_ops", "league_avg_runs_per_game"],
+            date=TODAY, backward_read_compatible=True,
+        )
+
+    if "schema-3.1-to-3.2" not in existing:
+        db.append(
+            engine, db.schema_migration_registry,
+            migration_id="schema-3.1-to-3.2", from_version="3.1", to_version="3.2", change_type="additive",
+            migration_function="identity -- campos nuevos son Optional, snapshots 3.1 los leen como None",
+            affected_fields=["home_fielding_pct", "away_fielding_pct"],
+            date=TODAY, backward_read_compatible=True,
+        )
 
 
 def _seed_gates(engine: Engine) -> None:

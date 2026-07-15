@@ -13,13 +13,16 @@ from jsa.historical.snapshot_reconstruction import reconstruct_snapshot
 class FakeProvider(HistoricalStatsProvider):
     def __init__(
         self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0, wind_speed=None,
-        closer_pitcher_id=None, recent_pa=100, recent_ip=20.0, projected_ip=None,
+        closer_pitcher_id=None, recent_pa=100, recent_ip=20.0, projected_ip=None, fielding_pct=None,
+        fielding_pct_by_team=None,
     ):
         self.era, self.ip, self.ops, self.pa, self.bullpen_era = era, ip, ops, pa, bullpen_era
         self.temp_f, self.wind_speed = temp_f, wind_speed
         self.closer_pitcher_id = closer_pitcher_id
         self.recent_pa, self.recent_ip = recent_pa, recent_ip
         self.projected_ip = projected_ip
+        self.fielding_pct = fielding_pct
+        self.fielding_pct_by_team = fielding_pct_by_team or {}
         self.calls: list[tuple] = []
 
     def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
@@ -31,6 +34,12 @@ class FakeProvider(HistoricalStatsProvider):
     def team_ops_as_of(self, team_id, as_of_date, season):
         self.calls.append(("team_ops_as_of", team_id, as_of_date, season))
         return (self.ops, self.pa)
+
+    def team_fielding_pct_as_of(self, team_id, as_of_date, season):
+        self.calls.append(("team_fielding_pct_as_of", team_id, as_of_date, season))
+        if team_id in self.fielding_pct_by_team:
+            return self.fielding_pct_by_team[team_id]
+        return self.fielding_pct
 
     def bullpen_era_as_of(self, team_id, as_of_date, season):
         self.calls.append(("bullpen_era_as_of", team_id, as_of_date, season))
@@ -128,6 +137,31 @@ def test_reconstruction_computes_travel_distance_from_previous_park_id():
 def test_reconstruction_travel_distance_is_none_without_previous_park():
     snap = _reconstruct(away_team_previous_park_id=None)
     assert snap.travel_distance is None
+
+
+def test_reconstruction_populates_fielding_pct_from_provider():
+    snap = _reconstruct(provider=FakeProvider(fielding_pct_by_team={147: 0.992, 111: 0.970}))
+    assert snap.home_fielding_pct == 0.992
+    assert snap.away_fielding_pct == 0.970
+
+
+def test_reconstruction_fielding_pct_is_none_without_data():
+    snap = _reconstruct(provider=FakeProvider())
+    assert snap.home_fielding_pct is None
+    assert snap.away_fielding_pct is None
+
+
+def test_fielding_pct_from_historical_reconstruction_flows_into_team_quality_pillar():
+    """Punta a punta: `home/away_fielding_pct` reconstruido desde el
+    provider point-in-time debe mover el advantage del pilar team_quality
+    -- antes de este fix, siempre era None y team_quality dependia
+    unicamente de lesiones/closer."""
+    from jsa.engine.pillars.team_quality import evaluate as evaluate_team_quality
+
+    snap = _reconstruct(provider=FakeProvider(fielding_pct_by_team={147: 0.992, 111: 0.970}))
+    advantage = evaluate_team_quality(snap)
+    assert advantage.advantage == 1  # home mejor defensa -> favorece a home
+    assert "Fielding%" in advantage.explanation
 
 
 def test_reconstruction_projected_ip_is_none_without_starts():
