@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from jsa.data_sources import park_factors
 from jsa.domain.models import GameSnapshot, build_game_snapshot
+from jsa.historical.injuries import InjuryIndex, is_injured_as_of, key_injuries_as_of
 from jsa.historical.point_in_time_provider import HistoricalStatsProvider
 
 
@@ -26,6 +27,7 @@ def reconstruct_snapshot(
     is_double_header: bool,
     provider: HistoricalStatsProvider,
     away_team_previous_park_id: int | None = None,
+    injury_index: InjuryIndex | None = None,
 ) -> GameSnapshot:
     """`game_date` es tambien `as_of_date`: todo dato pedido al provider
     queda estrictamente anterior a la fecha del juego (nunca incluye el
@@ -37,7 +39,14 @@ def reconstruct_snapshot(
     partir del schedule ya fetcheado (`fetch_season_games`), nunca pide una
     llamada de red adicional aqui. `None` si no hay partido anterior
     conocido (primer juego de la temporada para ese equipo) -- en ese caso
-    `travel_distance` queda en None, no se aproxima."""
+    `travel_distance` queda en None, no se aproxima.
+
+    `injury_index`: `InjuryIndex` ya construido UNA vez por temporada en
+    `pipeline.py` (`jsa/historical/injuries.py`) -- alimenta
+    `home/away_key_injuries` y, cruzado contra el `closer_pitcher_id` que
+    ya devuelve `bullpen_era_as_of()`, `home/away_closer_available`. `None`
+    deja ambos campos en su default (lista vacia / None), nunca se
+    aproxima."""
     home_era_ip = provider.pitcher_era_ip_as_of(home_pitcher_id, game_date, season) if home_pitcher_id else None
     away_era_ip = provider.pitcher_era_ip_as_of(away_pitcher_id, game_date, season) if away_pitcher_id else None
     home_cmd = provider.pitcher_command_as_of(home_pitcher_id, game_date, season) if home_pitcher_id else {}
@@ -46,8 +55,22 @@ def reconstruct_snapshot(
     home_ops_result = provider.team_ops_as_of(home_team_id, game_date, season)
     away_ops_result = provider.team_ops_as_of(away_team_id, game_date, season)
 
-    home_bullpen_era = provider.bullpen_era_as_of(home_team_id, game_date, season)
-    away_bullpen_era = provider.bullpen_era_as_of(away_team_id, game_date, season)
+    home_bullpen = provider.bullpen_era_as_of(home_team_id, game_date, season) or {}
+    away_bullpen = provider.bullpen_era_as_of(away_team_id, game_date, season) or {}
+
+    home_key_injuries: list[str] = []
+    away_key_injuries: list[str] = []
+    home_closer_available: bool | None = None
+    away_closer_available: bool | None = None
+    if injury_index is not None:
+        home_key_injuries = key_injuries_as_of(injury_index, home_team_id, game_date)
+        away_key_injuries = key_injuries_as_of(injury_index, away_team_id, game_date)
+        home_closer_id = home_bullpen.get("closer_pitcher_id")
+        away_closer_id = away_bullpen.get("closer_pitcher_id")
+        if home_closer_id is not None:
+            home_closer_available = not is_injured_as_of(injury_index, home_closer_id, game_date)
+        if away_closer_id is not None:
+            away_closer_available = not is_injured_as_of(injury_index, away_closer_id, game_date)
 
     league = provider.league_averages_as_of(game_date, season)
 
@@ -83,8 +106,12 @@ def reconstruct_snapshot(
         away_ops=away_ops_result[0] if away_ops_result else None,
         home_ops_pa_sample=home_ops_result[1] if home_ops_result else None,
         away_ops_pa_sample=away_ops_result[1] if away_ops_result else None,
-        home_bullpen_era=home_bullpen_era,
-        away_bullpen_era=away_bullpen_era,
+        home_bullpen_era=home_bullpen.get("era"),
+        away_bullpen_era=away_bullpen.get("era"),
+        home_closer_available=home_closer_available,
+        away_closer_available=away_closer_available,
+        home_key_injuries=home_key_injuries,
+        away_key_injuries=away_key_injuries,
         is_double_header=is_double_header,
         weather_temp_f=weather.get("temp_f"),
         weather_wind_speed=weather.get("wind_speed"),

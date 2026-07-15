@@ -12,12 +12,12 @@ Limitaciones honestas de esta entrega (documentadas, no escondidas -- ver
 - `home_starter_xera`/`xfip`: la MLB Stats API no expone xERA/xFIP de
   Statcast. Se usa ERA real de temporada como proxy explicito.
 - `lineups_official`, `bullpen_usage_known`, `no_last_minute_changes`,
-  `home_closer_available`/`away_closer_available`,
-  `home_bullpen_ip_last_3_days`/`away_...`, `home_key_injuries`/`away_...`:
+  `home_bullpen_ip_last_3_days`/`away_...`:
   sin fuente wireada todavia -- quedan en su valor por defecto
-  (`False`/`None`/`[]`), nunca inventados. Esto baja el CRI de forma
+  (`False`/`None`), nunca inventados. Esto baja el CRI de forma
   realista en vez de aparentar mas confiabilidad de la que hay.
-  `travel_distance` y `weather_wind_speed` SI tienen fuente real (ver abajo).
+  `travel_distance`, `weather_wind_speed`, `home/away_key_injuries` y
+  `home/away_closer_available` SI tienen fuente real (ver abajo).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 
 from jsa.config import SEASON
-from jsa.data_sources import mlb_api, park_factors, stats, weather
+from jsa.data_sources import injuries, mlb_api, park_factors, stats, weather
 from jsa.domain.models import GameSnapshot, build_game_snapshot
 
 logger = logging.getLogger("jsa")
@@ -37,6 +37,7 @@ def build_snapshot_from_game(
     league_context: dict,
     season: int = SEASON,
     travel_by_away_team: dict[int, float | None] | None = None,
+    injury_index: injuries.InjuryIndex | None = None,
 ) -> GameSnapshot:
     """`game`: un dict devuelto por `mlb_api.get_schedule()`. `league_context`:
     {"league_avg_era", "league_avg_ops", "league_avg_runs_per_game"} --
@@ -48,7 +49,13 @@ def build_snapshot_from_game(
     `travel_by_away_team`: salida de `data_sources.travel.preload_travel_distances()`,
     precalculada UNA vez por corrida igual que `weather_by_home_team` --
     opcional (`None`) para no romper callers/tests existentes que todavia
-    no la pasan."""
+    no la pasan.
+
+    `injury_index`: salida de `data_sources.injuries.build_today_injury_index()`,
+    tambien precalculada UNA vez por corrida -- alimenta
+    `home/away_key_injuries` y, cruzado contra el `closer_pitcher_id` que ya
+    devuelve `stats.get_bullpen_era()`, `home/away_closer_available`. `None`
+    deja ambos campos en su default (lista vacia / None)."""
     home_id, away_id = game["home_team_id"], game["away_team_id"]
     home_pid, away_pid = game.get("home_pitcher_id"), game.get("away_pitcher_id")
 
@@ -62,8 +69,23 @@ def build_snapshot_from_game(
     home_pa = stats.get_team_ops_pa_sample(home_id, season)
     away_pa = stats.get_team_ops_pa_sample(away_id, season)
 
-    home_bullpen_era = stats.get_bullpen_era(home_id, season)
-    away_bullpen_era = stats.get_bullpen_era(away_id, season)
+    home_bullpen = stats.get_bullpen_era(home_id, season) or {}
+    away_bullpen = stats.get_bullpen_era(away_id, season) or {}
+
+    game_date = _parse_official_date(game).isoformat()
+    home_key_injuries: list[str] = []
+    away_key_injuries: list[str] = []
+    home_closer_available: bool | None = None
+    away_closer_available: bool | None = None
+    if injury_index is not None:
+        home_key_injuries = injuries.key_injuries_as_of(injury_index, home_id, game_date)
+        away_key_injuries = injuries.key_injuries_as_of(injury_index, away_id, game_date)
+        home_closer_id = home_bullpen.get("closer_pitcher_id")
+        away_closer_id = away_bullpen.get("closer_pitcher_id")
+        if home_closer_id is not None:
+            home_closer_available = not injuries.is_injured_as_of(injury_index, home_closer_id, game_date)
+        if away_closer_id is not None:
+            away_closer_available = not injuries.is_injured_as_of(injury_index, away_closer_id, game_date)
 
     park = park_factors.get_park_info(home_id)
     game_weather = weather_by_home_team.get(home_id) or weather.get_game_weather(
@@ -92,14 +114,14 @@ def build_snapshot_from_game(
         away_ops=away_ops,
         home_ops_pa_sample=home_pa,
         away_ops_pa_sample=away_pa,
-        home_bullpen_era=home_bullpen_era,
-        away_bullpen_era=away_bullpen_era,
+        home_bullpen_era=home_bullpen.get("era"),
+        away_bullpen_era=away_bullpen.get("era"),
         home_bullpen_ip_last_3_days=None,
         away_bullpen_ip_last_3_days=None,
-        home_closer_available=None,
-        away_closer_available=None,
-        home_key_injuries=[],
-        away_key_injuries=[],
+        home_closer_available=home_closer_available,
+        away_closer_available=away_closer_available,
+        home_key_injuries=home_key_injuries,
+        away_key_injuries=away_key_injuries,
         is_double_header=bool(game.get("is_double_header", False)),
         travel_distance=(travel_by_away_team or {}).get(away_id),
         weather_temp_f=game_weather.get("temp_f"),

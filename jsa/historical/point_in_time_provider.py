@@ -64,7 +64,11 @@ class HistoricalStatsProvider:
     def team_ops_as_of(self, team_id: int, as_of_date: str, season: int) -> tuple[float, int | None] | None:
         raise NotImplementedError
 
-    def bullpen_era_as_of(self, team_id: int, as_of_date: str, season: int) -> float | None:
+    def bullpen_era_as_of(self, team_id: int, as_of_date: str, season: int) -> dict | None:
+        """{"era": float|None, "closer_pitcher_id": int|None} -- el cerrador
+        se identifica DENTRO del mismo loop roster+pitcher que ya calcula el
+        ERA de bullpen (Seccion "closer_available", ver `injuries.py`),
+        nunca con una llamada de red separada."""
         raise NotImplementedError
 
     def pitcher_command_as_of(self, pitcher_id: int, as_of_date: str, season: int) -> dict:
@@ -74,6 +78,20 @@ class HistoricalStatsProvider:
         raise NotImplementedError
 
     def league_averages_as_of(self, as_of_date: str, season: int) -> dict:
+        raise NotImplementedError
+
+    def hitter_recent_pa_as_of(self, player_id: int, as_of_date: str, days: int = 30) -> int | None:
+        """PA de un bateador en los `days` dias previos a `as_of_date` --
+        alimenta el criterio de "lesion clave" (Seccion team_quality,
+        umbral acordado: 50 PA/30 dias)."""
+        raise NotImplementedError
+
+    def pitcher_recent_ip_as_of(self, player_id: int, as_of_date: str, days: int = 30) -> float | None:
+        """IP de un pitcher en los `days` dias previos a `as_of_date` --
+        mismo proposito que `hitter_recent_pa_as_of` (umbral acordado: 15
+        IP/30 dias, pensado para abridores -- los cerradores/relevistas de
+        alto apalancamiento ya tienen su propia señal via
+        `closer_pitcher_id`, no necesitan cruzar este umbral)."""
         raise NotImplementedError
 
 
@@ -91,25 +109,29 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         cutoff = date.fromisoformat(as_of_date) - timedelta(days=1)
         return cutoff.strftime("%Y-%m-%d")
 
-    def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
+    def _pitcher_stat_dict_as_of(self, pitcher_id: int, start_date: str, end_date: str) -> dict | None:
+        """Fetch crudo compartido -- `pitcher_era_ip_as_of()` y la deteccion
+        de cerrador dentro de `bullpen_era_as_of()` leen del MISMO payload
+        (era, IP y saves ya vienen juntos en una sola respuesta de la API),
+        para no duplicar trafico de red pidiendo dos veces la misma stat."""
         try:
-            params = {
-                "stats": "byDateRange", "group": "pitching",
-                "startDate": _season_start(season), "endDate": self._end_date(as_of_date),
-            }
+            params = {"stats": "byDateRange", "group": "pitching", "startDate": start_date, "endDate": end_date}
             resp = session.get(f"{MLB_API_BASE}/people/{pitcher_id}/stats", params=params, timeout=INGESTION_REQUEST_TIMEOUT)
             resp.raise_for_status()
             splits = resp.json()["stats"][0]["splits"]
-            if not splits:
-                return None
-            stat = splits[0]["stat"]
-            era, ip_str = stat.get("era"), stat.get("inningsPitched")
-            if era is None or ip_str is None:
-                return None
-            return float(era), _parse_innings(ip_str)
+            return splits[0]["stat"] if splits else None
         except (requests.RequestException, KeyError, IndexError, ValueError) as e:
-            logger.debug("ERA/IP as-of fallo para pitcher %s @ %s: %s", pitcher_id, as_of_date, e)
+            logger.debug("Stats as-of fallo para pitcher %s @ [%s,%s]: %s", pitcher_id, start_date, end_date, e)
             return None
+
+    def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
+        stat = self._pitcher_stat_dict_as_of(pitcher_id, _season_start(season), self._end_date(as_of_date))
+        if stat is None:
+            return None
+        era, ip_str = stat.get("era"), stat.get("inningsPitched")
+        if era is None or ip_str is None:
+            return None
+        return float(era), _parse_innings(ip_str)
 
     def team_ops_as_of(self, team_id, as_of_date, season):
         try:
@@ -146,20 +168,34 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             roster = roster_resp.json().get("roster", [])
         except requests.RequestException as e:
             logger.debug("roster as-of fallo para equipo %s @ %s: %s", team_id, as_of_date, e)
-            return None
+            return {"era": None, "closer_pitcher_id": None}
 
         pitcher_ids = [p["person"]["id"] for p in roster if p.get("position", {}).get("abbreviation") == "P"]
+        start_date, end_date = _season_start(season), self._end_date(as_of_date)
+
         total_ip, weighted_era_sum = 0.0, 0.0
+        closer_pitcher_id, most_saves = None, 0
         for pid in pitcher_ids:
-            result = self.pitcher_era_ip_as_of(pid, as_of_date, season)
-            if result is None:
+            stat = self._pitcher_stat_dict_as_of(pid, start_date, end_date)
+            if stat is None:
                 continue
-            era, ip = result
-            if ip <= 0:
-                continue
-            weighted_era_sum += era * ip
-            total_ip += ip
-        return (weighted_era_sum / total_ip) if total_ip > 0 else None
+            era, ip_str, saves = stat.get("era"), stat.get("inningsPitched"), stat.get("saves")
+            if era is not None and ip_str is not None:
+                ip = _parse_innings(ip_str)
+                if ip > 0:
+                    weighted_era_sum += float(era) * ip
+                    total_ip += ip
+            # Cerrador = el relevista con mas saves point-in-time del
+            # roster -- misma llamada que ya se hizo arriba para el ERA,
+            # cero trafico adicional.
+            if saves is not None and int(saves) > most_saves:
+                most_saves = int(saves)
+                closer_pitcher_id = pid
+
+        return {
+            "era": (weighted_era_sum / total_ip) if total_ip > 0 else None,
+            "closer_pitcher_id": closer_pitcher_id if most_saves > 0 else None,
+        }
 
     def pitcher_command_as_of(self, pitcher_id, as_of_date, season):
         result = {"k_pct": None, "bb_pct": None}
@@ -241,6 +277,29 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         result["wind_speed"] = (sum(winds) / len(winds)) if winds else None
         self._weather_cache[cache_key] = dict(result)
         return result
+
+    def hitter_recent_pa_as_of(self, player_id, as_of_date, days=30):
+        start = (date.fromisoformat(as_of_date) - timedelta(days=days)).strftime("%Y-%m-%d")
+        try:
+            params = {"stats": "byDateRange", "group": "hitting", "startDate": start, "endDate": self._end_date(as_of_date)}
+            resp = session.get(f"{MLB_API_BASE}/people/{player_id}/stats", params=params, timeout=INGESTION_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            splits = resp.json()["stats"][0]["splits"]
+            if not splits:
+                return None
+            pa = splits[0]["stat"].get("plateAppearances")
+            return int(pa) if pa is not None else None
+        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+            logger.debug("PA reciente as-of fallo para jugador %s @ %s: %s", player_id, as_of_date, e)
+            return None
+
+    def pitcher_recent_ip_as_of(self, player_id, as_of_date, days=30):
+        start = (date.fromisoformat(as_of_date) - timedelta(days=days)).strftime("%Y-%m-%d")
+        stat = self._pitcher_stat_dict_as_of(player_id, start, self._end_date(as_of_date))
+        if stat is None:
+            return None
+        ip_str = stat.get("inningsPitched")
+        return _parse_innings(ip_str) if ip_str is not None else None
 
     def league_averages_as_of(self, as_of_date, season):
         result = {"league_ops": None, "league_era": None, "league_runs_per_game": None}

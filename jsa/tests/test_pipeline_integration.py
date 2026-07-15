@@ -12,6 +12,7 @@ import pytest
 
 from jsa import config
 from jsa import main as jsa_main
+from jsa.data_sources.injuries import InjuryIndex
 from jsa.domain.hashing import hash_value
 from jsa.domain.models import SEVEN_PILLARS
 from jsa.registries import db as registries_db
@@ -37,16 +38,30 @@ def sqlite_url(tmp_path):
     return f"sqlite:///{tmp_path}/jsa_integration_test.db"
 
 
+# Un jugador clave del equipo local (147), colocado en IL antes de la
+# fecha del juego falso -- alimenta `test_key_injuries_from_preload_reaches_persisted_snapshot`.
+FAKE_INJURY_INDEX = InjuryIndex(
+    events_by_player={555: [("2026-07-01", "placed")]},
+    name_by_player={555: "Fake Injured Player"},
+    team_by_player={555: 147},
+    is_key_by_player={555: True},
+)
+
+
 def _run_with_mocks(sqlite_url: str):
     with patch.object(config, "DATABASE_URL", sqlite_url), \
          patch("jsa.main.mlb_api.get_schedule", return_value=[FAKE_GAME]), \
          patch("jsa.main.weather.preload_weather", return_value={147: {"temp_f": 75, "wind_mph": 5}}), \
          patch("jsa.main.travel.preload_travel_distances", return_value={111: 200.0}), \
+         patch("jsa.main.injuries.build_today_injury_index", return_value=FAKE_INJURY_INDEX), \
          patch("jsa.data_sources.snapshot_builder.stats.get_pitcher_era_ip", return_value=None), \
          patch("jsa.data_sources.snapshot_builder.stats.get_pitcher_command", return_value={}), \
          patch("jsa.data_sources.snapshot_builder.stats.get_team_ops", return_value=0.75), \
          patch("jsa.data_sources.snapshot_builder.stats.get_team_ops_pa_sample", return_value=300), \
-         patch("jsa.data_sources.snapshot_builder.stats.get_bullpen_era", return_value=4.0), \
+         patch(
+             "jsa.data_sources.snapshot_builder.stats.get_bullpen_era",
+             return_value={"era": 4.0, "closer_pitcher_id": 999},
+         ), \
          patch("jsa.data_sources.snapshot_builder.stats.get_league_era", return_value=4.3), \
          patch("jsa.data_sources.snapshot_builder.stats.get_league_ops", return_value=0.75), \
          patch("jsa.data_sources.snapshot_builder.stats.get_league_runs_per_game", return_value=4.5):
@@ -120,6 +135,23 @@ def test_travel_distance_from_preload_reaches_persisted_snapshot(sqlite_url):
     with engine.connect() as conn:
         snap_row = conn.execute(select(storage_db.game_snapshots)).mappings().first()
     assert snap_row["payload"]["travel_distance"] == 200.0
+
+
+def test_key_injuries_and_closer_available_from_preload_reach_persisted_snapshot(sqlite_url):
+    _run_with_mocks(sqlite_url)
+    engine = registries_db.get_engine(sqlite_url)
+    from sqlalchemy import select
+
+    with engine.connect() as conn:
+        snap_row = conn.execute(select(storage_db.game_snapshots)).mappings().first()
+    payload = snap_row["payload"]
+    # home_team_id=147 tiene un jugador clave lesionado en FAKE_INJURY_INDEX.
+    assert payload["home_key_injuries"] == ["Fake Injured Player"]
+    assert payload["away_key_injuries"] == []
+    # closer_pitcher_id=999 mockeado para ambos equipos, no aparece en
+    # FAKE_INJURY_INDEX -- ninguno de los dos cerradores esta lesionado.
+    assert payload["home_closer_available"] is True
+    assert payload["away_closer_available"] is True
 
 
 def test_no_experimental_rule_moved_production_weights(sqlite_url):
