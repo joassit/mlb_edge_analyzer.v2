@@ -11,9 +11,14 @@ from jsa.historical.snapshot_reconstruction import reconstruct_snapshot
 
 
 class FakeProvider(HistoricalStatsProvider):
-    def __init__(self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0, wind_speed=None):
+    def __init__(
+        self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0, wind_speed=None,
+        closer_pitcher_id=None, recent_pa=100, recent_ip=20.0,
+    ):
         self.era, self.ip, self.ops, self.pa, self.bullpen_era = era, ip, ops, pa, bullpen_era
         self.temp_f, self.wind_speed = temp_f, wind_speed
+        self.closer_pitcher_id = closer_pitcher_id
+        self.recent_pa, self.recent_ip = recent_pa, recent_ip
         self.calls: list[tuple] = []
 
     def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
@@ -26,7 +31,7 @@ class FakeProvider(HistoricalStatsProvider):
 
     def bullpen_era_as_of(self, team_id, as_of_date, season):
         self.calls.append(("bullpen_era_as_of", team_id, as_of_date, season))
-        return self.bullpen_era
+        return {"era": self.bullpen_era, "closer_pitcher_id": self.closer_pitcher_id}
 
     def pitcher_command_as_of(self, pitcher_id, as_of_date, season):
         return {"k_pct": 0.24, "bb_pct": 0.07}
@@ -36,6 +41,12 @@ class FakeProvider(HistoricalStatsProvider):
 
     def league_averages_as_of(self, as_of_date, season):
         return {"league_ops": 0.750, "league_era": 4.30, "league_runs_per_game": 4.5}
+
+    def hitter_recent_pa_as_of(self, player_id, as_of_date, days=30):
+        return self.recent_pa
+
+    def pitcher_recent_ip_as_of(self, player_id, as_of_date, days=30):
+        return self.recent_ip
 
 
 def _reconstruct(**overrides):

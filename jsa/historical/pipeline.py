@@ -26,6 +26,7 @@ from jsa.engine.orchestrator import evaluate_game
 from jsa.historical import config as historical_config
 from jsa.historical import db as historical_db
 from jsa.historical.ingestion import build_previous_park_index, fetch_season_games
+from jsa.historical.injuries import build_injury_index, fetch_season_transactions, parse_il_events
 from jsa.historical.point_in_time_provider import HistoricalStatsProvider, MLBStatsAPIProvider
 from jsa.historical.snapshot_reconstruction import reconstruct_snapshot
 from jsa.registries import db as registries_db
@@ -69,6 +70,11 @@ def run_season_ingestion(
 
     games = fetch_season_games(season)
     previous_park_index = build_previous_park_index(games)
+    # Trae TODA la temporada de transacciones una sola vez (igual que el
+    # schedule) -- build_injury_index() si pega la red, pero una vez POR
+    # JUGADOR lesionado en la temporada, nunca por juego (ver injuries.py).
+    il_events = parse_il_events(fetch_season_transactions(season))
+    injury_index = build_injury_index(il_events, provider)
     already_done = historical_db.already_ingested_game_pks(historical_engine, season)
     pending = [g for g in games if g["game_pk"] not in already_done]
     logger.info(
@@ -100,6 +106,7 @@ def run_season_ingestion(
                 home_pitcher_id=game["home_pitcher_id"], away_pitcher_id=game["away_pitcher_id"],
                 is_double_header=game["is_double_header"], provider=provider,
                 away_team_previous_park_id=previous_park_index.get((game["away_team_id"], game["game_pk"])),
+                injury_index=injury_index,
             )
 
             report = evaluate_game(

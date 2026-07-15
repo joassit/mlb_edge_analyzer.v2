@@ -154,13 +154,76 @@ de "una unica logica de evaluacion, en vivo y en backtest" ya aplicado en
   solo faltaba pedirla) -- `weather_wind_speed` ya funcionaba en
   produccion (`data_sources/weather.py`), pero nunca en el lado historico.
 
-**Pendiente antes de recalibrar** (ver conversacion): `team_quality`
-(lesiones, via `statsapi.mlb.com/api/v1/transactions` -- spike de
-validacion ya confirmo cobertura real en las 5 temporadas) y la revision
-de la asimetria de shrinkage `starter` vs `bullpen` (`SHRINKAGE_K_IP=60`
-sin equivalente en `bullpen.py`, que ademas tiene el peso base mas alto de
-los 7 pilares) -- agrupar ambos con este cambio en una sola re-ingesta de
-las 5 temporadas contra Postgres, no una por cada arreglo.
+**Pendiente antes de recalibrar** (ver conversacion): la revision de la
+asimetria de shrinkage `starter` vs `bullpen` (`SHRINKAGE_K_IP=60` sin
+equivalente en `bullpen.py`, que ademas tiene el peso base mas alto de los
+7 pilares) -- explicitamente diferida hasta despues de ver los resultados
+con `team_quality` ya activo (ver seccion siguiente).
+
+## Pilar `team_quality` desmudado: lesiones (IL) + `closer_available`
+
+Segundo arreglo del diagnostico de `PillarContributionAnalyzer`. Fuente:
+`statsapi.mlb.com/api/v1/transactions` (validada por un spike de
+investigacion real, cobertura confirmada en las 5 temporadas 2022-2026),
+elegida en vez de scraping de Pro Sports Transactions -- fuente oficial,
+reusa la infraestructura HTTP ya existente, cero riesgo de fragilidad de
+scraping.
+
+**Criterio de "lesion clave"** (Seccion team_quality), acordado
+explicitamente antes de implementar: bateador con >=50 PA o pitcher con
+>=15 IP en los 30 dias previos a su colocacion en la lista de lesionados
+(point-in-time, no acumulado de toda la temporada) -- punto de partida sin
+calibrar todavia, mismo espiritu que `SMALL_SAMPLE_OFFENSE_PA` en
+`config.py`. Los cerradores/relevistas de alto apalancamiento no cruzan
+este umbral (IP bajo por diseño de su rol) -- su disponibilidad se mide
+por separado via `closer_available`, sin filtro de PA/IP: un cerrador
+lesionado importa sin importar cuantas entradas acumulo.
+
+Mismo principio de "una unica logica, en vivo y en backtest, nunca
+divergiendo" que Context -- implementado en ambos lados, DUPLICADO a
+proposito (nunca importado entre `historical`/produccion, ver
+`tests/test_production_isolation.py`):
+
+- `historical/injuries.py` / `data_sources/injuries.py`: `fetch_season_transactions()`
+  trae TODA la temporada de transacciones en una sola llamada de red (mismo
+  patron que `fetch_season_games()`/`build_previous_park_index()`);
+  `parse_il_events()` (puro, clasifica "placed"/"activated" via regex
+  sobre `description`, ignora "transferred"); `build_injury_index()` es la
+  UNICA funcion que pega la red mas alla del fetch inicial -- una vez POR
+  JUGADOR con al menos un evento "placed" en la temporada (nunca por
+  juego), para evaluar su PA/IP reciente contra el umbral. `is_injured_as_of()`/
+  `key_injuries_as_of()` son puras sobre el indice ya construido.
+- `historical/point_in_time_provider.py::bullpen_era_as_of()` /
+  `data_sources/stats.py::get_bullpen_era()`: ahora devuelven
+  `{"era", "closer_pitcher_id"}` en vez de solo el ERA -- el cerrador
+  (relevista con mas saves point-in-time del roster) se identifica DENTRO
+  del mismo loop que ya calculaba el ERA de bullpen, aprovechando que
+  `saves` viene en el mismo payload que `era`/`inningsPitched` -- **cero
+  llamadas de red adicionales** para detectar al cerrador.
+- `historical/snapshot_reconstruction.py` / `data_sources/snapshot_builder.py`:
+  cruzan `closer_pitcher_id` contra el `InjuryIndex` para poblar
+  `home/away_closer_available`, y consultan `key_injuries_as_of()` para
+  `home/away_key_injuries`.
+- `main.py`: `injuries.build_today_injury_index()` se llama UNA vez por
+  corrida diaria (igual que `build_league_context()`/`preload_weather()`/
+  `preload_travel_distances()`), nunca por juego.
+
+**Costo de red real**: 1 llamada por temporada (transacciones) + 1
+llamada por jugador colocado en IL en toda la temporada (evaluacion de
+PA/IP reciente) -- nunca escala con el numero de juegos.
+
+**Limitacion aceptada**: un jugador traspasado de equipo la MISMA
+temporada en la que tambien se lesiono queda indexado bajo su equipo mas
+reciente para TODOS sus eventos de esa temporada (no el equipo real al
+momento de cada evento) -- caso de baja probabilidad, no justifica
+trackear equipo por evento todavia.
+
+**Bundle de re-ingesta**: Context + `team_quality` (lesiones +
+`closer_available`) quedan listos para una unica re-ingesta optimizada de
+las 5 temporadas contra Postgres -- disparada solo con confirmacion
+explicita, no automaticamente al mergear este cambio (ver "Regla dura"
+al final de este documento). La revision de shrinkage `starter`/`bullpen`
+queda para despues de ver esos resultados.
 
 ## Explicitamente NO construido todavia (y por que)
 

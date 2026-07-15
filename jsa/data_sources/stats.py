@@ -27,7 +27,7 @@ _pitcher_stats_cache: dict[str, dict | None] = {}
 _league_ops_cache: float | None = None
 _league_era_cache: float | None = None
 _league_runs_per_game_cache: float | None = None
-_bullpen_cache: dict[str, float] = {}
+_bullpen_cache: dict[str, dict] = {}
 
 
 def _parse_innings(ip_str: str) -> float:
@@ -233,7 +233,11 @@ def get_league_runs_per_game(season: int) -> float:
     return _league_runs_per_game_cache
 
 
-def _fetch_reliever_era_ip(pid: int, season: int) -> tuple[float, float] | None:
+def _fetch_reliever_stat(pid: int, season: int) -> dict | None:
+    """{"era", "ip", "saves"} de un relevista, o None si no aplica/falla.
+    `saves` se trae en el MISMO payload que ya se pide para ERA/IP --
+    permite identificar al cerrador (Seccion team_quality,
+    `closer_available`) sin ninguna llamada de red adicional."""
     try:
         resp = session.get(
             f"{MLB_API_BASE}/people/{pid}/stats",
@@ -254,16 +258,22 @@ def _fetch_reliever_era_ip(pid: int, season: int) -> tuple[float, float] | None:
         if not is_reliever:
             return None
         ip = _parse_innings(ip_str)
-        return (float(era), ip) if ip > 0 else None
+        if ip <= 0:
+            return None
+        return {"era": float(era), "ip": ip, "saves": stat.get("saves")}
     except (requests.RequestException, KeyError, IndexError, ValueError) as e:
         logger.debug("Se omitio pitcher %s en calculo de bullpen: %s", pid, e)
         return None
 
 
-def get_bullpen_era(team_id: int, season: int) -> float:
-    """ERA del bullpen (promedio ponderado por IP de todos los relevistas
-    del roster activo). Fetches en PARALELO -- un timeout de 15s en un solo
-    pitcher ya no bloquea a los demas (leccion de
+def get_bullpen_era(team_id: int, season: int) -> dict:
+    """{"era": float, "closer_pitcher_id": int|None} -- ERA del bullpen
+    (promedio ponderado por IP de todos los relevistas del roster activo)
+    y el cerrador (relevista con mas saves point-in-time del roster),
+    identificado DENTRO del mismo loop, sin trafico adicional (mismo
+    principio que `jsa/historical/point_in_time_provider.py::bullpen_era_as_of`).
+    Fetches en PARALELO -- un timeout de 15s en un solo pitcher ya no
+    bloquea a los demas (leccion de
     mlb_edge_analyzer.v2/data/stats.py::get_bullpen_era)."""
     cache_key = f"{team_id}-{season}"
     with _cache_lock:
@@ -278,22 +288,28 @@ def get_bullpen_era(team_id: int, season: int) -> float:
         roster = roster_resp.json().get("roster", [])
     except requests.RequestException as e:
         logger.warning("No se pudo obtener roster del equipo %s, usando fallback: %s", team_id, e)
+        result = {"era": FALLBACK_BULLPEN_ERA, "closer_pitcher_id": None}
         with _cache_lock:
-            _bullpen_cache[cache_key] = FALLBACK_BULLPEN_ERA
-        return FALLBACK_BULLPEN_ERA
+            _bullpen_cache[cache_key] = result
+        return result
 
     pitcher_ids = [p["person"]["id"] for p in roster if p.get("position", {}).get("abbreviation") == "P"]
 
     total_ip, weighted_sum = 0.0, 0.0
+    closer_pitcher_id, most_saves = None, 0
     with ThreadPoolExecutor(max_workers=8) as executor:
-        for result in executor.map(lambda pid: _fetch_reliever_era_ip(pid, season), pitcher_ids):
+        for pid, result in zip(pitcher_ids, executor.map(lambda pid: _fetch_reliever_stat(pid, season), pitcher_ids)):
             if result is None:
                 continue
-            era, ip = result
-            weighted_sum += era * ip
-            total_ip += ip
+            weighted_sum += result["era"] * result["ip"]
+            total_ip += result["ip"]
+            saves = result.get("saves")
+            if saves is not None and int(saves) > most_saves:
+                most_saves = int(saves)
+                closer_pitcher_id = pid
 
     bullpen_era = (weighted_sum / total_ip) if total_ip > 0 else FALLBACK_BULLPEN_ERA
+    result = {"era": bullpen_era, "closer_pitcher_id": closer_pitcher_id if most_saves > 0 else None}
     with _cache_lock:
-        _bullpen_cache[cache_key] = bullpen_era
-    return bullpen_era
+        _bullpen_cache[cache_key] = result
+    return result
