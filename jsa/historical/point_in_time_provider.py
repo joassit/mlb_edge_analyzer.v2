@@ -49,6 +49,19 @@ def _parse_innings(ip_str: str) -> float:
     return int(whole) + thirds / 3
 
 
+def _parse_era(era: object) -> float | None:
+    """MLB Stats API a veces devuelve `"-.--"` como ERA cuando es
+    indefinido (ej. un pitcher con 0 entradas lanzadas pero una carrera
+    cargada) -- un placeholder no numerico que `float()` rechaza. Nunca
+    debe tumbar la reconstruccion de un juego entero (real: temporada
+    2022, 1 de 2740 juegos, ver ROADMAP) -- se trata igual que "sin
+    dato", no como un error de red."""
+    try:
+        return float(era)
+    except (TypeError, ValueError):
+        return None
+
+
 def _season_start(season: int) -> str:
     return f"{season}-03-01"
 
@@ -142,13 +155,13 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         stat = self._pitcher_stat_dict_as_of(pitcher_id, _season_start(season), self._end_date(as_of_date))
         if stat is None:
             return None
-        era, ip_str = stat.get("era"), stat.get("inningsPitched")
+        era, ip_str = _parse_era(stat.get("era")), stat.get("inningsPitched")
         if era is None or ip_str is None:
             return None
         ip = _parse_innings(ip_str)
         starts = stat.get("gamesStarted") or 0
         projected_ip = (ip / starts) if starts > 0 else None
-        return {"era": float(era), "ip": ip, "projected_ip": projected_ip}
+        return {"era": era, "ip": ip, "projected_ip": projected_ip}
 
     def team_ops_as_of(self, team_id, as_of_date, season):
         try:
@@ -213,11 +226,11 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             stat = self._pitcher_stat_dict_as_of(pid, start_date, end_date)
             if stat is None:
                 continue
-            era, ip_str, saves = stat.get("era"), stat.get("inningsPitched"), stat.get("saves")
+            era, ip_str, saves = _parse_era(stat.get("era")), stat.get("inningsPitched"), stat.get("saves")
             if era is not None and ip_str is not None:
                 ip = _parse_innings(ip_str)
                 if ip > 0:
-                    weighted_era_sum += float(era) * ip
+                    weighted_era_sum += era * ip
                     total_ip += ip
             # Cerrador = el relevista con mas saves point-in-time del
             # roster -- misma llamada que ya se hizo arriba para el ERA,

@@ -335,6 +335,53 @@ estables que no cambian con la logica de evaluacion) -- y un flag
 pida explicitamente, y el paso de borrado queda logueado (cuantas filas se
 borraron) antes de reprocesar.
 
+## Re-ingesta real de las 5 temporadas (Context + team_quality + starter_projected_ip)
+
+Disparada con `force=True` -- resultado: 13,116 juegos totales, 13,115
+procesados, 1 error (99.99%). Confirma que `clear_season()` funciono
+exactamente como se diseño (cada log muestra el borrado previo con el
+mismo conteo de filas que la ingesta anterior, antes de reprocesar desde
+cero).
+
+| Temporada | Juegos totales | Procesados | Errores |
+|---|---|---|---|
+| 2022 | 2740 | 2739 | 1 |
+| 2023 | 2894 | 2894 | 0 |
+| 2024 | 2841 | 2841 | 0 |
+| 2025 | 2841 | 2841 | 0 |
+| 2026 (a la fecha) | 1800 | 1800 | 0 |
+
+**Bug real encontrado y corregido**: el unico error (2022) fue
+`ValueError: could not convert string to float: '-.--'` en
+`pitcher_era_ip_as_of()` -- la MLB Stats API a veces devuelve el string
+literal `"-.--"` como ERA cuando es indefinido (ej. un pitcher con 0 IP
+pero una carrera cargada), un placeholder no numerico que `float()`
+rechaza. Bug preexistente (la misma vulnerabilidad ya existia antes de
+esta serie de cambios), nunca disparado hasta esta corrida real. El
+manejo de errores por-juego de `run_season_ingestion()` lo contuvo
+correctamente -- solo ese juego quedo sin reporte, la temporada completa
+NO abortó.
+
+Corregido con `point_in_time_provider.py::_parse_era()` -- parsea el ERA
+de forma defensiva (`None` si no es numerico) en los DOS puntos donde
+`float(era)` corria fuera de un `try/except` que ya lo cubriera:
+`pitcher_era_ip_as_of()` y `bullpen_era_as_of()` (este ultimo ahora
+ademas ignora solo al pitcher con ERA indefinido dentro del loop de
+relevistas, en vez de arriesgarse a abortar el calculo de todo el
+bullpen). `league_averages_as_of()` ya tenia esta clase de parseo
+protegido por su propio `try/except` externo -- no necesitaba el mismo
+arreglo.
+
+## `jsa_historical_validate_direct.yml` -- validacion directa contra Postgres
+
+`jsa_historical_validate.yml` (fusion de artifacts SQLite por temporada)
+quedo obsoleto para este caso: las 5 temporadas ya viven juntas en
+`JSA_HISTORICAL_DATABASE_URL` (Postgres), no hace falta descargar ni
+fusionar nada. Nuevo workflow, mismo patron que
+`jsa_historical_pillar_contribution.yml` -- corre el subcomando
+`validate` de `cli.py` (benchmark_season + Monte Carlo Audit +
+PillarContributionAnalyzer juntos) directo contra la base ya unificada.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
