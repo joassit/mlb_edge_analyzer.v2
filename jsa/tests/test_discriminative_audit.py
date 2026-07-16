@@ -149,6 +149,27 @@ def test_optimize_weights_returns_valid_simplex(seeded_records):
     assert all(w >= 0 for w in optimized.values())
     assert sum(optimized.values()) == pytest.approx(1.0, abs=1e-6)
     assert result["current_weights"] == pytest.approx(_BASE_WEIGHTS)
+    assert "warning" in result  # marca explicita de sesgo de seleccion -- ver optimize_weights_nested
+
+
+def test_optimize_weights_nested_has_no_selection_bias_by_construction(seeded_records):
+    """No hay forma directa de medir "fuga de informacion" en una
+    aserción -- lo que se verifica aqui es la propiedad estructural que
+    la evita: cada temporada externa produce SU PROPIO vector de pesos
+    (optimizado sin verla), y las metricas finales se agregan sobre
+    predicciones donde el modelo (pesos + curva) nunca vio esa
+    temporada."""
+    result = audit.optimize_weights_nested(seeded_records, seed=0, maxiter=3, popsize=4)
+    assert result["n_outer_folds"] == 3
+    assert set(result["per_season_optimized_weights"]) == {2022, 2023, 2024}
+    for entry in result["per_season_optimized_weights"].values():
+        w = entry["optimized_weights"]
+        assert set(w) == set(SEVEN_PILLARS)
+        assert all(v >= 0 for v in w.values())
+        assert sum(w.values()) == pytest.approx(1.0, abs=1e-6)
+    assert result["current_metrics_nested"]["brier"] is not None
+    assert result["optimized_metrics_nested"]["brier"] is not None
+    assert isinstance(result["generalizes"], bool)
 
 
 def test_score_distribution_matches_data(seeded_records):
@@ -189,13 +210,16 @@ def test_run_full_audit_end_to_end(hist_url):
     for season, seed in ((2022, 1), (2023, 2), (2024, 3)):
         _seed_games(engine, season, 80, seed)
 
-    result = audit.run_full_audit([2022, 2023, 2024], hist_url, optimizer_maxiter=3, optimizer_popsize=4)
+    result = audit.run_full_audit(
+        [2022, 2023, 2024], hist_url,
+        optimizer_maxiter=3, optimizer_popsize=4, nested_optimizer_maxiter=3, nested_optimizer_popsize=4,
+    )
 
     assert result["n_games"] == 240
     for key in (
         "baseline", "phase1_pillar_stats", "phase2_correlations", "phase3_ablation",
-        "phase4_weight_optimization", "phase5_distribution", "phase6_separability",
-        "phase7_curves", "phase8_shrinkage",
+        "phase4_weight_optimization", "phase4_weight_optimization_nested", "phase5_distribution",
+        "phase6_separability", "phase7_curves", "phase8_shrinkage",
     ):
         assert key in result
 

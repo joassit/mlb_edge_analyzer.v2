@@ -84,8 +84,10 @@ def main() -> None:
     )
     audit_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
     audit_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
-    audit_parser.add_argument("--optimizer-maxiter", type=int, default=30, help="Iteraciones de differential_evolution para la Fase 4 (default: 30)")
-    audit_parser.add_argument("--optimizer-popsize", type=int, default=15, help="Tamano de poblacion de differential_evolution para la Fase 4 (default: 15)")
+    audit_parser.add_argument("--optimizer-maxiter", type=int, default=20, help="Iteraciones de differential_evolution para el ajuste de produccion de la Fase 4 (default: 20)")
+    audit_parser.add_argument("--optimizer-popsize", type=int, default=10, help="Tamano de poblacion de differential_evolution para el ajuste de produccion de la Fase 4 (default: 10)")
+    audit_parser.add_argument("--nested-optimizer-maxiter", type=int, default=10, help="Iteraciones de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4 -- la estimacion sin sesgo de seleccion (default: 10)")
+    audit_parser.add_argument("--nested-optimizer-popsize", type=int, default=6, help="Tamano de poblacion de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4 (default: 6)")
     audit_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
@@ -167,6 +169,7 @@ def main() -> None:
         result = run_full_audit(
             sorted(args.seasons), args.db,
             optimizer_maxiter=args.optimizer_maxiter, optimizer_popsize=args.optimizer_popsize,
+            nested_optimizer_maxiter=args.nested_optimizer_maxiter, nested_optimizer_popsize=args.nested_optimizer_popsize,
         )
         logger.info(
             "discriminative-audit completo -- n_games=%s baseline_brier=%s baseline_ece=%s",

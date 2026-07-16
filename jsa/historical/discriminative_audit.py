@@ -19,7 +19,22 @@ mismo rol que cumple `BASE_PILLAR_WEIGHTS`) -- no vuelve a correr el Rule
 Engine/Weight Engine por juego (Seccion 6), que aplicaria deltas de
 contexto por encima de esa base. Reconstruir eso exigiria re-evaluar el
 Context Detector + Rule Engine para cada juego historico, fuera del
-alcance de esta auditoria (que solo lee reportes ya persistidos)."""
+alcance de esta auditoria (que solo lee reportes ya persistidos).
+
+Fuga de informacion en la Fase 4 -- por que existen DOS funciones:
+`optimize_weights()` elige los pesos minimizando el LOSO log loss
+agregado sobre TODAS las temporadas, y ese mismo LOSO es el que reporta
+como "mejora" -- sesgo de seleccion (igual que reportar el score de un
+k-fold CV usado para elegir hiperparametros como si fuera generalizacion).
+`optimize_weights_nested()` es la version sin ese sesgo: nested LOSO --
+por cada temporada externa, los pesos se optimizan usando SOLO las 4
+restantes (su propio LOSO interno como objetivo) y se evaluan en la
+externa con una curva ajustada UNICAMENTE sobre esas 4, nunca vista
+durante esa busqueda de pesos. `optimize_weights()` sigue existiendo
+porque hace falta un unico vector desplegable (ajustado con toda la
+evidencia disponible); su propio numero de mejora esta marcado
+explicitamente como optimista (`"warning"` en el resultado) -- la
+pregunta "¿la mejora es real?" la responde `optimize_weights_nested()`."""
 
 from __future__ import annotations
 
@@ -292,11 +307,13 @@ def _pairs_by_season_for_weights(advantages_matrix: np.ndarray, y: np.ndarray, s
     return pairs_by_season
 
 
-def optimize_weights(records: list[dict], *, seed: int = 42, maxiter: int = 30, popsize: int = 15) -> dict:
-    n = len(SEVEN_PILLARS)
-    advantages_matrix = np.array([[r["advantages"][p] for p in SEVEN_PILLARS] for r in records], dtype=float)
-    y = np.array([r["home_win"] for r in records])
-    seasons = np.array([r["season"] for r in records])
+def _optimize_weights_de(advantages_matrix: np.ndarray, y: np.ndarray, seasons: np.ndarray, *, seed: int, maxiter: int, popsize: int):
+    """Un unico corrida de differential_evolution -- el objetivo (LOSO log
+    loss) se computa SOLO sobre las temporadas presentes en `seasons`.
+    Reusado tanto por el ajuste de produccion (todas las temporadas) como
+    por cada fold externo de `optimize_weights_nested()` (solo las
+    temporadas internas de ese fold)."""
+    n = advantages_matrix.shape[1]
 
     def objective(z: np.ndarray) -> float:
         w = _softmax(z)
@@ -308,7 +325,27 @@ def optimize_weights(records: list[dict], *, seed: int = 42, maxiter: int = 30, 
         objective, bounds=[(-3.0, 3.0)] * n, seed=seed, maxiter=maxiter, popsize=popsize,
         tol=1e-4, polish=True, workers=1,
     )
-    optimized_weights = _softmax(de_result.x)
+    return _softmax(de_result.x), de_result
+
+
+def optimize_weights(records: list[dict], *, seed: int = 42, maxiter: int = 20, popsize: int = 10) -> dict:
+    """Ajuste de PRODUCCION: un unico vector de pesos, optimizado sobre
+    TODAS las temporadas disponibles (para tener un vector desplegable).
+
+    Aviso de sesgo de seleccion: el `loso_log_loss`/`loso_brier` que este
+    vector reporta AQUI es optimista -- el objetivo de
+    `differential_evolution` es exactamente esa misma metrica agregada
+    sobre las 5 temporadas, asi que no queda ninguna temporada realmente
+    no vista para validar la eleccion (mismo problema que reportar el
+    score de un k-fold CV usado para elegir hiperparametros como si fuera
+    generalizacion). La estimacion SIN ese sesgo esta en
+    `optimize_weights_nested()`, que es la que debe usarse para decidir si
+    la mejora es real."""
+    advantages_matrix = np.array([[r["advantages"][p] for p in SEVEN_PILLARS] for r in records], dtype=float)
+    y = np.array([r["home_win"] for r in records])
+    seasons = np.array([r["season"] for r in records])
+
+    optimized_weights, de_result = _optimize_weights_de(advantages_matrix, y, seasons, seed=seed, maxiter=maxiter, popsize=popsize)
     current_weights = np.array([BASE_PILLAR_WEIGHTS[p] for p in SEVEN_PILLARS])
 
     current_pairs = _pairs_by_season_for_weights(advantages_matrix, y, seasons, current_weights)
@@ -321,6 +358,7 @@ def optimize_weights(records: list[dict], *, seed: int = 42, maxiter: int = 30, 
         return float((current - optimized) / current * 100) if current else None
 
     return {
+        "warning": "loso_brier/loso_log_loss de 'optimized_loso' tienen sesgo de seleccion -- son la MISMA metrica que differential_evolution uso como objetivo. Usar optimize_weights_nested() para la estimacion sin fuga de informacion.",
         "current_weights": dict(zip(SEVEN_PILLARS, current_weights.tolist())),
         "optimized_weights": dict(zip(SEVEN_PILLARS, optimized_weights.tolist())),
         "current_loso": {k: current_loso[k] for k in ("loso_brier", "loso_log_loss", "loso_accuracy", "loso_ece", "per_season_metrics")},
@@ -333,6 +371,70 @@ def optimize_weights(records: list[dict], *, seed: int = 42, maxiter: int = 30, 
         "optimizer_converged": bool(de_result.success),
         "optimizer_message": str(de_result.message),
         "optimizer_iterations": int(de_result.nit),
+    }
+
+
+def optimize_weights_nested(records: list[dict], *, seed: int = 42, maxiter: int = 10, popsize: int = 6) -> dict:
+    """Estimacion SIN sesgo de seleccion de si unos pesos optimizados
+    generalizan: nested leave-one-season-out. Para cada temporada externa
+    dejada afuera, los pesos se optimizan usando SOLO las 4 restantes (con
+    su propio LOSO interno de 4 temporadas como objetivo de
+    `differential_evolution` -- la temporada externa nunca entra en esa
+    busqueda), y se evaluan sobre la temporada externa con una curva
+    isotonica ajustada UNICAMENTE sobre las 4 internas. Ninguna
+    prediccion reportada aqui proviene de un modelo (pesos + calibracion)
+    que haya visto, directa o indirectamente, la temporada sobre la que se
+    evalua -- esto es lo que permite afirmar que una mejora es real y no
+    solo seleccion sobre el propio criterio de evaluacion."""
+    seasons_list = sorted({r["season"] for r in records})
+    current_weights = np.array([BASE_PILLAR_WEIGHTS[p] for p in SEVEN_PILLARS])
+
+    outer_pairs_current: list[tuple[float, int]] = []
+    outer_pairs_optimized: list[tuple[float, int]] = []
+    per_season_weights: dict[int, dict] = {}
+
+    for held_out in seasons_list:
+        inner = [r for r in records if r["season"] != held_out]
+        outer = [r for r in records if r["season"] == held_out]
+        if not inner or not outer:
+            continue
+
+        inner_adv = np.array([[r["advantages"][p] for p in SEVEN_PILLARS] for r in inner], dtype=float)
+        inner_y = np.array([r["home_win"] for r in inner])
+        inner_seasons = np.array([r["season"] for r in inner])
+        outer_adv = np.array([[r["advantages"][p] for p in SEVEN_PILLARS] for r in outer], dtype=float)
+        outer_y = [r["home_win"] for r in outer]
+
+        w_opt, _ = _optimize_weights_de(inner_adv, inner_y, inner_seasons, seed=seed, maxiter=maxiter, popsize=popsize)
+        per_season_weights[held_out] = {"n_games_held_out": len(outer), "optimized_weights": dict(zip(SEVEN_PILLARS, w_opt.tolist()))}
+
+        for weights, sink in ((w_opt, outer_pairs_optimized), (current_weights, outer_pairs_current)):
+            inner_scores = (inner_adv @ weights).tolist()
+            model = calibration._fit_isotonic(list(zip(inner_scores, inner_y.tolist())))
+            outer_scores = (outer_adv @ weights).tolist()
+            preds = model.predict(outer_scores)
+            sink.extend(zip((float(p) for p in preds), outer_y))
+
+    from jsa.historical.validation import accuracy, brier_score, ece, log_loss
+
+    current_metrics = {
+        "brier": brier_score(outer_pairs_current), "log_loss": log_loss(outer_pairs_current),
+        "accuracy": accuracy(outer_pairs_current), "ece": ece(outer_pairs_current),
+    }
+    optimized_metrics = {
+        "brier": brier_score(outer_pairs_optimized), "log_loss": log_loss(outer_pairs_optimized),
+        "accuracy": accuracy(outer_pairs_optimized), "ece": ece(outer_pairs_optimized),
+    }
+    ci = _paired_bootstrap_ci(outer_pairs_current, outer_pairs_optimized)
+
+    return {
+        "method": "nested_loso -- sin sesgo de seleccion: cada fold externo optimiza con las temporadas restantes y evalua en la temporada nunca vista por esa optimizacion",
+        "n_outer_folds": len(per_season_weights),
+        "per_season_optimized_weights": per_season_weights,
+        "current_metrics_nested": current_metrics,
+        "optimized_metrics_nested": optimized_metrics,
+        "bootstrap_ci_delta_brier": ci,
+        "generalizes": bool(ci and ci["significant"] and ci["delta_brier_mean"] < 0),
     }
 
 
@@ -494,7 +596,8 @@ def shrinkage_sensitivity(records: list[dict], baseline_loso: dict, k_values: tu
 
 def run_full_audit(
     seasons: list[int], historical_database_url: str, *,
-    optimizer_seed: int = 42, optimizer_maxiter: int = 30, optimizer_popsize: int = 15,
+    optimizer_seed: int = 42, optimizer_maxiter: int = 20, optimizer_popsize: int = 10,
+    nested_optimizer_maxiter: int = 10, nested_optimizer_popsize: int = 6,
 ) -> dict:
     engine = historical_db.get_engine(historical_database_url)
     historical_db.init_historical_storage(engine)
@@ -517,14 +620,15 @@ def run_full_audit(
         "phase2_correlations": pillar_correlation_matrices(records),
         "phase3_ablation": ablation_analysis(records, baseline_loso),
         "phase4_weight_optimization": optimize_weights(records, seed=optimizer_seed, maxiter=optimizer_maxiter, popsize=optimizer_popsize),
+        "phase4_weight_optimization_nested": optimize_weights_nested(records, seed=optimizer_seed, maxiter=nested_optimizer_maxiter, popsize=nested_optimizer_popsize),
         "phase5_distribution": score_distribution(records),
         "phase6_separability": separability_analysis(records),
         "phase7_curves": performance_curves(baseline_loso["loso_pairs"]),
         "phase8_shrinkage": shrinkage_sensitivity(records, baseline_loso),
     }
     logger.info(
-        "run_full_audit completo -- n_games=%d baseline_brier=%s baseline_ece=%s optimized_pct_improvement_brier=%s",
+        "run_full_audit completo -- n_games=%d baseline_brier=%s baseline_ece=%s nested_generalizes=%s",
         len(records), baseline_loso["loso_brier"], baseline_loso["loso_ece"],
-        result["phase4_weight_optimization"]["pct_improvement_brier"],
+        result["phase4_weight_optimization_nested"]["generalizes"],
     )
     return result

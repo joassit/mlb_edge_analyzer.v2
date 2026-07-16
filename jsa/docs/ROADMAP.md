@@ -568,16 +568,38 @@ una mejora que cruce cero.
   encima de esa base. Reconstruir eso exigiria re-evaluar el Context
   Detector + Rule Engine para cada juego historico, fuera del alcance de
   esta auditoria (que solo lee reportes ya persistidos).
+- **Fix de fuga de informacion en la Fase 4** (encontrado en la revision
+  del usuario antes del merge, no en la construccion original): la
+  primera version de `optimize_weights()` elegia los pesos minimizando el
+  `loso_log_loss` agregado sobre las 5 temporadas, y reportaba ese MISMO
+  numero como "mejora" -- sesgo de seleccion (analogo a reportar el score
+  de un k-fold CV usado para elegir hiperparametros como si fuera
+  generalizacion; cada prediccion individual es out-of-fold, pero el
+  vector ganador fue elegido mirando el desempeno en las 5 temporadas, sin
+  dejar ninguna realmente no vista para validar esa eleccion). Se agrego
+  `optimize_weights_nested()`: LOSO anidado -- por cada temporada externa,
+  los pesos se optimizan usando SOLO las 4 restantes (su propio LOSO
+  interno como objetivo de `differential_evolution`) y se evaluan en la
+  externa con una curva isotonica ajustada UNICAMENTE sobre esas 4, nunca
+  vista durante esa busqueda de pesos. `optimize_weights()` (renombrada
+  internamente su intencion, no su firma) sigue existiendo para producir
+  un unico vector desplegable ajustado con toda la evidencia, pero su
+  propio numero de mejora ahora viene marcado con un `"warning"` explicito
+  en el resultado -- la pregunta "¿la mejora es real?" la responde
+  `optimize_weights_nested()`, nunca la version de produccion.
 - `historical/cli.py::discriminative-audit` + `.github/workflows/jsa_historical_discriminative_audit.yml`
-  (timeout de 60 min -- la Fase 4 es la parte mas lenta).
+  (timeout de 90 min -- la Fase 4 corre DOS optimizaciones completas,
+  la de produccion y la anidada, la mas lenta de las 8 fases).
 - Sin dependencias nuevas: `scipy.optimize.differential_evolution` (ya en
   requirements) cubre el algoritmo de optimizacion pedido sin agregar
   Optuna.
 
-12 tests nuevos (`test_discriminative_audit.py`), datos sinteticos con
-relacion real (con ruido) entre pilares y resultado. **Sin correr
-todavia contra Postgres real** -- pendiente de review/merge de este PR y
-un dispatch posterior, igual que `calibrate`.
+13 tests nuevos (`test_discriminative_audit.py`), datos sinteticos con
+relacion real (con ruido) entre pilares y resultado, incluyendo una
+prueba dedicada de que `optimize_weights_nested()` produce un vector de
+pesos propio por cada fold externo (nunca ajustado con la temporada que
+luego evalua). **Sin correr todavia contra Postgres real** -- pendiente
+de review/merge de este PR y un dispatch posterior, igual que `calibrate`.
 
 ## Explicitamente NO construido todavia (y por que)
 
