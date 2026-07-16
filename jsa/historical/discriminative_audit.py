@@ -39,6 +39,10 @@ pregunta "¿la mejora es real?" la responde `optimize_weights_nested()`."""
 from __future__ import annotations
 
 import logging
+import resource
+import subprocess
+import time
+from datetime import datetime, timezone
 
 import numpy as np
 from scipy.optimize import differential_evolution
@@ -371,6 +375,7 @@ def optimize_weights(records: list[dict], *, seed: int = 42, maxiter: int = 20, 
         "optimizer_converged": bool(de_result.success),
         "optimizer_message": str(de_result.message),
         "optimizer_iterations": int(de_result.nit),
+        "optimizer_n_function_evaluations": int(de_result.nfev),
     }
 
 
@@ -405,8 +410,15 @@ def optimize_weights_nested(records: list[dict], *, seed: int = 42, maxiter: int
         outer_adv = np.array([[r["advantages"][p] for p in SEVEN_PILLARS] for r in outer], dtype=float)
         outer_y = [r["home_win"] for r in outer]
 
-        w_opt, _ = _optimize_weights_de(inner_adv, inner_y, inner_seasons, seed=seed, maxiter=maxiter, popsize=popsize)
-        per_season_weights[held_out] = {"n_games_held_out": len(outer), "optimized_weights": dict(zip(SEVEN_PILLARS, w_opt.tolist()))}
+        fold_started = time.perf_counter()
+        w_opt, de_result = _optimize_weights_de(inner_adv, inner_y, inner_seasons, seed=seed, maxiter=maxiter, popsize=popsize)
+        per_season_weights[held_out] = {
+            "n_games_held_out": len(outer),
+            "optimized_weights": dict(zip(SEVEN_PILLARS, w_opt.tolist())),
+            "optimizer_n_function_evaluations": int(de_result.nfev),
+            "optimizer_converged": bool(de_result.success),
+            "fold_seconds": time.perf_counter() - fold_started,
+        }
 
         for weights, sink in ((w_opt, outer_pairs_optimized), (current_weights, outer_pairs_current)):
             inner_scores = (inner_adv @ weights).tolist()
@@ -594,6 +606,32 @@ def shrinkage_sensitivity(records: list[dict], baseline_loso: dict, k_values: tu
 # --- Orquestador ---
 
 
+def _current_commit_sha() -> str | None:
+    """`GITHUB_SHA` (seteado automaticamente por GitHub Actions) si esta
+    disponible; si no, `git rev-parse HEAD` local -- para poder saber
+    exactamente que version del codigo produjo un resultado ya persistido,
+    sin depender de cruzar manualmente el run de Actions con el repo."""
+    import os
+
+    env_sha = os.environ.get("GITHUB_SHA")
+    if env_sha:
+        return env_sha
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return None
+
+
+def _peak_rss_kb() -> int:
+    """Maximo de RSS (KB en Linux) usado por el proceso HASTA este punto --
+    `ru_maxrss` es un high-water-mark acumulado, nunca baja ni se resetea
+    por fase; reportado despues de cada fase muestra si esa fase hizo
+    subir el techo de memoria, no su consumo aislado (`tracemalloc` daria
+    eso, pero con mas overhead -- no vale la pena para una auditoria
+    one-off de solo lectura)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
 def run_full_audit(
     seasons: list[int], historical_database_url: str, *,
     optimizer_seed: int = 42, optimizer_maxiter: int = 20, optimizer_popsize: int = 10,
@@ -608,7 +646,31 @@ def run_full_audit(
 
     baseline_loso = calibration.loso_fit_and_score(_baseline_pairs_by_season(records))
 
+    phase_timings_seconds: dict[str, float] = {}
+    phase_peak_rss_kb: dict[str, int] = {}
+
+    def _run_phase(name: str, fn, *args, **kwargs):
+        started = time.perf_counter()
+        value = fn(*args, **kwargs)
+        phase_timings_seconds[name] = time.perf_counter() - started
+        phase_peak_rss_kb[name] = _peak_rss_kb()
+        return value
+
     result = {
+        "run_metadata": {
+            "commit_sha": _current_commit_sha(),
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "config": {
+                "seasons_requested": seasons,
+                "optimizer_seed": optimizer_seed,
+                "optimizer_maxiter": optimizer_maxiter, "optimizer_popsize": optimizer_popsize,
+                "nested_optimizer_maxiter": nested_optimizer_maxiter, "nested_optimizer_popsize": nested_optimizer_popsize,
+                "min_games_per_season": calibration.MIN_GAMES_PER_SEASON,
+                "min_seasons_for_walk_forward": calibration.MIN_SEASONS_FOR_WALK_FORWARD,
+                "base_pillar_weights": dict(BASE_PILLAR_WEIGHTS),
+                "shrinkage_k_values_tested": [0.0, 20.0, _SHRINKAGE_K_CURRENT],
+            },
+        },
         "n_games": len(records),
         "seasons_used": seasons,
         "baseline": {
@@ -616,19 +678,26 @@ def run_full_audit(
             "loso_accuracy": baseline_loso["loso_accuracy"], "loso_ece": baseline_loso["loso_ece"],
             "loso_mce": baseline_loso["loso_mce"], "per_season_metrics": baseline_loso["per_season_metrics"],
         },
-        "phase1_pillar_stats": pillar_individual_stats(records, baseline_loso),
-        "phase2_correlations": pillar_correlation_matrices(records),
-        "phase3_ablation": ablation_analysis(records, baseline_loso),
-        "phase4_weight_optimization": optimize_weights(records, seed=optimizer_seed, maxiter=optimizer_maxiter, popsize=optimizer_popsize),
-        "phase4_weight_optimization_nested": optimize_weights_nested(records, seed=optimizer_seed, maxiter=nested_optimizer_maxiter, popsize=nested_optimizer_popsize),
-        "phase5_distribution": score_distribution(records),
-        "phase6_separability": separability_analysis(records),
-        "phase7_curves": performance_curves(baseline_loso["loso_pairs"]),
-        "phase8_shrinkage": shrinkage_sensitivity(records, baseline_loso),
+        "phase1_pillar_stats": _run_phase("phase1_pillar_stats", pillar_individual_stats, records, baseline_loso),
+        "phase2_correlations": _run_phase("phase2_correlations", pillar_correlation_matrices, records),
+        "phase3_ablation": _run_phase("phase3_ablation", ablation_analysis, records, baseline_loso),
+        "phase4_weight_optimization": _run_phase(
+            "phase4_weight_optimization", optimize_weights, records, seed=optimizer_seed, maxiter=optimizer_maxiter, popsize=optimizer_popsize,
+        ),
+        "phase4_weight_optimization_nested": _run_phase(
+            "phase4_weight_optimization_nested", optimize_weights_nested, records,
+            seed=optimizer_seed, maxiter=nested_optimizer_maxiter, popsize=nested_optimizer_popsize,
+        ),
+        "phase5_distribution": _run_phase("phase5_distribution", score_distribution, records),
+        "phase6_separability": _run_phase("phase6_separability", separability_analysis, records),
+        "phase7_curves": _run_phase("phase7_curves", performance_curves, baseline_loso["loso_pairs"]),
+        "phase8_shrinkage": _run_phase("phase8_shrinkage", shrinkage_sensitivity, records, baseline_loso),
     }
+    result["phase_timings_seconds"] = phase_timings_seconds
+    result["phase_peak_rss_kb"] = phase_peak_rss_kb
     logger.info(
-        "run_full_audit completo -- n_games=%d baseline_brier=%s baseline_ece=%s nested_generalizes=%s",
+        "run_full_audit completo -- n_games=%d baseline_brier=%s baseline_ece=%s nested_generalizes=%s total_seconds=%.1f",
         len(records), baseline_loso["loso_brier"], baseline_loso["loso_ece"],
-        result["phase4_weight_optimization_nested"]["generalizes"],
+        result["phase4_weight_optimization_nested"]["generalizes"], sum(phase_timings_seconds.values()),
     )
     return result

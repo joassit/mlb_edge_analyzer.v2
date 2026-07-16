@@ -601,6 +601,39 @@ pesos propio por cada fold externo (nunca ajustado con la temporada que
 luego evalua). **Sin correr todavia contra Postgres real** -- pendiente
 de review/merge de este PR y un dispatch posterior, igual que `calibrate`.
 
+## Pre-vuelo antes del primer dispatch real: metadata/timing/memoria (Fase 4 nested)
+
+Revision del usuario antes de correr `jsa_historical_discriminative_audit.yml`
+contra Postgres, checklist item por item contra el codigo (no de memoria):
+5 de 7 puntos ya se cumplian por construccion (dataset congelado -- solo
+lee tablas ya ingeridas; pitchers/fuente estables por el mismo motivo;
+semilla fija en `differential_evolution` y en todo `np.random` del
+modulo; `optimize_weights_nested()` realmente sin sesgo de seleccion;
+JSON con todas las fases, no solo un resumen). **2 puntos NO se
+cumplian** -- se agregaron antes de correr nada:
+
+- `run_full_audit()["run_metadata"]`: `commit_sha` (`GITHUB_SHA` si corre
+  en Actions, si no `git rev-parse HEAD`), `generated_at_utc`, y `config`
+  completo (temporadas pedidas, seeds/maxiter/popsize de ambas
+  optimizaciones, `MIN_GAMES_PER_SEASON`/`MIN_SEASONS_FOR_WALK_FORWARD`,
+  `BASE_PILLAR_WEIGHTS`, los 3 valores de `SHRINKAGE_K_IP` auditados) --
+  para poder saber, mirando solo el JSON persistido, exactamente que
+  version de codigo y que parametros lo produjeron.
+- `phase_timings_seconds`/`phase_peak_rss_kb` por fase (las 8 fases +
+  ambas optimizaciones de la Fase 4 por separado) -- `ru_maxrss` es un
+  high-water-mark acumulado (nunca memoria aislada de una fase sola,
+  documentado asi en el docstring de `_peak_rss_kb()`), pero alcanza para
+  ver si una fase hace subir el techo de memoria.
+- Pedido adicional del usuario, ya semi-cubierto: `optimize_weights_nested()`
+  ya devolvia `per_season_optimized_weights` (pesos finales por fold);
+  se le agrego `optimizer_n_function_evaluations` y `fold_seconds` por
+  fold -- para poder ver si alguna temporada converge a pesos o costo muy
+  distintos de las demas (senal de inestabilidad, no solo de "temporada
+  dificil").
+
+3 tests existentes ampliados para verificar estos campos (mismos 253
+tests totales, sin tests nuevos -- solo mas aserciones).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
