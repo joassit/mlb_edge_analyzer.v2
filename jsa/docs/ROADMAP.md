@@ -631,6 +631,98 @@ cumplian** -- se agregaron antes de correr nada:
   distintos de las demas (senal de inestabilidad, no solo de "temporada
   dificil").
 
+## Resultado real de `jsa_historical_discriminative_audit.yml` (5 temporadas, 13,099 juegos)
+
+Corrida real contra Postgres (`commit_sha=d7c0d6c`), 5m12s. Hallazgos:
+
+- **Confirmado**: 10% del peso (`trend`+`historical`) va a pilares stub
+  con `advantage=0` en el 100% de los 13,099 juegos -- peso
+  completamente desperdiciado.
+- **Confirmado**: `context` tiene AUC=0.500 y solo usa 2 de 5 niveles
+  posibles (298 de 13,099 juegos usan `-1`, el resto `0`) -- señal
+  estadisticamente real en la ablacion (IC no cruza cero) pero
+  economicamente insignificante.
+- **Confirmado**: el Evidence Score esta comprimido al centro -- 54.5%
+  de los juegos caen en evidence_score ∈ [-0.5, 0.5]; tras calibrar, 51%
+  de las probabilidades predichas caen en la banda 46.7%-53.3%.
+- **Descartado**: la hipotesis de que el shrinkage es "demasiado
+  agresivo" -- `k=60` (actual) supera a `k=20` y a `k=0` en LOSO Brier,
+  diferencia estadisticamente significativa en ambos casos (Fase 8).
+- **`optimize_weights_nested()` real**: `generalizes: false` -- los
+  pesos optimizados NO mejoran fuera de muestra (de hecho empeoran
+  ligeramente, Brier 0.24547 vs 0.24523 actual), y ademas
+  `optimizer_converged=False` en los 5 folds externos + la corrida de
+  produccion -- con solo 5 temporadas y 2 pilares matematicamente
+  irrelevantes (trend/historical, cuyo peso no cambia el ranking de
+  ningun juego bajo isotonic regression), el espacio de busqueda de 7
+  pesos no converge de forma confiable con el presupuesto usado.
+- Ranking de pilares por contribucion real (AUC + ablacion LOSO,
+  concuerdan): offense > bullpen > starter > team_quality > context >>
+  trend = historical (muertos).
+
+Informe completo (6 graficos: ranking de pilares, heatmap de
+correlaciones, reliability diagram + histograma, ROC, sensibilidad de
+shrinkage, inestabilidad de pesos por fold) entregado directamente al
+usuario -- no archivado como markdown aqui para no duplicar; el JSON
+crudo del run queda en el artifact de GitHub Actions
+(`jsa-historical-discriminative-audit-29488448243`, 30 dias de retencion).
+
+## Segunda generacion: `historical/resolution_audit.py` -- que se pudo responder sin nueva ingesta, y que no
+
+Tras el resultado de arriba, el pedido de investigacion de segunda
+generacion planteaba 9 fases (Trend/Historical reales, discretizacion,
+Team Quality profundo, Evidence Score continuo, integracion). Antes de
+escribir una sola linea de codigo, se audito cual de esas fases es
+respondible con evidencia real SIN nueva infraestructura:
+
+**Bloqueado, no construido, y por que (no se fabrico ningun numero para esto)**:
+- **Trend/Historical reales (Fases 1-2 del pedido)**: este sandbox no
+  tiene salida de red a `statsapi.mlb.com` -- cualquier campo nuevo
+  exige nuevos metodos de provider + migracion de schema aditiva +
+  **re-ingerir las 5 temporadas** (horas de GitHub Actions por
+  temporada, ya vivido en esta sesion). Ademas, varios candidatos
+  propuestos (`wRC+`, `xFIP`, `WAR`) son metricas de FanGraphs, nunca
+  integradas en este proyecto -- no hay forma de confirmar viabilidad
+  sin decision explicita del usuario sobre esa fuente de datos.
+- **BaseRuns y WAR para team_quality (parte de la Fase 7 del pedido)**:
+  mismo problema -- requieren datos (batted-ball, valor defensivo) que
+  este proyecto no tiene ingeridos.
+- **Fase 9 (integracion)**: prematura hasta resolver lo anterior.
+
+**Si construido, con datos 100% ya ingeridos (nunca golpea la API)**:
+- `historical/resolution_audit.py::run_discretization_sweep()` (Fases 3+8
+  del pedido): 6 configuraciones -- `A` (actual, -2..2), `B` (-3..3), `C`
+  (-4..4), `D` (percentiles), `E` (z-score continuo), `F` (diff crudo sin
+  discretizar) -- aplicadas UNICAMENTE a starter/bullpen/offense (los 3
+  pilares con un diff continuo subyacente limpio, reconstruido desde los
+  campos crudos de `GameSnapshot` ya en `historical_snapshot`, misma
+  formula exacta que produccion). `team_quality`/`context`/`trend`/
+  `historical` NUNCA se tocan en el sweep -- se aisla el efecto de la
+  resolucion de esos 3 pilares. Cada configuracion corre LOSO completo +
+  bootstrap pareado contra la configuracion `A` (actual).
+- `historical/resolution_audit.py::compute_elo_and_pythagorean()` +
+  `evaluate_team_quality_alternatives()` (Fase 7 parcial): Elo (reinicia
+  en 1500 cada temporada, K=20 -- simplificacion documentada, no oculta)
+  y Pythagorean Expectation (exponente 1.83), ambos calculados
+  point-in-time-safe por DIA calendario (nunca por juego individual
+  dentro del mismo dia, ya que `historical_game` no guarda hora exacta)
+  a partir de `historical_game` ya ingerido. Nunca reemplazan
+  `team_quality` en produccion -- solo se MIDE que pasaria si se
+  sustituyera (mismo peso, valor z-scoreado), comparado via bootstrap
+  contra dejarlo como esta.
+- Verificacion anti-fuga explicita: `compute_elo_and_pythagorean()` se
+  probo con resultados 100% aleatorios (moneda pura, sin relacion con la
+  identidad del equipo) -- AUC de `elo_diff` da ~0.49 (sin señal, como
+  debe ser); y con una diferencia de habilidad real embebida a proposito
+  -- AUC claramente por encima de 0.5 (se recupera la señal real). Ambos
+  tests en `test_resolution_audit.py`.
+- `historical/cli.py::resolution-audit` + `.github/workflows/jsa_historical_resolution_audit.yml`
+  (solo lee `JSA_HISTORICAL_DATABASE_URL`, no necesita `JSA_DATABASE_URL`
+  -- no persiste nada, es de solo lectura).
+
+8 tests nuevos (`test_resolution_audit.py`). **Sin correr todavia contra
+Postgres real** -- pendiente de review/merge de este PR.
+
 3 tests existentes ampliados para verificar estos campos (mismos 253
 tests totales, sin tests nuevos -- solo mas aserciones).
 
