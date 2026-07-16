@@ -99,6 +99,9 @@ def test_discretization_sweep_has_all_configs_and_config_a_is_reference(seeded_r
         entry = result[config]
         assert entry["loso_brier"] is not None
         assert -1.0 <= entry["cohens_d"] <= 1.0 or entry["cohens_d"] is not None
+        assert set(entry["per_season_metrics"]) == {2022, 2023, 2024}
+        for season_metrics in entry["per_season_metrics"].values():
+            assert season_metrics["brier"] is not None
         if config != "A_actual_-2_2":
             assert entry["bootstrap_ci_delta_brier_vs_actual"] is not None
 
@@ -170,6 +173,8 @@ def test_evaluate_team_quality_alternatives_shape(seeded_records, hist_url):
     for entry in result.values():
         assert "auc" in entry["individual_stats"]
         assert entry["loso_if_substituted"]["loso_brier"] is not None
+        assert set(entry["loso_if_substituted"]["per_season_metrics"]) == {2022, 2023, 2024}
+        assert set(entry["current_team_quality_per_season_metrics"]) == {2022, 2023, 2024}
         assert entry["bootstrap_ci_delta_brier_vs_actual_team_quality"] is not None
 
 

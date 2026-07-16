@@ -190,6 +190,7 @@ def run_discretization_sweep(records: list[dict]) -> dict:
         results[config] = {
             "loso_brier": loso["loso_brier"], "loso_log_loss": loso["loso_log_loss"],
             "loso_accuracy": loso["loso_accuracy"], "loso_ece": loso["loso_ece"], "loso_mce": loso["loso_mce"],
+            "per_season_metrics": loso["per_season_metrics"],
             "loso_pairs": loso["loso_pairs"],
             **dist,
         }
@@ -298,7 +299,9 @@ def evaluate_team_quality_alternatives(records: list[dict], engine, seasons: lis
             "loso_if_substituted": {
                 "loso_brier": loso["loso_brier"], "loso_log_loss": loso["loso_log_loss"],
                 "loso_accuracy": loso["loso_accuracy"], "loso_ece": loso["loso_ece"],
+                "per_season_metrics": loso["per_season_metrics"],
             },
+            "current_team_quality_per_season_metrics": baseline_loso["per_season_metrics"],
             "bootstrap_ci_delta_brier_vs_actual_team_quality": ci,
         }
     return out

@@ -720,11 +720,35 @@ respondible con evidencia real SIN nueva infraestructura:
   (solo lee `JSA_HISTORICAL_DATABASE_URL`, no necesita `JSA_DATABASE_URL`
   -- no persiste nada, es de solo lectura).
 
-8 tests nuevos (`test_resolution_audit.py`). **Sin correr todavia contra
-Postgres real** -- pendiente de review/merge de este PR.
+8 tests nuevos (`test_resolution_audit.py`, ampliados con
+`per_season_metrics` en el sweep de discretizacion y en las
+alternativas de team_quality tras la revision del usuario antes de
+mergear -- ver punto siguiente). **Sin correr todavia contra Postgres
+real** -- pendiente de review/merge de este PR.
 
-3 tests existentes ampliados para verificar estos campos (mismos 253
-tests totales, sin tests nuevos -- solo mas aserciones).
+## Revision del usuario antes de mergear PR #24 -- 1 de 4 condiciones no se cumplia
+
+Checklist pedido: (1) ausencia de data leakage en Elo/Pythagorean, (2)
+recalibracion independiente por configuracion del sweep, (3) metricas
+por temporada ademas del agregado, (4) documentacion explicita de
+limitaciones. Verificado contra el codigo, no de memoria:
+
+- **(1) y (2) ya se cumplian**: `compute_elo_and_pythagorean()` procesa
+  por dia calendario (nunca por juego dentro del mismo dia) y solo lee
+  el estado ANTES de actualizarlo -- releido linea por linea para
+  confirmar; `run_discretization_sweep()`/`evaluate_team_quality_alternatives()`
+  llaman `calibration.loso_fit_and_score()` una vez por configuracion/
+  candidato, cada uno con su propio ajuste isotonico fresco, nunca
+  reutilizado entre configuraciones.
+- **(3) NO se cumplia**: `loso_fit_and_score()` ya calculaba
+  `per_season_metrics` internamente, pero `run_discretization_sweep()` y
+  `evaluate_team_quality_alternatives()` lo descartaban al armar su
+  resultado final -- solo devolvian el agregado de las 5 temporadas. Se
+  corrigio antes de mergear: ambas funciones ahora incluyen
+  `per_season_metrics` (y `evaluate_team_quality_alternatives()` tambien
+  expone `current_team_quality_per_season_metrics` para comparar peras
+  con peras).
+- **(4) ya se cumplia** -- ver seccion anterior.
 
 ## Explicitamente NO construido todavia (y por que)
 
