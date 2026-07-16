@@ -517,6 +517,68 @@ mezclar con la construccion del ajuste en si.
 end-to-end de que una relacion perfectamente monotona sin ruido produce
 un `loso_brier < 0.05`).
 
+**Resultado real** (`jsa_historical_calibrate.yml` corrido contra las 5
+temporadas en Postgres, 13,099/13,116 juegos con resultado valido):
+`status="validated"` (5/5 temporadas pasaron walk-forward), `loso_brier=0.2452`,
+`loso_log_loss=0.6835`, `loso_accuracy=55.38%`, `loso_ece=0.00298`,
+`loso_mce=0.1382`. La curva esta **muy bien calibrada** (ECE casi cero)
+pero **discrimina poco**: el Brier/log loss quedan apenas por debajo del
+piso de un modelo sin skill (p=0.5 constante: Brier=0.25, log loss=0.693),
+y el accuracy apenas supera la ventaja de local pura de las Mayores
+(~54%). Motivo de la seccion siguiente.
+
+## Auditoria de poder discriminativo del Evidence Score (`historical/discriminative_audit.py`)
+
+Seguimiento directo al resultado real de arriba -- ¿por que el Evidence
+Score calibra tan bien pero discrimina tan poco? Modulo de solo lectura:
+no modifica `pillars/`, `engine/`, `calibration_registry` ni el pipeline,
+solo lee `historical_report`/`historical_snapshot` ya ingeridos. Toda
+comparacion de escenarios (ablacion, pesos alternativos, shrinkage
+alternativo) reusa `calibration.py::loso_fit_and_score()` (extraido de
+`fit_and_validate()` sin cambiar su comportamiento) -- nunca un split
+distinto que pudiera inflar una mejora artificialmente, y cada delta se
+acompana de un intervalo de confianza (bootstrap pareado 90%, 500
+remuestreos sobre las predicciones LOSO ya calculadas) para no aceptar
+una mejora que cruce cero.
+
+**Cambios**:
+- `historical/calibration.py::loso_fit_and_score()` (nuevo, extraido de
+  `fit_and_validate()` -- mismo comportamiento, ahora reusable).
+- `historical/discriminative_audit.py` (nuevo) -- 8 fases: (1) AUC/KS/MI/
+  correlacion-con-resultado/PSI-entre-temporadas/permutation-importance
+  por pilar; (2) matrices de correlacion Pearson/Spearman/MI entre los 7
+  pilares; (3) ablacion LOSO quitando un pilar a la vez (pesos de los 6
+  restantes renormalizados a sumar 1), clasificado
+  imprescindible/util/neutro/perjudicial segun si el IC del delta de
+  Brier cruza cero; (4) optimizacion de `BASE_PILLAR_WEIGHTS` con
+  `scipy.optimize.differential_evolution` (parametrizado via softmax --
+  `>=0` y suma`=1` automaticos), objetivo `loso_log_loss`; (5) distribucion
+  de `evidence_score_raw` (percentiles, skew, kurtosis, histograma); (6)
+  separabilidad ganados-vs-perdidos (KS, Cohen's d, divergencia
+  Jensen-Shannon, overlap); (7) ROC/Precision-Recall/Lift/Gain/reliability
+  diagram binned, TODOS sobre predicciones LOSO out-of-sample (nunca de
+  entrenamiento); (8) sensibilidad de `SHRINKAGE_K_IP` en starter+bullpen
+  (`k=0` sin encoger, `k=20` reducido, `k=60` actual), recalculando el
+  advantage discreto desde los campos crudos de `GameSnapshot` ya
+  persistidos en `historical_snapshot` (sin volver a golpear la API).
+- **Nota de alcance de la Fase 4**: el vector de pesos candidato se aplica
+  de forma ESTATICA e identica a todos los juegos (el mismo rol que
+  cumple `BASE_PILLAR_WEIGHTS`) -- no vuelve a correr el Rule/Weight
+  Engine por juego (Seccion 6), que aplicaria deltas de contexto por
+  encima de esa base. Reconstruir eso exigiria re-evaluar el Context
+  Detector + Rule Engine para cada juego historico, fuera del alcance de
+  esta auditoria (que solo lee reportes ya persistidos).
+- `historical/cli.py::discriminative-audit` + `.github/workflows/jsa_historical_discriminative_audit.yml`
+  (timeout de 60 min -- la Fase 4 es la parte mas lenta).
+- Sin dependencias nuevas: `scipy.optimize.differential_evolution` (ya en
+  requirements) cubre el algoritmo de optimizacion pedido sin agregar
+  Optuna.
+
+12 tests nuevos (`test_discriminative_audit.py`), datos sinteticos con
+relacion real (con ruido) entre pilares y resultado. **Sin correr
+todavia contra Postgres real** -- pendiente de review/merge de este PR y
+un dispatch posterior, igual que `calibrate`.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
