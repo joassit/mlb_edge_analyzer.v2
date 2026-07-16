@@ -842,6 +842,57 @@ snapshot con `FakeProvider`). **Sin re-ingesta todavia** -- pendiente de
 review/merge de este PR y de la confirmacion explicita del usuario antes
 de disparar `jsa_historical_ingest.yml --force` sobre las 5 temporadas.
 
+## Pre-vuelo antes de la re-ingesta de Trend: checklist del usuario (4 puntos, 3 no se cumplian)
+
+Antes de disparar la re-ingesta, el usuario pidio confirmar: (1) congelar
+la linea base actual para poder comparar antes/despues; (2) versionar la
+corrida (commit SHA, schema version, version del proveedor); (3)
+validaciones automaticas post-ingesta por temporada (cobertura de
+snapshots, cobertura de los campos nuevos, consistencia de fechas), que
+detengan el proceso si fallan; (4) que la re-ingesta no toque pesos,
+calibracion, discretizacion ni shrinkage. Verificado contra el codigo:
+
+- **(4) ya se cumplia** -- confirmado con `git diff --stat` del PR: cero
+  cambios en `config.py` (`BASE_PILLAR_WEIGHTS`/`SHRINKAGE_K_IP`),
+  `engine/pillars/*` (discretizacion) o `historical/calibration.py`.
+- **(1), (2) y (3) NO se cumplian** -- se agregaron antes de re-ingerir:
+  - **(1)** `jsa/docs/baselines/pre_trend_2026-07-16/` (nuevo, commiteado
+    al repo -- nunca solo un artifact de GitHub Actions con 30 dias de
+    retencion): copia real de `discriminative_audit_result.json` y
+    `resolution_audit_result.json` (los resultados YA obtenidos de las
+    corridas reales contra Postgres), mas un `README.md` explicando como
+    usarlos para comparar antes/despues.
+  - **(2)** `historical/db.py::historical_ingestion_run_metadata` (tabla
+    NUEVA, nunca `ALTER TABLE` sobre `historical_season_run` ya existente
+    en el historico real -- `create_all()` no agrega columnas a una tabla
+    que ya existe). Cada corrida de `run_season_ingestion()` inserta una
+    fila con `commit_sha` (`GITHUB_SHA` en Actions, `git rev-parse HEAD`
+    si no), `schema_version` (`domain.models.SCHEMA_VERSION`),
+    `provider_version` (nuevo `point_in_time_provider.PROVIDER_VERSION`,
+    primera vez que el proveedor se versiona explicitamente -- `1.0.0`
+    implicito para todo lo anterior, `1.1.0` desde que existen
+    `team_ops_rolling_as_of()`/`team_era_rolling_as_of()`), y si fue
+    `--force`.
+  - **(3)** `historical/ingestion_validation.py::validate_season_ingestion()`
+    (nuevo, solo lectura) + `historical/cli.py validate-ingestion` +
+    paso nuevo en `jsa_historical_ingest.yml` (`if: always()`, corre
+    siempre que la ingesta haya terminado) -- verifica cobertura de
+    snapshots (`>=90%` de los juegos con resultado), cobertura de cada
+    uno de los 8 campos rolling de Trend (`>=70%` no-nulos -- umbral
+    generoso a proposito: los primeros dias de temporada NO tienen
+    ventana de 7/14 dias completa todavia, eso es esperado, no un bug),
+    y consistencia de `game_date` entre `historical_game`/
+    `historical_snapshot`. `sys.exit(1)` si alguna falla -- el step (y
+    por lo tanto el job de esa temporada) queda en rojo, deteniendo el
+    proceso antes del siguiente dispatch.
+
+16 tests nuevos (`test_ingestion_validation.py`: 6 casos incluyendo
+cobertura baja de snapshots, cobertura baja de un campo especifico,
+tolerancia a nulos parciales esperados de inicio de temporada,
+inconsistencia de `game_date`; `test_historical_pipeline.py`: 1 caso
+nuevo verificando que `historical_ingestion_run_metadata` se escribe con
+los valores correctos).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

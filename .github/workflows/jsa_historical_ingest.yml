@@ -74,6 +74,22 @@ jobs:
             python -m jsa.historical.cli season ${{ inputs.season }}
           fi
 
+      # Validaciones estructurales automaticas (cobertura de snapshots,
+      # cobertura de los campos nuevos de Trend, consistencia de fechas)
+      # -- si fallan, este step (y por lo tanto el job) falla, deteniendo
+      # el proceso antes de pasar a la siguiente temporada/etapa. Corre
+      # SIEMPRE que la ingesta haya terminado (aunque haya tenido errores
+      # aislados por juego), nunca si el paso anterior ni siquiera corrio.
+      - name: Validate ingestion
+        if: always()
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -n "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            export JSA_HISTORICAL_DATABASE_URL="$JSA_HISTORICAL_DATABASE_URL_SECRET"
+          fi
+          python -m jsa.historical.cli validate-ingestion --db "$JSA_HISTORICAL_DATABASE_URL" --season ${{ inputs.season }}
+
       # Nombre con la temporada incluida a proposito: sin esto, correr dos
       # temporadas distintas pisaria el mismo artifact -- con el año en el
       # nombre, cada corrida deja su propia base separada. if-no-files-found

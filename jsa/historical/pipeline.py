@@ -17,22 +17,39 @@ SI van a su propia base completamente separada
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 import time
 import uuid
 from datetime import date
 
 from jsa import config as production_config
+from jsa.domain.models import SCHEMA_VERSION
 from jsa.engine.orchestrator import evaluate_game
 from jsa.historical import config as historical_config
 from jsa.historical import db as historical_db
 from jsa.historical.ingestion import build_previous_park_index, fetch_season_games
 from jsa.historical.injuries import build_injury_index, fetch_season_transactions, parse_il_events
-from jsa.historical.point_in_time_provider import HistoricalStatsProvider, MLBStatsAPIProvider
+from jsa.historical.point_in_time_provider import PROVIDER_VERSION, HistoricalStatsProvider, MLBStatsAPIProvider
 from jsa.historical.snapshot_reconstruction import reconstruct_snapshot
 from jsa.registries import db as registries_db
 from jsa.registries.seed import REGISTRY_VERSION, seed_all
 
 logger = logging.getLogger("jsa.historical")
+
+
+def _current_commit_sha() -> str | None:
+    """`GITHUB_SHA` (seteado automaticamente por GitHub Actions) si esta
+    disponible; si no, `git rev-parse HEAD` local -- mismo criterio que
+    `historical/discriminative_audit.py::_current_commit_sha()` (no vale
+    la pena una funcion compartida para 2 usos de 3 lineas cada uno)."""
+    env_sha = os.environ.get("GITHUB_SHA")
+    if env_sha:
+        return env_sha
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return None
 
 
 def run_season_ingestion(
@@ -100,6 +117,10 @@ def run_season_ingestion(
     )
 
     historical_db.start_season_run(historical_engine, run_id, season, games_total=len(games))
+    historical_db.record_ingestion_run_metadata(
+        historical_engine, run_id, season, commit_sha=_current_commit_sha(),
+        schema_version=SCHEMA_VERSION, provider_version=PROVIDER_VERSION, forced_reingestion=force,
+    )
 
     processed, errors = 0, 0
     for game in pending:
