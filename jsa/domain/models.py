@@ -42,6 +42,7 @@ RegistryStatus = Literal["experimental", "active", "deprecated"]
 GateStatus = Literal[
     "under_validation", "validated_70", "validated_below_70", "rejected_insufficient_data"
 ]
+CalibrationRegistryStatus = Literal["under_validation", "validated", "rejected_insufficient_data"]
 InvalidationReason = Literal[
     "unversioned_git_commit",
     "manifest_absent",
@@ -496,6 +497,35 @@ class GateRegistryEntry(BaseModel):
     status: GateStatus = "under_validation"
     validation_seasons: list[int] = Field(default_factory=list)
     manifest_hash: Optional[str] = None
+
+
+class CalibrationRegistryEntry(BaseModel):
+    """Seccion 8.4.1/9.2 -- una curva de calibracion isotonica ajustada +
+    su validacion leave-one-season-out. `status="validated"` es la UNICA
+    condicion que `engine/orchestrator.py` puede usar para pasar
+    `CalibrationInfo.calibration_status` de `"uncalibrated"` a
+    `"calibrated"` -- nunca a mano, siempre puesto por el proceso de fit
+    (`historical/calibration.py`) en base a metricas LOSO reales."""
+
+    calibration_id: str
+    market: str
+    source_field: str
+    method: str
+    x_knots: list[float]
+    y_knots: list[float]
+    x_min: float
+    x_max: float
+    n_games_fitted: int
+    seasons_used: list[int] = Field(default_factory=list)
+    loso_seasons_validated: list[int] = Field(default_factory=list)
+    loso_n_games: int
+    loso_brier: float
+    loso_log_loss: float
+    loso_accuracy: float
+    loso_ece: float
+    loso_mce: float
+    status: CalibrationRegistryStatus = "under_validation"
+    date: str
 
 
 class ExperimentConfig(BaseModel):
