@@ -47,6 +47,37 @@ def test_season_ingestion_processes_all_games(isolated_dbs):
     assert result["errors"] == 0
 
 
+def test_season_ingestion_records_run_metadata(isolated_dbs):
+    """Cada corrida debe quedar versionada (schema/proveedor/commit) en
+    historical_ingestion_run_metadata -- para poder comparar "antes vs
+    despues" de un cambio como Trend sin ambiguedad sobre que version
+    produjo cada temporada."""
+    from jsa.domain.models import SCHEMA_VERSION
+    from jsa.historical.point_in_time_provider import PROVIDER_VERSION
+
+    hist_url, prod_url = isolated_dbs
+    with patch("jsa.historical.pipeline.fetch_season_games", return_value=FAKE_GAMES):
+        result = pipeline.run_season_ingestion(
+            2022, provider=FakeProvider(), historical_database_url=hist_url, registries_database_url=prod_url, force=True,
+        )
+
+    engine = historical_db.get_engine(hist_url)
+    with engine.connect() as conn:
+        from sqlalchemy import select
+
+        rows = conn.execute(
+            select(historical_db.historical_ingestion_run_metadata)
+            .where(historical_db.historical_ingestion_run_metadata.c.run_id == result["run_id"])
+        ).mappings().all()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["schema_version"] == SCHEMA_VERSION
+    assert row["provider_version"] == PROVIDER_VERSION
+    assert row["forced_reingestion"] == 1
+    assert row["season"] == 2022
+
+
 def test_season_ingestion_is_resumable(isolated_dbs):
     hist_url, prod_url = isolated_dbs
     with patch("jsa.historical.pipeline.fetch_season_games", return_value=FAKE_GAMES):

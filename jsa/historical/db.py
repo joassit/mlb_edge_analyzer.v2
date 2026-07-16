@@ -77,6 +77,24 @@ historical_season_run = Table(
     Column("completed_at", DateTime, nullable=True),
 )
 
+# Tabla NUEVA (nunca ALTER TABLE sobre una tabla ya existente en el
+# historico real -- create_all() no agrega columnas a una tabla que ya
+# existe, asi que versionar la corrida vive en una tabla propia en vez de
+# columnas nuevas en historical_season_run) -- que version de codigo/
+# schema/proveedor produjo cada corrida de ingesta, para poder comparar
+# "antes vs despues" de un cambio como el de Trend sin ambiguedad.
+historical_ingestion_run_metadata = Table(
+    "historical_ingestion_run_metadata", metadata,
+    Column("row_id", Integer, primary_key=True, autoincrement=True),
+    Column("recorded_at", DateTime, nullable=False),
+    Column("run_id", String, nullable=False),
+    Column("season", Integer, nullable=False),
+    Column("commit_sha", String, nullable=True),
+    Column("schema_version", String, nullable=False),
+    Column("provider_version", String, nullable=False),
+    Column("forced_reingestion", Integer, nullable=False, default=0),
+)
+
 
 def get_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)
@@ -152,6 +170,21 @@ def finish_season_run(engine: Engine, run_id: str, *, games_processed: int, game
             historical_season_run.update()
             .where(historical_season_run.c.run_id == run_id)
             .values(games_processed=games_processed, games_errors=games_errors, status=status, completed_at=datetime.now(timezone.utc))
+        )
+
+
+def record_ingestion_run_metadata(
+    engine: Engine, run_id: str, season: int, *, commit_sha: str | None, schema_version: str, provider_version: str, forced_reingestion: bool,
+) -> None:
+    """Un insert append-only por corrida -- nunca actualizado despues, para
+    poder comparar exactamente que version de codigo/schema/proveedor
+    produjo cada temporada re-ingerida."""
+    with engine.begin() as conn:
+        conn.execute(
+            historical_ingestion_run_metadata.insert().values(
+                recorded_at=datetime.now(timezone.utc), run_id=run_id, season=season, commit_sha=commit_sha,
+                schema_version=schema_version, provider_version=provider_version, forced_reingestion=int(forced_reingestion),
+            )
         )
 
 

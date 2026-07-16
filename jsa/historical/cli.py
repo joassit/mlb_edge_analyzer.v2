@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from dataclasses import asdict
 from datetime import date
 
@@ -17,6 +18,7 @@ from jsa import config as production_config
 from jsa.historical.calibration import fit_and_validate
 from jsa.historical.config import SUPPORTED_SEASONS
 from jsa.historical.discriminative_audit import run_full_audit
+from jsa.historical.ingestion_validation import validate_season_ingestion
 from jsa.historical.resolution_audit import run_full_resolution_audit
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
@@ -53,6 +55,14 @@ def main() -> None:
         "--force", action="store_true",
         help="Borra snapshot/report/season_run existentes de la temporada antes de ingerir, forzando un reproceso completo con la logica actual (usar para re-ingestas tras un cambio de reconstruct_snapshot()/evaluate_game(), no para una ingesta inicial)",
     )
+
+    validate_ingestion_parser = subparsers.add_parser(
+        "validate-ingestion",
+        help="Validaciones estructurales post-ingesta (cobertura de snapshots, cobertura de campos nuevos, consistencia de fechas) -- corre despues de cada temporada re-ingerida, antes de pasar a la siguiente etapa",
+    )
+    validate_ingestion_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    validate_ingestion_parser.add_argument("--season", type=int, required=True, help="Temporada a validar")
+    validate_ingestion_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     merge_parser = subparsers.add_parser("merge", help="Fusiona N bases historicas separadas en una sola")
     merge_parser.add_argument("--source", action="append", required=True, dest="sources", help="URL SQLAlchemy de una base fuente (repetible, una por temporada)")
@@ -107,6 +117,21 @@ def main() -> None:
         setup_logging(args.year)
         summary = run_season_ingestion(args.year, force=args.force)
         print(summary)
+
+    elif args.command == "validate-ingestion":
+        setup_plain_logging()
+        result = validate_season_ingestion(args.db, args.season)
+        logger.info(
+            "validate-ingestion(%s) completo -- status=%s n_snapshots=%s issues=%s",
+            args.season, result["status"], result["n_snapshots"], result["issues"],
+        )
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+        if result["status"] == "failed":
+            sys.exit(1)
 
     elif args.command == "merge":
         setup_plain_logging()

@@ -29,6 +29,16 @@ from jsa.historical.config import INGESTION_REQUEST_TIMEOUT, MLB_API_BASE
 
 logger = logging.getLogger("jsa.historical")
 
+# Version explicita de ESTE proveedor -- nunca versionado antes de la
+# entrega de Trend (PR #25); 1.0.0 = metodos punto-en-el-tiempo
+# originales (ERA/OPS/fielding%/bullpen/clima/lesiones, acumulado de
+# temporada); 1.1.0 = agrega team_ops_rolling_as_of()/
+# team_era_rolling_as_of() (ventana movil 7/14 dias, candidatos de
+# Trend). Se persiste en `historical_ingestion_run_metadata` (ver
+# `historical/db.py`) para saber, mirando una temporada ya re-ingerida,
+# exactamente que version del proveedor la produjo.
+PROVIDER_VERSION = "1.1.0"
+
 OPEN_METEO_ARCHIVE_BASE = "https://archive-api.open-meteo.com/v1/archive"
 
 # Ventana de climatologia -- mismo criterio y mismos numeros que
