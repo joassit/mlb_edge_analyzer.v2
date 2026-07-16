@@ -111,6 +111,22 @@ class HistoricalStatsProvider:
     def league_averages_as_of(self, as_of_date: str, season: int) -> dict:
         raise NotImplementedError
 
+    def team_ops_rolling_as_of(self, team_id: int, as_of_date: str, days: int) -> float | None:
+        """OPS de equipo en los `days` dias previos a `as_of_date` (nunca
+        incluye el propio dia de corte) -- mismo patron point-in-time que
+        `team_ops_as_of()`, con ventana movil en vez de acumulado de
+        temporada. Candidato de forma reciente para el pilar Trend (bajo
+        evaluacion LOSO, ver ROADMAP -- todavia NO wireado en `trend.py`).
+        `None` si no hay datos suficientes en la ventana."""
+        raise NotImplementedError
+
+    def team_era_rolling_as_of(self, team_id: int, as_of_date: str, days: int) -> float | None:
+        """ERA de equipo (pitching agregado del equipo, no solo abridores)
+        en los `days` dias previos a `as_of_date` -- mismo proposito que
+        `team_ops_rolling_as_of()`, candidato de forma reciente para
+        Trend. `None` si no hay datos suficientes en la ventana."""
+        raise NotImplementedError
+
     def hitter_recent_pa_as_of(self, player_id: int, as_of_date: str, days: int = 30) -> int | None:
         """PA de un bateador en los `days` dias previos a `as_of_date` --
         alimenta el criterio de "lesion clave" (Seccion team_quality,
@@ -329,6 +345,35 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         result["wind_speed"] = (sum(winds) / len(winds)) if winds else None
         self._weather_cache[cache_key] = dict(result)
         return result
+
+    def team_ops_rolling_as_of(self, team_id, as_of_date, days):
+        start = (date.fromisoformat(as_of_date) - timedelta(days=days)).strftime("%Y-%m-%d")
+        try:
+            params = {"stats": "byDateRange", "group": "hitting", "startDate": start, "endDate": self._end_date(as_of_date)}
+            resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=INGESTION_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            splits = resp.json()["stats"][0]["splits"]
+            if not splits:
+                return None
+            ops = splits[0]["stat"].get("ops")
+            return float(ops) if ops is not None else None
+        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+            logger.debug("OPS rolling (%sd) as-of fallo para equipo %s @ %s: %s", days, team_id, as_of_date, e)
+            return None
+
+    def team_era_rolling_as_of(self, team_id, as_of_date, days):
+        start = (date.fromisoformat(as_of_date) - timedelta(days=days)).strftime("%Y-%m-%d")
+        try:
+            params = {"stats": "byDateRange", "group": "pitching", "startDate": start, "endDate": self._end_date(as_of_date)}
+            resp = session.get(f"{MLB_API_BASE}/teams/{team_id}/stats", params=params, timeout=INGESTION_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            splits = resp.json()["stats"][0]["splits"]
+            if not splits:
+                return None
+            return _parse_era(splits[0]["stat"].get("era"))
+        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+            logger.debug("ERA rolling (%sd) as-of fallo para equipo %s @ %s: %s", days, team_id, as_of_date, e)
+            return None
 
     def hitter_recent_pa_as_of(self, player_id, as_of_date, days=30):
         start = (date.fromisoformat(as_of_date) - timedelta(days=days)).strftime("%Y-%m-%d")

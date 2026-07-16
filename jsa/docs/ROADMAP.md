@@ -750,6 +750,98 @@ limitaciones. Verificado contra el codigo, no de memoria:
   con peras).
 - **(4) ya se cumplia** -- ver seccion anterior.
 
+## Resultado real de `jsa_historical_resolution_audit.yml` (5 temporadas, 13,099 juegos)
+
+Sweep de discretizacion (starter+bullpen+offense) -- ninguna alternativa
+mejora la actual (`-2..2`), y las dos versiones continuas empeoran de
+forma estadisticamente significativa:
+
+| Config | LOSO Brier | Δ vs. actual | Significativo |
+|---|---|---|---|
+| A (actual, -2..2) | 0.24610 | -- | -- |
+| B (-3..3) | 0.24617 | +0.0000752 | No |
+| C (-4..4) | 0.24613 | +0.0000345 | No |
+| D (percentiles) | 0.24630 | +0.000206 | No |
+| E (z-score continuo) | 0.24716 | +0.001062 | **Si, peor** |
+| F (diff crudo continuo) | 0.24746 | +0.001356 | **Si, peor** |
+
+**Conclusion**: la discretizacion actual NO destruye informacion -- si
+acaso, actua como regularizador (mas granularidad o continuidad empeora).
+
+Team Quality: Elo y Pythagorean Expectation tienen mejor AUC individual
+standalone (0.559 ambos) que team_quality actual (0.532), pero
+SUSTITUIR team_quality por cualquiera de los dos no mejora el Evidence
+Score completo -- Pythagorean empeora de forma significativa
+(`delta_brier=+0.000574`, IC 0.000113 a 0.001078), Elo no cambia de
+forma distinguible del ruido (`delta_brier=+0.000301`, IC cruza cero).
+Correlacion moderada preexistente entre team_quality y ambas
+alternativas (0.27 con Elo, 0.21 con Pythagorean) sugiere que
+team_quality ya captura parcialmente la misma dimension -- sustituirlo
+reorganiza la señal, no la aumenta.
+
+**Ninguna de las dos hipotesis de esta segunda generacion (discretizacion
+subotima, Team Quality reemplazable) sobrevivio a la evidencia real.**
+El techo de discriminacion no esta en como se combinan/discretizan las
+señales existentes -- sigue apuntando a que falta señal nueva (Trend/
+Historical reales, o pilares completamente nuevos).
+
+## Tercera generacion: candidatos de forma reciente para Trend (schema 3.3 -> 3.4)
+
+Tras el resultado de arriba, y siguiendo el roadmap estrategico del
+usuario ("la etapa de ingenieria del modelo esta completa -- la que
+sigue es ingenieria de la informacion"), el primer paso concreto es
+implementar Trend de verdad (hoy un stub, `advantage=0` en el 100% de
+los juegos). El pedido original listaba 7 candidatos (incluyendo wRC+/
+xFIP, de FanGraphs) -- se acoto a 4 para la primera iteracion, todos
+calculables con el mismo patron `byDateRange` que ya usa el resto del
+proveedor (sin infraestructura nueva de fetching, sin decidir todavia
+sobre FanGraphs/Statcast/Retrosheet -- eso queda para una Fase 3
+separada si estos 4 no alcanzan):
+
+- OPS de equipo, ventana movil 7 dias
+- OPS de equipo, ventana movil 14 dias
+- ERA de equipo (pitching agregado, no solo abridores), ventana movil 7 dias
+- ERA de equipo, ventana movil 14 dias
+
+**Esta entrega SOLO agrega la infraestructura de recoleccion -- `trend.py`
+sigue siendo un stub, sin cambios.** Cumpliendo la instruccion explicita
+del usuario ("cada candidato debera competir bajo LOSO, nunca asumir que
+uno es mejor sin evidencia"): no tiene sentido comprometerse a una
+formula todavia, cuando ninguno de los 4 candidatos tiene datos reales
+con los que compararse. La secuencia correcta es: (1) esta entrega
+recolecta los 4 candidatos en cada snapshot re-ingerido; (2) re-ingesta
+de las 5 temporadas (horas de GitHub Actions, requiere confirmacion
+explicita del usuario antes de disparar, igual que siempre); (3) un
+modulo de analisis nuevo (mismo patron que `discriminative_audit.py`/
+`resolution_audit.py`) mide AUC/MI/KS/PSI individual de cada candidato Y
+el LOSO resultante de activarlo en `trend.py` con parte del 5% de peso
+hoy desperdiciado; (4) solo el/los candidato(s) que mejoren LOSO Brier/
+LogLoss de forma significativa se wirean en `trend.py` (PR separado,
+con su propio bump de `pillar_contract_version`).
+
+**Cambios**:
+- `domain/models.py`: `SCHEMA_VERSION` 3.3 -> 3.4 (`schema-3.3-to-3.4`,
+  additivo). 8 campos nuevos: `home/away_team_ops_rolling_7d`,
+  `home/away_team_ops_rolling_14d`, `home/away_team_era_rolling_7d`,
+  `home/away_team_era_rolling_14d`.
+- `historical/point_in_time_provider.py::team_ops_rolling_as_of()` /
+  `team_era_rolling_as_of()` -- mismo patron `byDateRange` que
+  `team_ops_as_of()`/`hitter_recent_pa_as_of()`, con `startDate = as_of_date - days`
+  en vez de acumulado de temporada. `_parse_era()` ya protege el placeholder
+  `"-.--"` de la API, reusado sin cambios.
+- `historical/snapshot_reconstruction.py` -- 8 llamadas nuevas al
+  provider (2 metricas x 2 ventanas x 2 equipos), pasadas a
+  `build_game_snapshot()`.
+- `registries/seed.py::_seed_schema_migration()` -- entrada
+  `schema-3.3-to-3.4`.
+
+10 tests nuevos (`test_rolling_stats_provider.py`: verifica ventana de
+fecha exacta contra la API real mockeada, nunca incluye el dia de corte;
+`test_historical_point_in_time.py`: wiring de los 8 campos nuevos en el
+snapshot con `FakeProvider`). **Sin re-ingesta todavia** -- pendiente de
+review/merge de este PR y de la confirmacion explicita del usuario antes
+de disparar `jsa_historical_ingest.yml --force` sobre las 5 temporadas.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

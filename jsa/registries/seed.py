@@ -203,6 +203,20 @@ def _seed_schema_migration(engine: Engine) -> None:
             date=TODAY, backward_read_compatible=True,
         )
 
+    if "schema-3.3-to-3.4" not in existing:
+        db.append(
+            engine, db.schema_migration_registry,
+            migration_id="schema-3.3-to-3.4", from_version="3.3", to_version="3.4", change_type="additive",
+            migration_function="identity -- campos nuevos son Optional, snapshots 3.3 los leen como None",
+            affected_fields=[
+                "home_team_ops_rolling_7d", "away_team_ops_rolling_7d",
+                "home_team_ops_rolling_14d", "away_team_ops_rolling_14d",
+                "home_team_era_rolling_7d", "away_team_era_rolling_7d",
+                "home_team_era_rolling_14d", "away_team_era_rolling_14d",
+            ],
+            date=TODAY, backward_read_compatible=True,
+        )
+
 
 def _seed_gates(engine: Engine) -> None:
     existing = db.latest_by_id(engine, db.gate_registry, "gate_id")

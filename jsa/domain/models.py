@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jsa.domain.hashing import hash_model_excluding
 
-SCHEMA_VERSION = "3.3"
+SCHEMA_VERSION = "3.4"
 
 PillarName = Literal[
     "starter",
@@ -154,6 +154,25 @@ class GameSnapshot(BaseModel):
     # encoger hacia el promedio de liga por muestra chica (ver ROADMAP).
     home_bullpen_ip_sample: Optional[float] = None
     away_bullpen_ip_sample: Optional[float] = None
+
+    # --- Aditivo 3.3 -> 3.4 (Seccion 3.3, ver Schema Migration Registry en
+    # registries/seed.py, migracion "schema-3.3-to-3.4") ---
+    # OPS/ERA de equipo en ventana movil (7/14 dias previos, point-in-time,
+    # mismo patron `byDateRange` que el resto del proveedor) -- candidatos
+    # de "forma reciente" para el pilar Trend (Seccion trend, hoy un stub
+    # que devuelve advantage=0 en todos los juegos). Deliberadamente
+    # NINGUNO de estos 4 campos esta wireado todavia en `trend.py`: se
+    # recolectan en esta re-ingesta para poder comparar los 4 candidatos
+    # bajo LOSO real antes de comprometerse a una formula (ver ROADMAP.md
+    # -- "nunca asumir que un candidato es mejor sin evidencia").
+    home_team_ops_rolling_7d: Optional[float] = None
+    away_team_ops_rolling_7d: Optional[float] = None
+    home_team_ops_rolling_14d: Optional[float] = None
+    away_team_ops_rolling_14d: Optional[float] = None
+    home_team_era_rolling_7d: Optional[float] = None
+    away_team_era_rolling_7d: Optional[float] = None
+    home_team_era_rolling_14d: Optional[float] = None
+    away_team_era_rolling_14d: Optional[float] = None
 
     schema_version: str = SCHEMA_VERSION
 
