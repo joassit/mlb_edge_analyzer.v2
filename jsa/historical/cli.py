@@ -17,6 +17,7 @@ from jsa import config as production_config
 from jsa.historical.calibration import fit_and_validate
 from jsa.historical.config import SUPPORTED_SEASONS
 from jsa.historical.discriminative_audit import run_full_audit
+from jsa.historical.resolution_audit import run_full_resolution_audit
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
@@ -89,6 +90,14 @@ def main() -> None:
     audit_parser.add_argument("--nested-optimizer-maxiter", type=int, default=10, help="Iteraciones de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4 -- la estimacion sin sesgo de seleccion (default: 10)")
     audit_parser.add_argument("--nested-optimizer-popsize", type=int, default=6, help="Tamano de poblacion de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4 (default: 6)")
     audit_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    resolution_parser = subparsers.add_parser(
+        "resolution-audit",
+        help="Sensibilidad de discretizacion (-2..2 vs mas niveles vs percentiles vs z-score vs continuo) para starter/bullpen/offense, y alternativas offline a team_quality (Elo, Pythagorean Expectation). Solo lectura, nunca golpea la API de MLB.",
+    )
+    resolution_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    resolution_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    resolution_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -175,6 +184,16 @@ def main() -> None:
             "discriminative-audit completo -- n_games=%s baseline_brier=%s baseline_ece=%s",
             result.get("n_games"), result.get("baseline", {}).get("loso_brier"), result.get("baseline", {}).get("loso_ece"),
         )
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "resolution-audit":
+        setup_plain_logging()
+        result = run_full_resolution_audit(sorted(args.seasons), args.db)
+        logger.info("resolution-audit completo -- n_games=%s", result.get("n_games"))
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:
