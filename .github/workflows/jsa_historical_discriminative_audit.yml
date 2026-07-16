@@ -1,0 +1,89 @@
+name: jsa-historical-discriminative-audit
+
+# One-off, solo lectura: audita por que el Evidence Score calibra bien
+# (ECE bajo) pero discrimina poco (Brier cerca del piso de p=0.5
+# constante) -- pilares individuales, correlaciones, ablacion LOSO,
+# optimizacion de BASE_PILLAR_WEIGHTS, distribucion, separabilidad,
+# curvas de desempeno y sensibilidad de shrinkage. No escribe en
+# calibration_registry ni en ninguna otra tabla -- solo lee
+# JSA_HISTORICAL_DATABASE_URL (schema-3.3, ya ingerido) y devuelve el
+# resultado como JSON. La Fase 4 (optimizacion de pesos via
+# differential_evolution) es la parte mas lenta -- timeout generoso.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a incluir, separadas por coma (ej. 2022,2023,2024,2025,2026)'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+      optimizer_maxiter:
+        description: 'Iteraciones de differential_evolution para el ajuste de produccion de la Fase 4'
+        required: false
+        type: string
+        default: '20'
+      optimizer_popsize:
+        description: 'Tamano de poblacion de differential_evolution para el ajuste de produccion de la Fase 4'
+        required: false
+        type: string
+        default: '10'
+      nested_optimizer_maxiter:
+        description: 'Iteraciones de differential_evolution POR FOLD EXTERNO del nested LOSO (estimacion sin sesgo de seleccion) de la Fase 4'
+        required: false
+        type: string
+        default: '10'
+      nested_optimizer_popsize:
+        description: 'Tamano de poblacion de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4'
+        required: false
+        type: string
+        default: '6'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run discriminative-audit
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          python -m jsa.historical.cli discriminative-audit \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            --optimizer-maxiter "${{ inputs.optimizer_maxiter }}" \
+            --optimizer-popsize "${{ inputs.optimizer_popsize }}" \
+            --nested-optimizer-maxiter "${{ inputs.nested_optimizer_maxiter }}" \
+            --nested-optimizer-popsize "${{ inputs.nested_optimizer_popsize }}" \
+            --out jsa_discriminative_audit_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-historical-discriminative-audit-${{ github.run_id }}
+          path: jsa_discriminative_audit_result.json
+          if-no-files-found: warn
+          retention-days: 30

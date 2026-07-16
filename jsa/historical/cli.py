@@ -16,6 +16,7 @@ from datetime import date
 from jsa import config as production_config
 from jsa.historical.calibration import fit_and_validate
 from jsa.historical.config import SUPPORTED_SEASONS
+from jsa.historical.discriminative_audit import run_full_audit
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
@@ -76,6 +77,18 @@ def main() -> None:
     calibrate_parser.add_argument("--market", default="moneyline_home", help="Market al que aplica esta curva (default: moneyline_home)")
     calibrate_parser.add_argument("--calibration-id", default="calibration-evidence_score_raw-v1", help="Identificador de esta curva en calibration_registry")
     calibrate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    audit_parser = subparsers.add_parser(
+        "discriminative-audit",
+        help="Audita por que el Evidence Score calibra bien pero discrimina poco -- pilares individuales, correlaciones, ablacion LOSO, optimizacion de pesos, distribucion, separabilidad, curvas y sensibilidad de shrinkage. Solo lectura -- no modifica pillars/, engine/, calibration_registry ni el pipeline.",
+    )
+    audit_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    audit_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    audit_parser.add_argument("--optimizer-maxiter", type=int, default=20, help="Iteraciones de differential_evolution para el ajuste de produccion de la Fase 4 (default: 20)")
+    audit_parser.add_argument("--optimizer-popsize", type=int, default=10, help="Tamano de poblacion de differential_evolution para el ajuste de produccion de la Fase 4 (default: 10)")
+    audit_parser.add_argument("--nested-optimizer-maxiter", type=int, default=10, help="Iteraciones de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4 -- la estimacion sin sesgo de seleccion (default: 10)")
+    audit_parser.add_argument("--nested-optimizer-popsize", type=int, default=6, help="Tamano de poblacion de differential_evolution POR FOLD EXTERNO del nested LOSO de la Fase 4 (default: 6)")
+    audit_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -145,6 +158,23 @@ def main() -> None:
             args.calibration_id, result["status"], result["loso_seasons_validated"], result["loso_brier"], result["loso_ece"],
         )
 
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "discriminative-audit":
+        setup_plain_logging()
+        result = run_full_audit(
+            sorted(args.seasons), args.db,
+            optimizer_maxiter=args.optimizer_maxiter, optimizer_popsize=args.optimizer_popsize,
+            nested_optimizer_maxiter=args.nested_optimizer_maxiter, nested_optimizer_popsize=args.nested_optimizer_popsize,
+        )
+        logger.info(
+            "discriminative-audit completo -- n_games=%s baseline_brier=%s baseline_ece=%s",
+            result.get("n_games"), result.get("baseline", {}).get("loso_brier"), result.get("baseline", {}).get("loso_ece"),
+        )
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:

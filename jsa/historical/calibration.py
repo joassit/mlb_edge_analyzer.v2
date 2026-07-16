@@ -63,6 +63,53 @@ def _fit_isotonic(pairs: list[tuple[float, int]]) -> IsotonicRegression:
     return model
 
 
+def loso_fit_and_score(
+    pairs_by_season: dict[int, list[tuple[float, int]]], min_games_per_season: int = MIN_GAMES_PER_SEASON
+) -> dict:
+    """Nucleo generico de leave-one-season-out: dado CUALQUIER score
+    monotonamente relacionado con el resultado (no necesariamente
+    `evidence_score_raw`), ajusta isotonic regression sobre todas las
+    temporadas menos una, evalua fuera de muestra sobre la temporada
+    dejada afuera, y agrega las metricas. Extraido de `fit_and_validate()`
+    para reusarse en `discriminative_audit.py` (ablacion de pilares,
+    optimizacion de pesos, sensibilidad de shrinkage) sin duplicar el
+    loop LOSO ni cambiar su comportamiento aqui."""
+    games_per_season = {s: len(pairs_by_season[s]) for s in pairs_by_season}
+    seasons_with_enough_data = [s for s in pairs_by_season if games_per_season[s] >= min_games_per_season]
+
+    loso_pairs: list[tuple[float, int]] = []
+    loso_seasons_validated: list[int] = []
+    per_season_metrics: dict[int, dict] = {}
+    for held_out in seasons_with_enough_data:
+        training_pairs = [p for s in seasons_with_enough_data if s != held_out for p in pairs_by_season[s]]
+        if not training_pairs:
+            continue
+        model = _fit_isotonic(training_pairs)
+        held_out_pairs = pairs_by_season[held_out]
+        predictions = model.predict([p[0] for p in held_out_pairs])
+        held_out_loso_pairs = [(float(pred), y) for pred, (_, y) in zip(predictions, held_out_pairs)]
+        loso_pairs.extend(held_out_loso_pairs)
+        loso_seasons_validated.append(held_out)
+        per_season_metrics[held_out] = {
+            "n_games": len(held_out_loso_pairs),
+            "brier": brier_score(held_out_loso_pairs),
+            "log_loss": log_loss(held_out_loso_pairs),
+            "accuracy": accuracy(held_out_loso_pairs),
+        }
+
+    return {
+        "loso_pairs": loso_pairs,
+        "loso_seasons_validated": loso_seasons_validated,
+        "per_season_metrics": per_season_metrics,
+        "loso_n_games": len(loso_pairs),
+        "loso_brier": brier_score(loso_pairs),
+        "loso_log_loss": log_loss(loso_pairs),
+        "loso_accuracy": accuracy(loso_pairs),
+        "loso_ece": ece(loso_pairs),
+        "loso_mce": mce(loso_pairs),
+    }
+
+
 def fit_and_validate(seasons: list[int], historical_database_url: str) -> dict:
     """Punto de entrada principal -- devuelve un dict listo para persistir
     como `CalibrationRegistryEntry`. Incluye tanto la curva de PRODUCCION
@@ -78,17 +125,8 @@ def fit_and_validate(seasons: list[int], historical_database_url: str) -> dict:
     games_per_season = {s: len(pairs_by_season[s]) for s in seasons}
     seasons_with_enough_data = [s for s in seasons if games_per_season[s] >= MIN_GAMES_PER_SEASON]
 
-    loso_pairs: list[tuple[float, int]] = []
-    loso_seasons_validated: list[int] = []
-    for held_out in seasons_with_enough_data:
-        training_pairs = [p for s in seasons_with_enough_data if s != held_out for p in pairs_by_season[s]]
-        if not training_pairs:
-            continue
-        model = _fit_isotonic(training_pairs)
-        held_out_pairs = pairs_by_season[held_out]
-        predictions = model.predict([p[0] for p in held_out_pairs])
-        loso_pairs.extend((float(pred), y) for pred, (_, y) in zip(predictions, held_out_pairs))
-        loso_seasons_validated.append(held_out)
+    loso_result = loso_fit_and_score(pairs_by_season)
+    loso_seasons_validated = loso_result["loso_seasons_validated"]
 
     # Curva final de PRODUCCION: ajustada sobre TODA la muestra disponible
     # de las temporadas pedidas (no solo las que cuentan para walk-forward
@@ -114,17 +152,17 @@ def fit_and_validate(seasons: list[int], historical_database_url: str) -> dict:
         "x_knots": [float(x) for x in production_model.X_thresholds_] if production_model is not None else [],
         "y_knots": [float(y) for y in production_model.y_thresholds_] if production_model is not None else [],
         "loso_seasons_validated": loso_seasons_validated,
-        "loso_n_games": len(loso_pairs),
-        "loso_brier": brier_score(loso_pairs),
-        "loso_log_loss": log_loss(loso_pairs),
-        "loso_accuracy": accuracy(loso_pairs),
-        "loso_ece": ece(loso_pairs),
-        "loso_mce": mce(loso_pairs),
+        "loso_n_games": loso_result["loso_n_games"],
+        "loso_brier": loso_result["loso_brier"],
+        "loso_log_loss": loso_result["loso_log_loss"],
+        "loso_accuracy": loso_result["loso_accuracy"],
+        "loso_ece": loso_result["loso_ece"],
+        "loso_mce": loso_result["loso_mce"],
         "status": status,
     }
     logger.info(
         "fit_and_validate: %d/%d temporadas pasaron walk-forward (%s) -- status=%s, loso_n=%d, loso_brier=%s, loso_ece=%s",
-        len(loso_seasons_validated), len(seasons), loso_seasons_validated, status, len(loso_pairs),
+        len(loso_seasons_validated), len(seasons), loso_seasons_validated, status, result["loso_n_games"],
         result["loso_brier"], result["loso_ece"],
     )
     return result

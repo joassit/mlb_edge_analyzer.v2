@@ -517,6 +517,90 @@ mezclar con la construccion del ajuste en si.
 end-to-end de que una relacion perfectamente monotona sin ruido produce
 un `loso_brier < 0.05`).
 
+**Resultado real** (`jsa_historical_calibrate.yml` corrido contra las 5
+temporadas en Postgres, 13,099/13,116 juegos con resultado valido):
+`status="validated"` (5/5 temporadas pasaron walk-forward), `loso_brier=0.2452`,
+`loso_log_loss=0.6835`, `loso_accuracy=55.38%`, `loso_ece=0.00298`,
+`loso_mce=0.1382`. La curva esta **muy bien calibrada** (ECE casi cero)
+pero **discrimina poco**: el Brier/log loss quedan apenas por debajo del
+piso de un modelo sin skill (p=0.5 constante: Brier=0.25, log loss=0.693),
+y el accuracy apenas supera la ventaja de local pura de las Mayores
+(~54%). Motivo de la seccion siguiente.
+
+## Auditoria de poder discriminativo del Evidence Score (`historical/discriminative_audit.py`)
+
+Seguimiento directo al resultado real de arriba -- ¿por que el Evidence
+Score calibra tan bien pero discrimina tan poco? Modulo de solo lectura:
+no modifica `pillars/`, `engine/`, `calibration_registry` ni el pipeline,
+solo lee `historical_report`/`historical_snapshot` ya ingeridos. Toda
+comparacion de escenarios (ablacion, pesos alternativos, shrinkage
+alternativo) reusa `calibration.py::loso_fit_and_score()` (extraido de
+`fit_and_validate()` sin cambiar su comportamiento) -- nunca un split
+distinto que pudiera inflar una mejora artificialmente, y cada delta se
+acompana de un intervalo de confianza (bootstrap pareado 90%, 500
+remuestreos sobre las predicciones LOSO ya calculadas) para no aceptar
+una mejora que cruce cero.
+
+**Cambios**:
+- `historical/calibration.py::loso_fit_and_score()` (nuevo, extraido de
+  `fit_and_validate()` -- mismo comportamiento, ahora reusable).
+- `historical/discriminative_audit.py` (nuevo) -- 8 fases: (1) AUC/KS/MI/
+  correlacion-con-resultado/PSI-entre-temporadas/permutation-importance
+  por pilar; (2) matrices de correlacion Pearson/Spearman/MI entre los 7
+  pilares; (3) ablacion LOSO quitando un pilar a la vez (pesos de los 6
+  restantes renormalizados a sumar 1), clasificado
+  imprescindible/util/neutro/perjudicial segun si el IC del delta de
+  Brier cruza cero; (4) optimizacion de `BASE_PILLAR_WEIGHTS` con
+  `scipy.optimize.differential_evolution` (parametrizado via softmax --
+  `>=0` y suma`=1` automaticos), objetivo `loso_log_loss`; (5) distribucion
+  de `evidence_score_raw` (percentiles, skew, kurtosis, histograma); (6)
+  separabilidad ganados-vs-perdidos (KS, Cohen's d, divergencia
+  Jensen-Shannon, overlap); (7) ROC/Precision-Recall/Lift/Gain/reliability
+  diagram binned, TODOS sobre predicciones LOSO out-of-sample (nunca de
+  entrenamiento); (8) sensibilidad de `SHRINKAGE_K_IP` en starter+bullpen
+  (`k=0` sin encoger, `k=20` reducido, `k=60` actual), recalculando el
+  advantage discreto desde los campos crudos de `GameSnapshot` ya
+  persistidos en `historical_snapshot` (sin volver a golpear la API).
+- **Nota de alcance de la Fase 4**: el vector de pesos candidato se aplica
+  de forma ESTATICA e identica a todos los juegos (el mismo rol que
+  cumple `BASE_PILLAR_WEIGHTS`) -- no vuelve a correr el Rule/Weight
+  Engine por juego (Seccion 6), que aplicaria deltas de contexto por
+  encima de esa base. Reconstruir eso exigiria re-evaluar el Context
+  Detector + Rule Engine para cada juego historico, fuera del alcance de
+  esta auditoria (que solo lee reportes ya persistidos).
+- **Fix de fuga de informacion en la Fase 4** (encontrado en la revision
+  del usuario antes del merge, no en la construccion original): la
+  primera version de `optimize_weights()` elegia los pesos minimizando el
+  `loso_log_loss` agregado sobre las 5 temporadas, y reportaba ese MISMO
+  numero como "mejora" -- sesgo de seleccion (analogo a reportar el score
+  de un k-fold CV usado para elegir hiperparametros como si fuera
+  generalizacion; cada prediccion individual es out-of-fold, pero el
+  vector ganador fue elegido mirando el desempeno en las 5 temporadas, sin
+  dejar ninguna realmente no vista para validar esa eleccion). Se agrego
+  `optimize_weights_nested()`: LOSO anidado -- por cada temporada externa,
+  los pesos se optimizan usando SOLO las 4 restantes (su propio LOSO
+  interno como objetivo de `differential_evolution`) y se evaluan en la
+  externa con una curva isotonica ajustada UNICAMENTE sobre esas 4, nunca
+  vista durante esa busqueda de pesos. `optimize_weights()` (renombrada
+  internamente su intencion, no su firma) sigue existiendo para producir
+  un unico vector desplegable ajustado con toda la evidencia, pero su
+  propio numero de mejora ahora viene marcado con un `"warning"` explicito
+  en el resultado -- la pregunta "¿la mejora es real?" la responde
+  `optimize_weights_nested()`, nunca la version de produccion.
+- `historical/cli.py::discriminative-audit` + `.github/workflows/jsa_historical_discriminative_audit.yml`
+  (timeout de 90 min -- la Fase 4 corre DOS optimizaciones completas,
+  la de produccion y la anidada, la mas lenta de las 8 fases).
+- Sin dependencias nuevas: `scipy.optimize.differential_evolution` (ya en
+  requirements) cubre el algoritmo de optimizacion pedido sin agregar
+  Optuna.
+
+13 tests nuevos (`test_discriminative_audit.py`), datos sinteticos con
+relacion real (con ruido) entre pilares y resultado, incluyendo una
+prueba dedicada de que `optimize_weights_nested()` produce un vector de
+pesos propio por cada fold externo (nunca ajustado con la temporada que
+luego evalua). **Sin correr todavia contra Postgres real** -- pendiente
+de review/merge de este PR y un dispatch posterior, igual que `calibrate`.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
