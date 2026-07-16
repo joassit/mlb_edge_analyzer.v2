@@ -1,0 +1,82 @@
+name: jsa-historical-calibrate
+
+# One-off: ajusta y valida (leave-one-season-out) una curva de
+# calibracion isotonica de evidence_score_raw sobre las temporadas ya
+# ingeridas en JSA_HISTORICAL_DATABASE_URL, y la persiste en
+# calibration_registry (JSA_DATABASE_URL) -- Seccion 8.4.1/9.2. Mismo
+# patron shell-conditional que jsa_historical_ingest.yml para los
+# secrets (ver ese workflow para el detalle real del bug que esto
+# evita). Solo tiene sentido una vez que las temporadas pedidas ya estan
+# ingeridas -- no dispara ninguna ingesta por si mismo.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a incluir, separadas por coma (ej. 2022,2023,2024,2025,2026)'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+      market:
+        description: 'Market al que aplica esta curva'
+        required: false
+        type: string
+        default: 'moneyline_home'
+      calibration_id:
+        description: 'Identificador de esta curva en calibration_registry'
+        required: false
+        type: string
+        default: 'calibration-evidence_score_raw-v1'
+
+permissions:
+  contents: read
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run calibrate
+        env:
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          if [ -z "$JSA_DATABASE_URL_SECRET" ]; then
+            echo "JSA_DATABASE_URL no esta configurado -- calibration_registry vive ahi, no en la base historica." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          python -m jsa.historical.cli calibrate \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            --registries-db "$JSA_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            --market "${{ inputs.market }}" \
+            --calibration-id "${{ inputs.calibration_id }}" \
+            --out jsa_calibration_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-historical-calibrate-${{ github.run_id }}
+          path: jsa_calibration_result.json
+          if-no-files-found: warn
+          retention-days: 30

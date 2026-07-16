@@ -13,12 +13,15 @@ import os
 from dataclasses import asdict
 from datetime import date
 
+from jsa import config as production_config
+from jsa.historical.calibration import fit_and_validate
 from jsa.historical.config import SUPPORTED_SEASONS
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
 from jsa.historical.pipeline import run_season_ingestion
 from jsa.historical.validation import benchmark_season
+from jsa.registries import db as registries_db
 
 logger = logging.getLogger("jsa.historical")
 
@@ -64,6 +67,16 @@ def main() -> None:
     pillar_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a analizar (repetible)")
     pillar_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
+    calibrate_parser = subparsers.add_parser(
+        "calibrate", help="Ajusta y valida (leave-one-season-out) una curva de calibracion isotonica de evidence_score_raw, y la persiste en calibration_registry"
+    )
+    calibrate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida (de donde se leen evidence_score_raw + resultados)")
+    calibrate_parser.add_argument("--registries-db", help="URL SQLAlchemy de la base de registries -- cae a config.DATABASE_URL si no se pasa (igual que run_season_ingestion)")
+    calibrate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    calibrate_parser.add_argument("--market", default="moneyline_home", help="Market al que aplica esta curva (default: moneyline_home)")
+    calibrate_parser.add_argument("--calibration-id", default="calibration-evidence_score_raw-v1", help="Identificador de esta curva en calibration_registry")
+    calibrate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
     args = parser.parse_args()
 
     if args.command == "season":
@@ -104,6 +117,34 @@ def main() -> None:
             report = analyze_season_pillar_contribution(season, args.db)
             result["seasons"][season] = asdict(report)
             logger.info("pillar-contribution(%s) completo -- n_games=%s, most_dominant_pillar=%s", season, report.n_games, report.most_dominant_pillar)
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "calibrate":
+        setup_plain_logging()
+        result = fit_and_validate(sorted(args.seasons), args.db)
+
+        registries_database_url = args.registries_db or production_config.DATABASE_URL
+        engine = registries_db.get_engine(registries_database_url)
+        registries_db.init_registries(engine)
+        registries_db.append(
+            engine, registries_db.calibration_registry,
+            calibration_id=args.calibration_id, market=args.market, source_field="evidence_score_raw",
+            method="isotonic_regression", x_knots=result["x_knots"], y_knots=result["y_knots"],
+            x_min=result["x_min"], x_max=result["x_max"], n_games_fitted=result["n_games_fitted"],
+            seasons_used=result["seasons_used"], loso_seasons_validated=result["loso_seasons_validated"],
+            loso_n_games=result["loso_n_games"], loso_brier=result["loso_brier"], loso_log_loss=result["loso_log_loss"],
+            loso_accuracy=result["loso_accuracy"], loso_ece=result["loso_ece"], loso_mce=result["loso_mce"],
+            status=result["status"], date=date.today().isoformat(),
+        )
+        logger.info(
+            "calibrate completo -- calibration_id=%s status=%s loso_seasons=%s loso_brier=%s loso_ece=%s",
+            args.calibration_id, result["status"], result["loso_seasons_validated"], result["loso_brier"], result["loso_ece"],
+        )
+
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:

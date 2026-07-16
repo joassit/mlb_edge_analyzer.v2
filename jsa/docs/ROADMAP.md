@@ -457,6 +457,66 @@ deja completamente fuera -- es una decision global entre los 7 pilares
 que pertenece a la fase de calibracion formal (Seccion 8.4.1/9.2), no a
 esta revision de shrinkage.
 
+## Calibracion isotonica de `evidence_score_raw` -- ajuste + validacion (Fase 4 parcial, Seccion 8.4.1/9.2)
+
+**Hallazgo critico antes de construir nada**: `CalibrationInfo.raw_probability`
+(lo unico que existia para calibrar) viene de `skellam_win_prob(mu_home,
+mu_away)` en `orchestrator.py` -- el modelo de Projected Runs (Seccion 9),
+un modulo COMPLETAMENTE SEPARADO del Evidence Engine de 7 pilares que
+toda esta serie de arreglos (Context, `team_quality`, shrinkage de
+bullpen/starter) vino mejorando. `evidence_score_raw` (la suma ponderada
+de advantages, Seccion 8.1) nunca se convertia en probabilidad en ningun
+lado. Calibrar el `raw_probability` existente hubiera significado
+calibrar un modelo que nunca usa `team_quality`, Context, ni el fix de
+bullpen.
+
+**Decision**: `raw_probability` pasa a derivarse de `evidence_score_raw`
+(reemplaza al valor Skellam-derivado como fuente de calibracion/decision;
+Skellam/Projected Runs sigue existiendo como modulo de comparacion, igual
+que ya se usa en `historical/validation.py::_legacy_predictions`). Sin
+transformacion logistica intermedia: isotonic regression no necesita que
+su entrada YA sea una probabilidad, solo que este monotonamente
+relacionada con el resultado -- se ajusta
+`IsotonicRegression(evidence_score_raw -> P(home wins))` directo,
+evitando inventar una sigmoide sin calibrar como paso intermedio.
+
+**Esta entrega es SOLO la infraestructura de ajuste + validacion --
+deliberadamente NO wireada todavia a `orchestrator.py`** (ver seccion
+siguiente de "NO construido"). `JSAReport.calibration.calibration_status`
+sigue en `"uncalibrated"` hasta una entrega separada, con su propia
+revision explicita -- pasar el Confidence Gate de "nunca pasa" a
+"puede pasar" es un cambio de comportamiento demasiado grande para
+mezclar con la construccion del ajuste en si.
+
+**Cambios**:
+- `scikit-learn==1.9.0` nuevo en `jsa/requirements.txt` (`IsotonicRegression`;
+  `scipy` ya presente no trae un transformer equivalente con
+  interpolacion/`predict()` listo para usar).
+- `registries/db.py::calibration_registry` (tabla nueva, append-only,
+  mismo patron que `gate_registry`) + `domain/models.py::CalibrationRegistryEntry`
+  -- persiste los knots de la curva de PRODUCCION (`x_knots`/`y_knots`,
+  ajustada sobre TODAS las temporadas pedidas) y las metricas LOSO
+  agregadas (`loso_brier`/`loso_log_loss`/`loso_accuracy`/`loso_ece`/`loso_mce`).
+  `status="validated"` es la UNICA condicion que una entrega futura puede
+  usar para pasar `calibration_status` a `"calibrated"` -- nunca a mano.
+- `historical/calibration.py::fit_and_validate(seasons, db_url)`: leave-
+  one-season-out real -- cada temporada se evalua SOLO con un modelo
+  ajustado sobre las demas (nunca la curva de produccion evaluada contra
+  sus propios datos de entrenamiento, eso seria un numero optimista).
+  `status`: `"validated"` si `>=3` temporadas pasan walk-forward (cada
+  una con `>=50` juegos, Seccion 10.4), `"rejected_insufficient_data"` si
+  ninguna temporada alcanza el minimo, `"under_validation"` en el medio.
+  Reusa `brier_score()`/`log_loss()`/`accuracy()`/`ece()`/`mce()` de
+  `historical/validation.py` -- cero logica de metricas duplicada.
+- `historical/cli.py::calibrate` + `.github/workflows/jsa_historical_calibrate.yml`
+  (mismo patron shell-conditional de secrets que `jsa_historical_ingest.yml`
+  -- lee de `JSA_HISTORICAL_DATABASE_URL`, persiste en `JSA_DATABASE_URL`,
+  donde vive el resto de los registries).
+
+240 tests pasan (8 nuevos, `test_calibration.py`, incluyendo una prueba
+end-to-end de que una relacion perfectamente monotona sin ruido produce
+un `loso_brier < 0.05`).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
@@ -477,13 +537,19 @@ validacion que el propio spec prohibe declarar sin evidencia (Seccion
   temporada real ya haya corrido.
 
 ### Fase 4 — Calibracion y validacion de varianza (Secciones 8.4.1, 9.2)
-- Calibracion isotonica con leave-one-season-out + reliability diagrams,
-  ahora si posible en la practica una vez que `jsa/historical/` ingiera
-  2022-2026 (antes de esta entrega no habia de donde sacar los datos).
-  Mientras no exista, `JSAReport.calibration.calibration_status` se
-  mantiene en `"uncalibrated"` y el Confidence Gate nunca pasa -- por
-  diseno, no por bug (ver `engine/confidence_gate.py`,
-  `engine/decision_engine.py`).
+- **Ajuste + validacion YA CONSTRUIDO** (ver seccion "Calibracion
+  isotonica de `evidence_score_raw`" arriba): `historical/calibration.py`
+  ajusta y valida (leave-one-season-out) una curva isotonica real sobre
+  las 5 temporadas, persistida en `calibration_registry`. **Lo que falta
+  todavia**: wirear `orchestrator.py` para que LEA una entrada
+  `status="validated"` de `calibration_registry` y recien ahi pase
+  `JSAReport.calibration.calibration_status` de `"uncalibrated"` a
+  `"calibrated"` -- deliberadamente diferido a una entrega separada, con
+  su propia revision explicita (el Confidence Gate empieza a poder pasar
+  de verdad, un cambio de comportamiento demasiado grande para mezclar
+  con la construccion del ajuste). Reliability diagrams (graficos, no
+  solo los numeros de ECE/MCE ya calculados) tambien quedan para esa
+  entrega o una posterior.
 - Validacion de desviacion estandar del margen proyectado vs. la real
   (`ProjectedRunsOutput.variance_validated` se mantiene en `False`).
 

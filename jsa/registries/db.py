@@ -138,6 +138,42 @@ model_registry = Table(
     Column("model_card", JSON, nullable=False, default=dict),
 )
 
+# Seccion 8.4.1/9.2 -- una curva de calibracion isotonica ajustada,
+# validada via leave-one-season-out (nunca solo un fit unico sobre todos
+# los datos). `x_knots`/`y_knots` son los breakpoints de la curva final de
+# PRODUCCION (ajustada sobre TODAS las temporadas listadas en
+# `seasons_used`, para desplegar); `loso_*` son las metricas agregadas de
+# validacion out-of-sample (una temporada afuera por vez, nunca la curva
+# de produccion evaluada contra sus propios datos de entrenamiento).
+# `status="validated"` es la UNICA condicion que
+# `engine/orchestrator.py` puede usar para pasar `calibration_status` de
+# "uncalibrated" a "calibrated" -- lo pone el proceso de fit
+# (`historical/calibration.py`), nunca a mano.
+calibration_registry = Table(
+    "calibration_registry", metadata,
+    Column("row_id", Integer, primary_key=True, autoincrement=True),
+    Column("recorded_at", DateTime, nullable=False),
+    Column("calibration_id", String, nullable=False, index=True),
+    Column("market", String, nullable=False),
+    Column("source_field", String, nullable=False),
+    Column("method", String, nullable=False),
+    Column("x_knots", JSON, nullable=False),
+    Column("y_knots", JSON, nullable=False),
+    Column("x_min", Float, nullable=False),
+    Column("x_max", Float, nullable=False),
+    Column("n_games_fitted", Integer, nullable=False),
+    Column("seasons_used", JSON, nullable=False, default=list),
+    Column("loso_seasons_validated", JSON, nullable=False, default=list),
+    Column("loso_n_games", Integer, nullable=False),
+    Column("loso_brier", Float, nullable=False),
+    Column("loso_log_loss", Float, nullable=False),
+    Column("loso_accuracy", Float, nullable=False),
+    Column("loso_ece", Float, nullable=False),
+    Column("loso_mce", Float, nullable=False),
+    Column("status", String, nullable=False, default="under_validation"),
+    Column("date", String, nullable=False),
+)
+
 
 def get_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)

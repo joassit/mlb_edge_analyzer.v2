@@ -4,4 +4,5 @@ psycopg2-binary==2.9.12
 requests==2.33.1
 scipy==1.17.1
 numpy==2.4.6
+scikit-learn==1.9.0
 pytest==9.1.1
