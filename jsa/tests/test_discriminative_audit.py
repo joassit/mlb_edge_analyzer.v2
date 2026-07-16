@@ -150,6 +150,7 @@ def test_optimize_weights_returns_valid_simplex(seeded_records):
     assert sum(optimized.values()) == pytest.approx(1.0, abs=1e-6)
     assert result["current_weights"] == pytest.approx(_BASE_WEIGHTS)
     assert "warning" in result  # marca explicita de sesgo de seleccion -- ver optimize_weights_nested
+    assert result["optimizer_n_function_evaluations"] > 0
 
 
 def test_optimize_weights_nested_has_no_selection_bias_by_construction(seeded_records):
@@ -158,7 +159,9 @@ def test_optimize_weights_nested_has_no_selection_bias_by_construction(seeded_re
     la evita: cada temporada externa produce SU PROPIO vector de pesos
     (optimizado sin verla), y las metricas finales se agregan sobre
     predicciones donde el modelo (pesos + curva) nunca vio esa
-    temporada."""
+    temporada. Tambien verifica que cada fold registra su propio costo
+    (n_function_evaluations, tiempo) -- pedido explicito del usuario para
+    poder detectar folds que convergen distinto a los demas."""
     result = audit.optimize_weights_nested(seeded_records, seed=0, maxiter=3, popsize=4)
     assert result["n_outer_folds"] == 3
     assert set(result["per_season_optimized_weights"]) == {2022, 2023, 2024}
@@ -167,6 +170,8 @@ def test_optimize_weights_nested_has_no_selection_bias_by_construction(seeded_re
         assert set(w) == set(SEVEN_PILLARS)
         assert all(v >= 0 for v in w.values())
         assert sum(w.values()) == pytest.approx(1.0, abs=1e-6)
+        assert entry["optimizer_n_function_evaluations"] > 0
+        assert entry["fold_seconds"] >= 0
     assert result["current_metrics_nested"]["brier"] is not None
     assert result["optimized_metrics_nested"]["brier"] is not None
     assert isinstance(result["generalizes"], bool)
@@ -217,11 +222,27 @@ def test_run_full_audit_end_to_end(hist_url):
 
     assert result["n_games"] == 240
     for key in (
-        "baseline", "phase1_pillar_stats", "phase2_correlations", "phase3_ablation",
+        "run_metadata", "baseline", "phase1_pillar_stats", "phase2_correlations", "phase3_ablation",
         "phase4_weight_optimization", "phase4_weight_optimization_nested", "phase5_distribution",
-        "phase6_separability", "phase7_curves", "phase8_shrinkage",
+        "phase6_separability", "phase7_curves", "phase8_shrinkage", "phase_timings_seconds", "phase_peak_rss_kb",
     ):
         assert key in result
+
+    # Versionado del commit/config -- pedido explicito del usuario antes
+    # de correr contra Postgres real.
+    metadata = result["run_metadata"]
+    assert metadata["config"]["seasons_requested"] == [2022, 2023, 2024]
+    assert metadata["config"]["base_pillar_weights"] == _BASE_WEIGHTS
+    assert metadata["generated_at_utc"]
+
+    # Timing/memoria por fase -- todas las 8 fases quedan registradas.
+    for phase_name in (
+        "phase1_pillar_stats", "phase2_correlations", "phase3_ablation",
+        "phase4_weight_optimization", "phase4_weight_optimization_nested",
+        "phase5_distribution", "phase6_separability", "phase7_curves", "phase8_shrinkage",
+    ):
+        assert result["phase_timings_seconds"][phase_name] >= 0
+        assert result["phase_peak_rss_kb"][phase_name] > 0
 
 
 def test_run_full_audit_no_games_returns_error(hist_url):
