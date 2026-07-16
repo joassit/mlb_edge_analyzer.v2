@@ -61,6 +61,18 @@ def reconstruct_snapshot(
     home_bullpen = provider.bullpen_era_as_of(home_team_id, game_date, season) or {}
     away_bullpen = provider.bullpen_era_as_of(away_team_id, game_date, season) or {}
 
+    # Candidatos de forma reciente para el pilar Trend (todavia NO wireado
+    # en trend.py -- ver domain/models.py y ROADMAP.md). Se recolectan
+    # ahora para poder compararlos bajo LOSO una vez re-ingeridos.
+    home_ops_rolling_7d = provider.team_ops_rolling_as_of(home_team_id, game_date, 7)
+    away_ops_rolling_7d = provider.team_ops_rolling_as_of(away_team_id, game_date, 7)
+    home_ops_rolling_14d = provider.team_ops_rolling_as_of(home_team_id, game_date, 14)
+    away_ops_rolling_14d = provider.team_ops_rolling_as_of(away_team_id, game_date, 14)
+    home_era_rolling_7d = provider.team_era_rolling_as_of(home_team_id, game_date, 7)
+    away_era_rolling_7d = provider.team_era_rolling_as_of(away_team_id, game_date, 7)
+    home_era_rolling_14d = provider.team_era_rolling_as_of(home_team_id, game_date, 14)
+    away_era_rolling_14d = provider.team_era_rolling_as_of(away_team_id, game_date, 14)
+
     home_key_injuries: list[str] = []
     away_key_injuries: list[str] = []
     home_closer_available: bool | None = None
@@ -132,4 +144,12 @@ def reconstruct_snapshot(
         league_avg_era=league.get("league_era"),
         league_avg_ops=league.get("league_ops"),
         league_avg_runs_per_game=league.get("league_runs_per_game"),
+        home_team_ops_rolling_7d=home_ops_rolling_7d,
+        away_team_ops_rolling_7d=away_ops_rolling_7d,
+        home_team_ops_rolling_14d=home_ops_rolling_14d,
+        away_team_ops_rolling_14d=away_ops_rolling_14d,
+        home_team_era_rolling_7d=home_era_rolling_7d,
+        away_team_era_rolling_7d=away_era_rolling_7d,
+        home_team_era_rolling_14d=home_era_rolling_14d,
+        away_team_era_rolling_14d=away_era_rolling_14d,
     )

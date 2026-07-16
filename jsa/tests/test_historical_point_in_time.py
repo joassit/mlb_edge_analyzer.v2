@@ -15,6 +15,7 @@ class FakeProvider(HistoricalStatsProvider):
         self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0, wind_speed=None,
         closer_pitcher_id=None, recent_pa=100, recent_ip=20.0, projected_ip=None, fielding_pct=None,
         fielding_pct_by_team=None, bullpen_ip=200.0,
+        ops_rolling_7d=0.760, ops_rolling_14d=0.760, era_rolling_7d=3.50, era_rolling_14d=3.50,
     ):
         self.era, self.ip, self.ops, self.pa, self.bullpen_era = era, ip, ops, pa, bullpen_era
         self.temp_f, self.wind_speed = temp_f, wind_speed
@@ -24,6 +25,8 @@ class FakeProvider(HistoricalStatsProvider):
         self.fielding_pct = fielding_pct
         self.fielding_pct_by_team = fielding_pct_by_team or {}
         self.bullpen_ip = bullpen_ip
+        self.ops_rolling_7d, self.ops_rolling_14d = ops_rolling_7d, ops_rolling_14d
+        self.era_rolling_7d, self.era_rolling_14d = era_rolling_7d, era_rolling_14d
         self.calls: list[tuple] = []
 
     def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
@@ -60,6 +63,14 @@ class FakeProvider(HistoricalStatsProvider):
 
     def pitcher_recent_ip_as_of(self, player_id, as_of_date, days=30):
         return self.recent_ip
+
+    def team_ops_rolling_as_of(self, team_id, as_of_date, days):
+        self.calls.append(("team_ops_rolling_as_of", team_id, as_of_date, days))
+        return self.ops_rolling_7d if days == 7 else self.ops_rolling_14d
+
+    def team_era_rolling_as_of(self, team_id, as_of_date, days):
+        self.calls.append(("team_era_rolling_as_of", team_id, as_of_date, days))
+        return self.era_rolling_7d if days == 7 else self.era_rolling_14d
 
 
 def _reconstruct(**overrides):
@@ -117,6 +128,21 @@ def test_reconstruction_is_deterministic_for_same_inputs():
 def test_reconstruction_populates_wind_speed_from_provider():
     snap = _reconstruct(provider=FakeProvider(wind_speed=18.0))
     assert snap.weather_wind_speed == 18.0
+
+
+def test_reconstruction_populates_rolling_trend_candidates():
+    """Candidatos de Trend (todavia NO usados por ningun pilar -- ver
+    domain/models.py): deben quedar en el snapshot con la ventana correcta
+    (7 vs 14 dias), diferenciados de home/away."""
+    provider = FakeProvider(ops_rolling_7d=0.700, ops_rolling_14d=0.720, era_rolling_7d=3.10, era_rolling_14d=3.30)
+    snap = _reconstruct(provider=provider)
+    assert snap.home_team_ops_rolling_7d == 0.700
+    assert snap.away_team_ops_rolling_7d == 0.700
+    assert snap.home_team_ops_rolling_14d == 0.720
+    assert snap.home_team_era_rolling_7d == 3.10
+    assert snap.home_team_era_rolling_14d == 3.30
+    windows_requested = {call[3] for call in provider.calls if call[0] in ("team_ops_rolling_as_of", "team_era_rolling_as_of")}
+    assert windows_requested == {7, 14}
 
 
 def test_reconstruction_wind_speed_is_none_without_data():
