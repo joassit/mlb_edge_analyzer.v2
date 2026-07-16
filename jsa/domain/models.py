@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jsa.domain.hashing import hash_model_excluding
 
-SCHEMA_VERSION = "3.2"
+SCHEMA_VERSION = "3.3"
 
 PillarName = Literal[
     "starter",
@@ -141,6 +141,18 @@ class GameSnapshot(BaseModel):
     # disponibilidad de closer.
     home_fielding_pct: Optional[float] = None
     away_fielding_pct: Optional[float] = None
+
+    # --- Aditivo 3.2 -> 3.3 (Seccion 3.3, ver Schema Migration Registry en
+    # registries/seed.py, migracion "schema-3.2-to-3.3") ---
+    # IP acumulada de bullpen point-in-time -- ya se calculaba internamente
+    # en bullpen_era_as_of()/get_bullpen_era() (el mismo loop que suma
+    # weighted_era_sum), simplemente nunca se exponia. Permite aplicar
+    # shrunk_era() (la MISMA funcion de shrinkage bayesiano que ya usa
+    # starter, mismo SHRINKAGE_K_IP) al ERA de bullpen -- antes de esto,
+    # bullpen era el UNICO pilar de los 7 que comparaba un ERA crudo, sin
+    # encoger hacia el promedio de liga por muestra chica (ver ROADMAP).
+    home_bullpen_ip_sample: Optional[float] = None
+    away_bullpen_ip_sample: Optional[float] = None
 
     schema_version: str = SCHEMA_VERSION
 

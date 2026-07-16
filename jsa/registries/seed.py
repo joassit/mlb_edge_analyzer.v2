@@ -194,6 +194,15 @@ def _seed_schema_migration(engine: Engine) -> None:
             date=TODAY, backward_read_compatible=True,
         )
 
+    if "schema-3.2-to-3.3" not in existing:
+        db.append(
+            engine, db.schema_migration_registry,
+            migration_id="schema-3.2-to-3.3", from_version="3.2", to_version="3.3", change_type="additive",
+            migration_function="identity -- campos nuevos son Optional, snapshots 3.2 los leen como None",
+            affected_fields=["home_bullpen_ip_sample", "away_bullpen_ip_sample"],
+            date=TODAY, backward_read_compatible=True,
+        )
+
 
 def _seed_gates(engine: Engine) -> None:
     existing = db.latest_by_id(engine, db.gate_registry, "gate_id")

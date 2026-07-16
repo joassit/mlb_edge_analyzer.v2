@@ -382,6 +382,81 @@ fusionar nada. Nuevo workflow, mismo patron que
 `validate` de `cli.py` (benchmark_season + Monte Carlo Audit +
 PillarContributionAnalyzer juntos) directo contra la base ya unificada.
 
+## Resultados reales de `validate` sobre las 5 temporadas re-ingeridas
+
+Corrido via `jsa_historical_validate_direct.yml` (200 simulaciones de
+Monte Carlo por temporada) inmediatamente despues de la re-ingesta con
+Context + `team_quality` (lesiones + closer + fielding%) +
+`starter_projected_ip` -- la evidencia real que motiva el arreglo de
+shrinkage de bullpen de la seccion siguiente:
+
+- **`team_quality` dejo de ser mudo**: `zero_advantage_rate` bajo de
+  100% (en las 5 temporadas, antes de esta serie de arreglos) a
+  26-38% -- ahora mueve el Evidence Score en 62-74% de los juegos, con
+  una contribucion media de 15-19%, en el mismo rango que `starter`
+  (17-19%) y no muy lejos de `offense` (21-25%)/`bullpen` (25-26%).
+- **`context` mejoro solo marginalmente** (100% -> ~97-98% zero-advantage,
+  contribucion media 0.5-0.8%) -- esperado: solo dispara en condiciones
+  extremas (viaje/clima extremo, dobles carteleras, 2+ lesiones
+  combinadas) y tiene el segundo peso base mas chico (0.08).
+- **`bullpen` sigue dominando la mayoria de las temporadas**:
+  `most_dominant_pillar` en 4/5 temporadas, `critical_failure_factor` de
+  Monte Carlo en 4/5 temporadas, `dominance_warning_rate` 25-28% --
+  consistente con el diagnostico ya hecho (sin shrinkage, unit mas chico,
+  peso base mas alto), sin tocar en esta re-ingesta. Motiva la seccion
+  siguiente.
+- **Home bias favoritism rechazado en las 5 temporadas** (exceso de
+  favoritismo local 3.7-9.5pp, umbral 3pp) -- hallazgo de gobernanza
+  independiente de esta serie de arreglos, no abordado todavia.
+- Accuracy 53-56%, Brier 0.269-0.283 (el baseline `naive_constant` logra
+  ~0.248-0.249) -- consistente con el estado `"uncalibrated"` ya
+  reportado honestamente por el sistema.
+
+## Shrinkage de `bullpen` (`bullpen@1.1.0`) -- cierra la asimetria con `starter`
+
+Diagnostico exacto: `bullpen.py` comparaba el ERA CRUDO de bullpen
+(`snapshot.home_bullpen_era` directo, sin ninguna llamada a
+`shrunk_era()`) -- el UNICO de los 7 pilares que nunca encogia su
+estadistica hacia el promedio de liga por muestra chica. Combinado con
+`_UNIT_ERA_RUNS=0.45` (mas sensible que el `0.55` de `starter`) y el
+peso base mas alto de los 7 pilares (`0.25`), esto amplifica ruido
+temprano de temporada (ERAs de bullpen extremos con muestras de IP muy
+chicas) en vez de suavizarlo -- exactamente el patron que muestran los
+resultados de arriba.
+
+Causa raiz de por que nunca tuvo shrinkage: `shrunk_era()` necesita una
+muestra de IP, y `GameSnapshot` nunca tuvo un campo
+`home/away_bullpen_ip_sample` -- la plomeria de datos quedo incompleta,
+no fue una decision deliberada. Tanto `bullpen_era_as_of()` (historico)
+como `get_bullpen_era()` (produccion) YA calculaban `total_ip`
+internamente en el mismo loop que ya calcula el ERA ponderado -- solo
+faltaba exponerlo, **cero llamadas de red adicionales**.
+
+**Cambios** (migracion aditiva `schema-3.2-to-3.3`, `SCHEMA_VERSION`
+3.2 -> 3.3, `bullpen@1.0.0` -> `1.1.0`):
+- `home/away_bullpen_ip_sample` nuevos en `GameSnapshot`.
+- `bullpen_era_as_of()`/`get_bullpen_era()` devuelven `"ip"` ademas de
+  `"era"`/`"closer_pitcher_id"`.
+- `engine/pillars/bullpen.py`: aplica `shrunk_era()` con el MISMO
+  `SHRINKAGE_K_IP=60` compartido que ya usa `starter` -- ninguna
+  constante nueva, ambos sin calibrar todavia contra historial propio.
+
+**Cambio de comportamiento deliberado**: al adoptar el patron exacto de
+`starter.py`, el fallback para un equipo sin ERA de bullpen tambien
+cambio -- antes usaba el ERA del RIVAL como proxy (asumir paridad
+implicita); ahora usa el promedio de liga, igual que `starter`, un
+criterio consistente entre pilares en vez de un hack especifico de
+bullpen.
+
+**Deliberadamente NO tocado en este cambio** (medir una variable a la
+vez, mismo criterio de todo este diagnostico): `_UNIT_ERA_RUNS` de
+bullpen se deja en `0.45` -- se mide el efecto del shrinkage solo primero
+via `PillarContributionAnalyzer` antes de decidir si todavia hace falta
+tocarlo. `BASE_PILLAR_WEIGHTS` (bullpen `0.25` vs starter `0.22`) se
+deja completamente fuera -- es una decision global entre los 7 pilares
+que pertenece a la fase de calibracion formal (Seccion 8.4.1/9.2), no a
+esta revision de shrinkage.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

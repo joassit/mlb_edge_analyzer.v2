@@ -92,10 +92,14 @@ class HistoricalStatsProvider:
         raise NotImplementedError
 
     def bullpen_era_as_of(self, team_id: int, as_of_date: str, season: int) -> dict | None:
-        """{"era": float|None, "closer_pitcher_id": int|None} -- el cerrador
-        se identifica DENTRO del mismo loop roster+pitcher que ya calcula el
-        ERA de bullpen (Seccion "closer_available", ver `injuries.py`),
-        nunca con una llamada de red separada."""
+        """{"era": float|None, "closer_pitcher_id": int|None, "ip": float}
+        -- el cerrador se identifica DENTRO del mismo loop roster+pitcher
+        que ya calcula el ERA de bullpen (Seccion "closer_available", ver
+        `injuries.py`), nunca con una llamada de red separada. `ip` es la
+        MISMA suma acumulada que ya se calculaba para el promedio
+        ponderado del ERA, simplemente expuesta -- permite aplicar
+        `shrunk_era()` (el mismo shrinkage bayesiano de `starter`) al ERA
+        de bullpen, cero trafico adicional."""
         raise NotImplementedError
 
     def pitcher_command_as_of(self, pitcher_id: int, as_of_date: str, season: int) -> dict:
@@ -215,7 +219,7 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
             roster = roster_resp.json().get("roster", [])
         except requests.RequestException as e:
             logger.debug("roster as-of fallo para equipo %s @ %s: %s", team_id, as_of_date, e)
-            return {"era": None, "closer_pitcher_id": None}
+            return {"era": None, "closer_pitcher_id": None, "ip": 0.0}
 
         pitcher_ids = [p["person"]["id"] for p in roster if p.get("position", {}).get("abbreviation") == "P"]
         start_date, end_date = _season_start(season), self._end_date(as_of_date)
@@ -242,6 +246,7 @@ class MLBStatsAPIProvider(HistoricalStatsProvider):
         return {
             "era": (weighted_era_sum / total_ip) if total_ip > 0 else None,
             "closer_pitcher_id": closer_pitcher_id if most_saves > 0 else None,
+            "ip": total_ip,
         }
 
     def pitcher_command_as_of(self, pitcher_id, as_of_date, season):

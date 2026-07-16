@@ -14,7 +14,7 @@ class FakeProvider(HistoricalStatsProvider):
     def __init__(
         self, era=3.50, ip=80.0, ops=0.760, pa=300, bullpen_era=4.10, temp_f=72.0, wind_speed=None,
         closer_pitcher_id=None, recent_pa=100, recent_ip=20.0, projected_ip=None, fielding_pct=None,
-        fielding_pct_by_team=None,
+        fielding_pct_by_team=None, bullpen_ip=200.0,
     ):
         self.era, self.ip, self.ops, self.pa, self.bullpen_era = era, ip, ops, pa, bullpen_era
         self.temp_f, self.wind_speed = temp_f, wind_speed
@@ -23,6 +23,7 @@ class FakeProvider(HistoricalStatsProvider):
         self.projected_ip = projected_ip
         self.fielding_pct = fielding_pct
         self.fielding_pct_by_team = fielding_pct_by_team or {}
+        self.bullpen_ip = bullpen_ip
         self.calls: list[tuple] = []
 
     def pitcher_era_ip_as_of(self, pitcher_id, as_of_date, season):
@@ -43,7 +44,7 @@ class FakeProvider(HistoricalStatsProvider):
 
     def bullpen_era_as_of(self, team_id, as_of_date, season):
         self.calls.append(("bullpen_era_as_of", team_id, as_of_date, season))
-        return {"era": self.bullpen_era, "closer_pitcher_id": self.closer_pitcher_id}
+        return {"era": self.bullpen_era, "closer_pitcher_id": self.closer_pitcher_id, "ip": self.bullpen_ip}
 
     def pitcher_command_as_of(self, pitcher_id, as_of_date, season):
         return {"k_pct": 0.24, "bb_pct": 0.07}
@@ -137,6 +138,28 @@ def test_reconstruction_computes_travel_distance_from_previous_park_id():
 def test_reconstruction_travel_distance_is_none_without_previous_park():
     snap = _reconstruct(away_team_previous_park_id=None)
     assert snap.travel_distance is None
+
+
+def test_reconstruction_populates_bullpen_ip_sample_from_provider():
+    snap = _reconstruct(provider=FakeProvider(bullpen_ip=55.0))
+    assert snap.home_bullpen_ip_sample == 55.0
+    assert snap.away_bullpen_ip_sample == 55.0
+
+
+def test_bullpen_ip_sample_from_historical_reconstruction_flows_into_shrinkage():
+    """Punta a punta: `home/away_bullpen_ip_sample` reconstruido desde el
+    provider point-in-time debe alimentar `shrunk_era()` dentro del pilar
+    bullpen -- antes de este fix, bullpen no tenia ninguna muestra de IP
+    y por lo tanto nunca podia encoger su ERA hacia el promedio de liga
+    (a diferencia de starter, que si lo hacia desde el principio)."""
+    from jsa.engine.pillars.bullpen import evaluate as evaluate_bullpen
+
+    # IP muy chica -> el ERA crudo (4.10, identico para ambos) deberia
+    # encogerse fuertemente hacia liga, sin que la pequenisima diferencia
+    # de closer_available domine de forma distinta a si no hubiera shrinkage.
+    snap = _reconstruct(provider=FakeProvider(bullpen_era=9.00, bullpen_ip=2.0))
+    advantage = evaluate_bullpen(snap)
+    assert "encogido hacia liga" in advantage.explanation
 
 
 def test_reconstruction_populates_fielding_pct_from_provider():

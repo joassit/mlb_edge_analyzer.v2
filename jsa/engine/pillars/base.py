@@ -18,7 +18,7 @@ from jsa.domain.models import PillarAdvantage
 
 PILLAR_CONTRACT_VERSIONS: dict[str, str] = {
     "starter": "starter@1.0.0",
-    "bullpen": "bullpen@1.0.0",
+    "bullpen": "bullpen@1.1.0",
     "offense": "offense@1.0.0",
     "team_quality": "team_quality@1.1.0",
     "context": "context@1.0.0",

@@ -14,7 +14,7 @@ def test_seed_all_populates_expected_counts():
     assert len(db.all_rows(engine, db.rule_registry)) == 6
     assert len(db.all_rows(engine, db.pillar_registry)) == 7
     assert len(db.all_rows(engine, db.market_registry)) == 4
-    assert len(db.all_rows(engine, db.schema_migration_registry)) == 2
+    assert len(db.all_rows(engine, db.schema_migration_registry)) == 3
     assert len(db.all_rows(engine, db.gate_registry)) == 4
 
 

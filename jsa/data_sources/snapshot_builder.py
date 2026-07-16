@@ -121,6 +121,8 @@ def build_snapshot_from_game(
         away_fielding_pct=away_fielding_pct,
         home_bullpen_era=home_bullpen.get("era"),
         away_bullpen_era=away_bullpen.get("era"),
+        home_bullpen_ip_sample=home_bullpen.get("ip"),
+        away_bullpen_ip_sample=away_bullpen.get("ip"),
         home_bullpen_ip_last_3_days=None,
         away_bullpen_ip_last_3_days=None,
         home_closer_available=home_closer_available,

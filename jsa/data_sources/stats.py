@@ -287,14 +287,17 @@ def _fetch_reliever_stat(pid: int, season: int) -> dict | None:
 
 
 def get_bullpen_era(team_id: int, season: int) -> dict:
-    """{"era": float, "closer_pitcher_id": int|None} -- ERA del bullpen
-    (promedio ponderado por IP de todos los relevistas del roster activo)
-    y el cerrador (relevista con mas saves point-in-time del roster),
-    identificado DENTRO del mismo loop, sin trafico adicional (mismo
-    principio que `jsa/historical/point_in_time_provider.py::bullpen_era_as_of`).
-    Fetches en PARALELO -- un timeout de 15s en un solo pitcher ya no
-    bloquea a los demas (leccion de
-    mlb_edge_analyzer.v2/data/stats.py::get_bullpen_era)."""
+    """{"era": float, "closer_pitcher_id": int|None, "ip": float} -- ERA
+    del bullpen (promedio ponderado por IP de todos los relevistas del
+    roster activo), el cerrador (relevista con mas saves point-in-time
+    del roster) identificado DENTRO del mismo loop, sin trafico adicional
+    (mismo principio que
+    `jsa/historical/point_in_time_provider.py::bullpen_era_as_of`), e
+    `ip` (la MISMA suma acumulada ya calculada para el promedio
+    ponderado, expuesta para poder aplicar `shrunk_era()` al ERA de
+    bullpen igual que ya hace `starter`). Fetches en PARALELO -- un
+    timeout de 15s en un solo pitcher ya no bloquea a los demas (leccion
+    de mlb_edge_analyzer.v2/data/stats.py::get_bullpen_era)."""
     cache_key = f"{team_id}-{season}"
     with _cache_lock:
         if cache_key in _bullpen_cache:
@@ -308,7 +311,7 @@ def get_bullpen_era(team_id: int, season: int) -> dict:
         roster = roster_resp.json().get("roster", [])
     except requests.RequestException as e:
         logger.warning("No se pudo obtener roster del equipo %s, usando fallback: %s", team_id, e)
-        result = {"era": FALLBACK_BULLPEN_ERA, "closer_pitcher_id": None}
+        result = {"era": FALLBACK_BULLPEN_ERA, "closer_pitcher_id": None, "ip": 0.0}
         with _cache_lock:
             _bullpen_cache[cache_key] = result
         return result
@@ -329,7 +332,7 @@ def get_bullpen_era(team_id: int, season: int) -> dict:
                 closer_pitcher_id = pid
 
     bullpen_era = (weighted_sum / total_ip) if total_ip > 0 else FALLBACK_BULLPEN_ERA
-    result = {"era": bullpen_era, "closer_pitcher_id": closer_pitcher_id if most_saves > 0 else None}
+    result = {"era": bullpen_era, "closer_pitcher_id": closer_pitcher_id if most_saves > 0 else None, "ip": total_ip}
     with _cache_lock:
         _bullpen_cache[cache_key] = result
     return result
