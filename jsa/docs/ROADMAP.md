@@ -893,6 +893,80 @@ inconsistencia de `game_date`; `test_historical_pipeline.py`: 1 caso
 nuevo verificando que `historical_ingestion_run_metadata` se escribe con
 los valores correctos).
 
+## Re-ingesta real de las 5 temporadas (2022-2026) + drift entre corridas
+
+Tras el merge del PR #26, se dispararon las 5 re-ingestas con `--force`
+(2022 secuencial primero, luego 2023/2024/2025/2026 en paralelo -- sin
+`concurrency:` group en el workflow, sin colision de datos porque cada
+escritura esta scoped por `season` y `game_pk` es unico globalmente en la
+MLB Stats API). Las 5 completaron sin errores y con `validate-ingestion`
+en `status="ok"` (100% cobertura de snapshot en las 5, cobertura de
+campos rolling de Trend entre 79%-86% segun temporada -- esperable, los
+primeros dias de cada temporada no tienen ventana completa de 7-14 dias).
+
+Al re-correr `jsa_historical_discriminative_audit.yml`/
+`jsa_historical_resolution_audit.yml` sobre las 5 temporadas re-ingeridas
+y comparar contra el baseline congelado (`pre_trend_2026-07-16/`), las
+metricas de los 5 pilares que NO deberian haber cambiado
+(starter/bullpen/offense/team_quality/context) mostraron un drift real y
+no trivial (`loso_brier` -0.000169, `loso_ece` -0.000952, `loso_mce`
+-0.084898 a nivel agregado; temporadas 2023/2024/2025 con el MISMO numero
+exacto de juegos en ambas corridas mostraron Brier/accuracy distintos por
+temporada). Investigacion completa (diff de codigo descartando bug propio,
+revision de registries descartando race condition, imposibilidad de
+diffear snapshots crudos porque `clear_season()` los borra fisicamente
+antes de cada `--force`) documentada en
+`jsa/docs/baselines/post_reingest_trend_2026-07-17/README.md`.
+
+**Decision del usuario** (2026-07-17): aceptar la limitacion metodologica
+(re-ingerir contra una fuente externa viva puede producir variaciones
+pequenas sin cambios de codigo propio; la causa exacta no es demostrable
+retrospectivamente porque los snapshots originales no fueron
+versionados), fijar `post_reingest_trend_2026-07-17/` como el nuevo
+baseline de referencia para el desarrollo de Trend, y dejar como regla
+para el futuro: cualquier comparacion que requiera reproducibilidad
+EXACTA debe conservar tambien los snapshots crudos (o un artefacto
+equivalente), no solo las metricas agregadas del audit. El AUC por pilar
+(invariante de escala) confirmo que ninguna decision previa se ve
+afectada -- diferencias en el 4to-5to decimal nada mas, y trend/historical
+siguen 100% inertes en ambas corridas.
+
+## `historical/trend_candidate_audit.py` -- auditoria descriptiva + LOSO de los 4 candidatos de Trend
+
+Con el nuevo baseline fijado, siguiente paso del orden acordado con el
+usuario: auditoria descriptiva de los 8 campos rolling + comparacion LOSO
+de los 4 candidatos (OPS 7d/14d, ERA 7d/14d) antes de tocar `trend.py`.
+
+- `run_descriptive_audit(records)`: cobertura, distribucion (mean/std/
+  percentiles/extremos) de cada uno de los 8 campos crudos, y correlacion
+  cruzada entre ellos (ej. cuanto se solapan las ventanas de 7d y 14d del
+  mismo campo).
+- `evaluate_trend_candidates(records)`: mismo patron que
+  `resolution_audit.py::evaluate_team_quality_alternatives()` -- NUNCA
+  reemplaza produccion. Para cada candidato, calcula un diff continuo
+  (mismo criterio que `offense_factor()` para OPS, diff directo para ERA,
+  ambos ya usados en produccion), lo z-scorea sobre la distribucion real
+  (juegos sin ventana completa quedan en z=0, neutral, igual que el
+  `advantage=0` que Trend produce hoy para TODOS los juegos), sustituye
+  UNICAMENTE el valor de `trend` con el MISMO peso que tiene hoy en
+  `BASE_PILLAR_WEIGHTS`, corre LOSO, y compara via bootstrap CI (500
+  resamples, igual que el resto de los audits) contra dejar Trend en 0
+  (estado real de produccion). Solo un `delta_brier_mean` negativo Y
+  `significant=True` justificaria implementar ese candidato en `trend.py`.
+- 8 tests nuevos (`test_trend_candidate_audit.py`), incluyendo los 2
+  sanity checks anti-fuga ya establecidos como estandar en este proyecto:
+  moneda pura sin relacion con la forma reciente inyectada -> AUC~0.5 para
+  los 4 candidatos; forma reciente real y persistente inyectada -> al
+  menos un candidato con AUC>0.55 y mejora significativa via bootstrap.
+- `jsa_historical_trend_candidate_audit.yml` -- mismo patron
+  `workflow_dispatch(seasons)` que discriminative/resolution-audit, solo
+  lectura, nunca toca `trend.py` ni ningun registry, timeout 30 min.
+
+Explicitamente NO decide todavia si algun candidato se implementa --
+eso requiere correr este audit contra datos reales (5 temporadas
+re-ingeridas) y revisar el resultado con el usuario antes de escribir una
+sola linea en `trend.py`.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
