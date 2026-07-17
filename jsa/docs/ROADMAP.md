@@ -893,6 +893,44 @@ inconsistencia de `game_date`; `test_historical_pipeline.py`: 1 caso
 nuevo verificando que `historical_ingestion_run_metadata` se escribe con
 los valores correctos).
 
+## Re-ingesta real de las 5 temporadas (2022-2026) + drift entre corridas
+
+Tras el merge del PR #26, se dispararon las 5 re-ingestas con `--force`
+(2022 secuencial primero, luego 2023/2024/2025/2026 en paralelo -- sin
+`concurrency:` group en el workflow, sin colision de datos porque cada
+escritura esta scoped por `season` y `game_pk` es unico globalmente en la
+MLB Stats API). Las 5 completaron sin errores y con `validate-ingestion`
+en `status="ok"` (100% cobertura de snapshot en las 5, cobertura de
+campos rolling de Trend entre 79%-86% segun temporada -- esperable, los
+primeros dias de cada temporada no tienen ventana completa de 7-14 dias).
+
+Al re-correr `jsa_historical_discriminative_audit.yml`/
+`jsa_historical_resolution_audit.yml` sobre las 5 temporadas re-ingeridas
+y comparar contra el baseline congelado (`pre_trend_2026-07-16/`), las
+metricas de los 5 pilares que NO deberian haber cambiado
+(starter/bullpen/offense/team_quality/context) mostraron un drift real y
+no trivial (`loso_brier` -0.000169, `loso_ece` -0.000952, `loso_mce`
+-0.084898 a nivel agregado; temporadas 2023/2024/2025 con el MISMO numero
+exacto de juegos en ambas corridas mostraron Brier/accuracy distintos por
+temporada). Investigacion completa (diff de codigo descartando bug propio,
+revision de registries descartando race condition, imposibilidad de
+diffear snapshots crudos porque `clear_season()` los borra fisicamente
+antes de cada `--force`) documentada en
+`jsa/docs/baselines/post_reingest_trend_2026-07-17/README.md`.
+
+**Decision del usuario** (2026-07-17): aceptar la limitacion metodologica
+(re-ingerir contra una fuente externa viva puede producir variaciones
+pequenas sin cambios de codigo propio; la causa exacta no es demostrable
+retrospectivamente porque los snapshots originales no fueron
+versionados), fijar `post_reingest_trend_2026-07-17/` como el nuevo
+baseline de referencia para el desarrollo de Trend, y dejar como regla
+para el futuro: cualquier comparacion que requiera reproducibilidad
+EXACTA debe conservar tambien los snapshots crudos (o un artefacto
+equivalente), no solo las metricas agregadas del audit. El AUC por pilar
+(invariante de escala) confirmo que ninguna decision previa se ve
+afectada -- diferencias en el 4to-5to decimal nada mas, y trend/historical
+siguen 100% inertes en ambas corridas.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
