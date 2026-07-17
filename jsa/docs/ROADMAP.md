@@ -967,6 +967,53 @@ eso requiere correr este audit contra datos reales (5 temporadas
 re-ingeridas) y revisar el resultado con el usuario antes de escribir una
 sola linea en `trend.py`.
 
+## Resultado real de `jsa_historical_trend_candidate_audit.yml` -- linea cerrada, NO adoptada
+
+Corrida real sobre las 5 temporadas (2022-2026, 13,101 juegos, run
+[29621086180](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29621086180)).
+
+**Auditoria descriptiva**: cobertura ~85% en los 8 campos (esperable,
+inicio de temporada sin ventana completa), distribuciones sanas (OPS
+rolling ~0.715 std 0.08-0.10, ERA rolling ~4.13-4.18 std 1.1-1.4, sin
+outliers patologicos). 7d vs 14d del mismo campo/equipo correlaciona
+~0.76-0.78 (esperable, ventanas solapadas); OPS y ERA del mismo equipo
+casi no correlacionan entre si (~-0.02) -- **no hay evidencia de un
+problema de ingenieria o calidad de datos** en los 8 campos.
+
+**Comparacion LOSO** (sustituir Trend=0 por cada candidato, z-scoreado,
+mismo peso, bootstrap CI vs. el estado real de produccion):
+
+| Candidato | AUC individual | Cobertura | Δ Brier vs. Trend=0 | Significativo |
+|---|---|---|---|---|
+| `ops_rolling_7d` | 0.533 | 85.1% | -0.000006 | No |
+| `ops_rolling_14d` | 0.539 | 85.5% | +0.000104 | No |
+| `era_rolling_7d` | 0.529 | 85.1% | +0.000183 | No |
+| `era_rolling_14d` | 0.542 | 85.5% | **+0.000340** | **Si** |
+
+**Decision del usuario (2026-07-17): NO implementar Trend con estos
+candidatos.** Ningun candidato mejora el Brier de forma significativa; el
+unico resultado estadisticamente significativo (`era_rolling_14d`) es un
+**deterioro** (CI +0.000142 a +0.000542, enteramente positivo) -- por lo
+tanto queda explicitamente descartado en su forma actual, no solo "sin
+evidencia de mejora". `trend.py` se mantiene como stub documentado
+(`advantage=0` siempre) -- esta es la conclusion correcta del experimento,
+no una limitacion pendiente de resolver.
+
+**Que se conserva**: toda la infraestructura (`load_records_with_trend_
+candidates()`, `run_descriptive_audit()`, `evaluate_trend_candidates()`,
+el workflow, los 8 campos ya persistidos en el schema 3.4) sigue
+disponible para evaluar candidatos DISTINTOS sin reconstruir el pipeline
+-- el costo marginal de probar una proxima hipotesis de Trend es correr
+el mismo audit, no escribir codigo nuevo desde cero.
+
+**Regla para el futuro**: no volver a probar exactamente esta
+aproximacion (rolling OPS/ERA de equipo a 7d/14d, mismo tipo de feature)
+esperando un resultado distinto -- la pregunta ya fue respondida con
+evidencia real. Cualquier proximo candidato de Trend debe ser una senal
+de naturaleza distinta (ej. margen de victoria/derrota reciente en vez de
+stats acumuladas, racha de W/L, splits home/away recientes, etc.), no una
+variacion parametrica de la misma idea.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
