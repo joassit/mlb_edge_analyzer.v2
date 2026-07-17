@@ -931,6 +931,42 @@ equivalente), no solo las metricas agregadas del audit. El AUC por pilar
 afectada -- diferencias en el 4to-5to decimal nada mas, y trend/historical
 siguen 100% inertes en ambas corridas.
 
+## `historical/trend_candidate_audit.py` -- auditoria descriptiva + LOSO de los 4 candidatos de Trend
+
+Con el nuevo baseline fijado, siguiente paso del orden acordado con el
+usuario: auditoria descriptiva de los 8 campos rolling + comparacion LOSO
+de los 4 candidatos (OPS 7d/14d, ERA 7d/14d) antes de tocar `trend.py`.
+
+- `run_descriptive_audit(records)`: cobertura, distribucion (mean/std/
+  percentiles/extremos) de cada uno de los 8 campos crudos, y correlacion
+  cruzada entre ellos (ej. cuanto se solapan las ventanas de 7d y 14d del
+  mismo campo).
+- `evaluate_trend_candidates(records)`: mismo patron que
+  `resolution_audit.py::evaluate_team_quality_alternatives()` -- NUNCA
+  reemplaza produccion. Para cada candidato, calcula un diff continuo
+  (mismo criterio que `offense_factor()` para OPS, diff directo para ERA,
+  ambos ya usados en produccion), lo z-scorea sobre la distribucion real
+  (juegos sin ventana completa quedan en z=0, neutral, igual que el
+  `advantage=0` que Trend produce hoy para TODOS los juegos), sustituye
+  UNICAMENTE el valor de `trend` con el MISMO peso que tiene hoy en
+  `BASE_PILLAR_WEIGHTS`, corre LOSO, y compara via bootstrap CI (500
+  resamples, igual que el resto de los audits) contra dejar Trend en 0
+  (estado real de produccion). Solo un `delta_brier_mean` negativo Y
+  `significant=True` justificaria implementar ese candidato en `trend.py`.
+- 8 tests nuevos (`test_trend_candidate_audit.py`), incluyendo los 2
+  sanity checks anti-fuga ya establecidos como estandar en este proyecto:
+  moneda pura sin relacion con la forma reciente inyectada -> AUC~0.5 para
+  los 4 candidatos; forma reciente real y persistente inyectada -> al
+  menos un candidato con AUC>0.55 y mejora significativa via bootstrap.
+- `jsa_historical_trend_candidate_audit.yml` -- mismo patron
+  `workflow_dispatch(seasons)` que discriminative/resolution-audit, solo
+  lectura, nunca toca `trend.py` ni ningun registry, timeout 30 min.
+
+Explicitamente NO decide todavia si algun candidato se implementa --
+eso requiere correr este audit contra datos reales (5 temporadas
+re-ingeridas) y revisar el resultado con el usuario antes de escribir una
+sola linea en `trend.py`.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

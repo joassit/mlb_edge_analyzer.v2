@@ -20,6 +20,7 @@ from jsa.historical.config import SUPPORTED_SEASONS
 from jsa.historical.discriminative_audit import run_full_audit
 from jsa.historical.ingestion_validation import validate_season_ingestion
 from jsa.historical.resolution_audit import run_full_resolution_audit
+from jsa.historical.trend_candidate_audit import run_full_trend_candidate_audit
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
@@ -108,6 +109,14 @@ def main() -> None:
     resolution_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
     resolution_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
     resolution_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    trend_candidate_parser = subparsers.add_parser(
+        "trend-candidate-audit",
+        help="Auditoria descriptiva + comparacion LOSO de los 4 candidatos de forma reciente para Trend (rolling OPS/ERA 7d/14d). Solo lectura, nunca golpea la API de MLB, nunca modifica trend.py.",
+    )
+    trend_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    trend_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    trend_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -219,6 +228,16 @@ def main() -> None:
         setup_plain_logging()
         result = run_full_resolution_audit(sorted(args.seasons), args.db)
         logger.info("resolution-audit completo -- n_games=%s", result.get("n_games"))
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "trend-candidate-audit":
+        setup_plain_logging()
+        result = run_full_trend_candidate_audit(sorted(args.seasons), args.db)
+        logger.info("trend-candidate-audit completo -- n_games=%s", result.get("n_games"))
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:

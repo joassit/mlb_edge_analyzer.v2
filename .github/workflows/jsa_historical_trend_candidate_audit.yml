@@ -1,0 +1,62 @@
+name: jsa-historical-trend-candidate-audit
+
+# One-off, solo lectura: auditoria descriptiva + comparacion LOSO de los 4
+# candidatos de forma reciente para Trend (rolling OPS/ERA 7d/14d,
+# recolectados desde PR #25/schema 3.4). Nunca golpea la API de MLB
+# (los campos ya estan persistidos en los snapshots re-ingeridos), nunca
+# modifica `trend.py` ni ningun registry -- solo lee
+# JSA_HISTORICAL_DATABASE_URL y devuelve el resultado como JSON.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a incluir, separadas por coma (ej. 2022,2023,2024,2025,2026)'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+
+permissions:
+  contents: read
+
+jobs:
+  trend-candidate-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run trend-candidate-audit
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          python -m jsa.historical.cli trend-candidate-audit \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            --out jsa_trend_candidate_audit_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-historical-trend-candidate-audit-${{ github.run_id }}
+          path: jsa_trend_candidate_audit_result.json
+          if-no-files-found: warn
+          retention-days: 30
