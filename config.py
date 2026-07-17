@@ -59,13 +59,26 @@ WEATHER_CORRECTION = 0.0
 # scripts/calibrate_dispersion.py) en cuanto haya ~100 juegos con resultado
 # en la base de datos.
 #
-# Valor actual: 3.0 -- recalibrado 2026-07-12 con historical_engine contra las
-# 4 temporadas consolidadas (2022-2025, ~9,700 juegos con resultado real):
-# propose_dispersion_recalibration() confirmó que k=3.0 mejora el Brier score
-# de NegBin sobre el prior original de 7.0 en las 4 temporadas individualmente.
-# No afecta los picks en vivo (PICK_PROBABILITY_SOURCE="skellam" es el modelo
-# activo) -- este valor solo alimenta el tracking/comparación de NegBin.
-NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "3.0"))
+# Historial: 7.0 (prior de literatura, sin calibrar) -> 3.0 el 2026-07-12
+# (primera recalibración con historical_engine, propose_dispersion_recalibration())
+# -> 2.0 el 2026-07-17.
+#
+# Valor actual: 2.0 -- la auditoría avanzada del 2026-07-12 hizo un barrido
+# más fino de k en {2,3,4,5,7,9,12} con validación LOSO (entrenar en 3
+# temporadas de 2022-2025, medir Brier en la excluida) sobre las 4
+# temporadas point-in-time (8,852 juegos con resultado real): k=2.0 fue el
+# óptimo en las 4 temporadas SIN EXCEPCIÓN -- mejor que la propuesta previa
+# de k=3.0. Delta de Brier vs. el prior k=7.0 (LOSO, IC95% excluye 0 en
+# 2023 y 2025; marginal pero misma dirección en 2022/2024):
+#   2022: -0.00065 [-0.0018, +0.0004]   2023: -0.00198 [-0.0033, -0.0007]
+#   2024: -0.00054 [-0.0016, +0.0006]   2025: -0.00248 [-0.0037, -0.0012]
+# No afecta los picks en vivo (PICK_PROBABILITY_SOURCE="skellam" es el
+# modelo activo) -- este valor solo alimenta el tracking/comparación de
+# NegBin (columnas away_negbin_prob/home_negbin_prob, usadas en
+# compute_metrics()/compute_calibration() para comparar los 3 motores).
+# Recalibrar de nuevo con scripts/calibrate_dispersion.py conforme se
+# acumulen resultados propios de 2026 (necesita >=100 juegos; hoy hay 102).
+NEGBIN_DISPERSION = float(os.getenv("NEGBIN_DISPERSION", "2.0"))
 
 # --- Calibración de Skellam: contracción hacia 0.5 ---
 # p_calibrada = 0.5 + alpha * (p_cruda - 0.5), aplicada a la probabilidad
