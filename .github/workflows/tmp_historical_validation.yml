@@ -30,13 +30,15 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Artifact de la corrida daily-pipeline 29531297317 (2026-07-16
-      # 20:15 UTC, schedule, commit 463a0ec en main).
+      # Artifact de la corrida daily-pipeline 29525433649 (2026-07-16
+      # 18:48 UTC, cron principal, commit fa1a7ae en main). La corrida
+      # de las 20:15 (29531297317) fue el cron de respaldo: la guarda de
+      # idempotencia salto el pipeline y NO subio artifact.
       - uses: actions/download-artifact@v6
         with:
-          name: mlb-edge-daily-output-29531297317
+          name: mlb-edge-daily-output-29525433649
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: 29531297317
+          run-id: 29525433649
 
       - run: ls -la
 
