@@ -33,13 +33,15 @@ Integrity checks (los 4 que importan antes de migrar, ver runbook):
     (por defecto, la fecha de hoy) -- señal de reloj mal puesto en el
     proceso que la escribió, o de un game_pk/game_date mal parseado.
 
-Uso:
-    python scripts/export_data.py \\
+Uso (ejecutar con -m desde la raíz del repo -- "python scripts/export_data.py"
+directo pone scripts/ en sys.path en vez de la raíz y "from db.database import"
+falla con ModuleNotFoundError, mismo caso que scripts/check_already_ran_today.py):
+    python -m scripts.export_data \\
         --database-url "sqlite:///_artifact_legacy/mlb_edge.db" \\
         --output-dir "migration_backups/legacy_20260718"
 
     # Contra la DB del proceso actual (usa config.DATABASE_URL):
-    python scripts/export_data.py --output-dir "migration_backups/legacy_$(date +%Y%m%d)"
+    python -m scripts.export_data --output-dir "migration_backups/legacy_$(date +%Y%m%d)"
 """
 
 import argparse
@@ -109,7 +111,7 @@ def _check_integrity(dumps: dict[str, list[dict]], as_of: str) -> dict:
     ]
     fechas_futuras = [
         {"table": name, "game_pk": r["game_pk"], "game_date": r["game_date"]}
-        for name, rows in dumps.items() if name != "actual_results" or True
+        for name, rows in dumps.items()
         for r in rows
         if "game_date" in r and r["game_date"] and r["game_date"] > as_of
     ]

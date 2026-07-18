@@ -44,7 +44,7 @@ jobs:
 
       - name: Backup + integrity check (scripts/export_data.py)
         run: |
-          python scripts/export_data.py \
+          python -m scripts.export_data \
             --database-url "sqlite:///mlb_edge.db" \
             --output-dir "migration_backups/legacy_20260718" \
             --as-of "2026-07-18"
