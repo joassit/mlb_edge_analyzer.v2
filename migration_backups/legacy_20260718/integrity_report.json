@@ -1,0 +1,29 @@
+{
+ "as_of": "2026-07-18",
+ "row_counts": {
+  "game_analysis": 131,
+  "actual_results": 115,
+  "bets": 0,
+  "picks": 121,
+  "feature_snapshots": 131
+ },
+ "picks_huerfanos": {
+  "n": 0,
+  "detalle": []
+ },
+ "game_analysis_sin_feature_snapshot": {
+  "n": 0,
+  "detalle": []
+ },
+ "bets_huerfanas": {
+  "n": 0,
+  "detalle": []
+ },
+ "fechas_futuras": {
+  "n": 0,
+  "detalle": []
+ },
+ "limpio": true,
+ "database_url": "sqlite:///mlb_edge.db",
+ "exported_at": "2026-07-18T22:38:56.781015Z"
+}
