@@ -21,6 +21,7 @@ from jsa.historical.discriminative_audit import run_full_audit
 from jsa.historical.ingestion_validation import validate_season_ingestion
 from jsa.historical.resolution_audit import run_full_resolution_audit
 from jsa.historical.trend_candidate_audit import run_full_trend_candidate_audit
+from jsa.historical.historical_candidate_audit import run_full_historical_candidate_audit
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
@@ -117,6 +118,14 @@ def main() -> None:
     trend_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
     trend_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
     trend_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    historical_candidate_parser = subparsers.add_parser(
+        "historical-candidate-audit",
+        help="Auditoria descriptiva + comparacion LOSO de 4 candidatos de historial head-to-head para Historical Favorite Context (100% offline desde historical_game, nunca golpea la API de MLB, nunca modifica historical.py).",
+    )
+    historical_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    historical_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    historical_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -238,6 +247,16 @@ def main() -> None:
         setup_plain_logging()
         result = run_full_trend_candidate_audit(sorted(args.seasons), args.db)
         logger.info("trend-candidate-audit completo -- n_games=%s", result.get("n_games"))
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "historical-candidate-audit":
+        setup_plain_logging()
+        result = run_full_historical_candidate_audit(sorted(args.seasons), args.db)
+        logger.info("historical-candidate-audit completo -- n_games=%s", result.get("n_games"))
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:

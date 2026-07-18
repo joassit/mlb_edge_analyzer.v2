@@ -1014,6 +1014,53 @@ de naturaleza distinta (ej. margen de victoria/derrota reciente en vez de
 stats acumuladas, racha de W/L, splits home/away recientes, etc.), no una
 variacion parametrica de la misma idea.
 
+## Fase 2 -- `historical/historical_candidate_audit.py`: 4 candidatos de historial head-to-head
+
+Siguiente fase del roadmap estrategico del usuario: el pilar `historical`
+(Historical Favorite Context) es el otro stub de la Seccion 7.1
+(`advantage=0` siempre, ver `engine/pillars/historical.py`). A diferencia
+de Trend, esto es **100% derivable offline** de `historical_game` ya
+ingerido para las 5 temporadas -- no requiere ninguna re-ingesta ni
+golpear la API de MLB.
+
+- `compute_head_to_head_history(engine, seasons)`: point-in-time-safe,
+  dia-batched (misma disciplina anti-fuga que `compute_elo_and_
+  pythagorean()`: dentro de un `game_date`, todos los juegos primero leen
+  el estado pre-dia, recien despues se actualiza el historial con los
+  resultados de ese dia), pero **sin resetear entre temporadas** -- a
+  diferencia de Elo, un enfrentamiento de 2022 sigue contando para el
+  mismo par de equipos en 2023 (verificado con
+  `test_head_to_head_history_persists_across_seasons`). Limitacion
+  honesta y documentada: "historial" aca significa "desde 2022" (el
+  horizonte de datos ingerido), no la rivalidad real completa.
+- 4 candidatos calculados por par de equipos especifico: `h2h_win_pct_
+  all_time` (% de victorias en todos los enfrentamientos previos dentro
+  de la ventana), `h2h_win_pct_last_5` (ultimos 5 enfrentamientos),
+  `h2h_run_diff_avg` (diferencia de carreras promedio, no solo victoria/
+  derrota), `h2h_recency_weighted` (record ponderado exponencialmente por
+  recencia, decay=0.8).
+- Mismo patron de evaluacion que Trend: `evaluate_historical_candidates()`
+  sustituye UNICAMENTE `historical` (z-scoreado, mismo peso, neutral/0 en
+  juegos sin enfrentamiento previo) por cada candidato, LOSO comparado via
+  bootstrap CI contra dejar Historical en 0 (estado real de produccion).
+- Auditoria descriptiva incluye cobertura (fraccion de juegos con >=1
+  enfrentamiento previo -- naturalmente mas baja que Trend, ya que muchos
+  pares de equipos se enfrentan pocas veces dentro de un horizonte de 5
+  temporadas) y la distribucion de `n_meetings` por juego.
+- 9 tests nuevos (`test_historical_candidate_audit.py`), incluyendo los 2
+  sanity checks anti-fuga estandar del proyecto y 2 tests especificos de
+  integridad point-in-time (el primer enfrentamiento real entre dos
+  equipos debe dar `n_meetings=0`; el historial persiste entre
+  temporadas).
+- `jsa_historical_historical_candidate_audit.yml` -- mismo patron
+  `workflow_dispatch(seasons)`, solo lectura, nunca toca `historical.py`
+  ni ningun registry, timeout 30 min.
+
+Explicitamente NO decide todavia si algun candidato se implementa --
+mismo criterio que Trend: correr esto contra datos reales y revisar el
+resultado con el usuario antes de escribir una sola linea en
+`historical.py`.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
