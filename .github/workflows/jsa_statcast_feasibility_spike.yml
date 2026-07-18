@@ -1,0 +1,42 @@
+name: jsa-statcast-feasibility-spike
+
+# Etapa 1 del plan de Statcast acordado con el usuario (ver
+# jsa/docs/statcast_integration_design.md): spike de FACTIBILIDAD, sin
+# tocar el modelo ni ninguna base de datos de JSA. Solo hace GET HTTP
+# contra Baseball Savant y reporta que funciono -- no persiste nada, no
+# modifica ningun pilar, no dispara ninguna re-ingesta. Descartable: este
+# workflow (y jsa/historical/spikes/) se puede borrar una vez que la
+# pregunta de factibilidad ya fue respondida y documentada.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  statcast-feasibility-spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run Statcast feasibility spike
+        run: python -m jsa.historical.spikes.statcast_feasibility_spike --out jsa_statcast_feasibility_spike_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-statcast-feasibility-spike-${{ github.run_id }}
+          path: jsa_statcast_feasibility_spike_result.json
+          if-no-files-found: warn
+          retention-days: 30
