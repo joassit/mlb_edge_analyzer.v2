@@ -1123,6 +1123,95 @@ variables cuya contribucion no supera la validacion estadistica. Los dos
 pilares siguen activos y reportando (Seccion 7.1: todo pilar debe
 evaluarse), transparentes sobre su propia limitacion, tal como estan hoy.
 
+## Diagnostico del techo del modelo (2026-07-18)
+
+Antes de invertir en una fuente de datos nueva (mas costosa e infraestructura
+adicional), el usuario pidio un diagnostico explicito: ¿el modelo actual
+todavia tiene margen de mejora, o ya esta cerca del limite alcanzable con
+el enfoque actual (7 pilares, combinacion lineal ponderada,
+calibracion isotonica)? Todo lo que sigue proviene de la auditoria real
+sobre **13,101 juegos (5 temporadas, 2022-2026) con validacion LOSO**
+(`jsa/docs/baselines/post_reingest_trend_2026-07-17/discriminative_audit_result.json`)
+-- no son observaciones anecdoticas.
+
+**Alcance explicito de estas conclusiones**: todo lo que sigue describe
+el techo alcanzable **con el espacio de informacion evaluado hasta
+ahora** -- los 7 pilares actuales (starter/bullpen/offense/team_quality/
+context/trend/historical), sus insumos concretos (ERA/OPS de temporada
+con shrinkage, clima/lesiones, rolling OPS/ERA, historial head-to-head),
+y una combinacion lineal ponderada de esos pilares. **No es una
+afirmacion sobre el techo teorico de predecir resultados de MLB en
+general.** Una fuente de informacion genuinamente distinta (Statcast,
+lineups confirmados, cuotas de mercado, u otra arquitectura de modelo no
+lineal) podria mover este techo -- de hecho es exactamente lo que la
+Fase de Statcast busca poner a prueba. Esta seccion se re-evalua cada vez
+que el espacio de informacion evaluado cambia de forma material (una
+fuente nueva se integra o se descarta con evidencia), no es una
+conclusion fija de una vez para siempre.
+
+**1. Modelo completo vs. cada pilar individual**: el modelo combinado
+calibra excelente (`loso_ece=0.00203`, practicamente perfecto) pero
+discrimina poco (`loso_brier=0.24506`, cerca del piso de p=0.5
+constante). AUC individual por pilar: starter=0.546, bullpen=0.552,
+offense=0.547, team_quality=0.532, context=0.500. Cohen's d entre
+ganadores/perdedores=0.26 (efecto "pequeño"), coeficiente de solapamiento
+de distribuciones=0.90 (90% de superposicion entre la distribucion de
+`evidence_score_raw` de partidos ganados vs. perdidos).
+
+**2. Ablacion (Fase 3, LOSO + bootstrap CI)**: starter/bullpen/offense/
+team_quality son **imprescindibles** (remover cualquiera empeora el
+Brier de forma estadisticamente significativa, delta +0.0007 a
++0.0014). context/trend/historical son **neutros** (removerlos no
+cambia el Brier de forma significativa) -- consistente con context
+teniendo AUC=0.500 y trend/historical con advantage=0 siempre.
+
+**3. Redundancia entre pilares core**: correlacion de Pearson moderada
+entre starter-bullpen (0.38, ambos son "calidad de pitcheo") y algo
+entre bullpen-offense (0.23); el resto <0.12. Ninguna cercana a
+colinealidad severa (>0.7-0.8) -- cada pilar aporta informacion
+mayormente independiente, no hay duplicacion disfrazada de 4 pilares
+distintos.
+
+**4. ¿Falta informacion o falta capacidad de combinarla? -- CONCLUSION
+CLAVE**: la optimizacion de pesos nested (Fase 4, sin sesgo de
+seleccion, `optimize_weights_nested()`) mostro que re-optimizar
+`BASE_PILLAR_WEIGHTS` **no generaliza** (`generalizes: false`,
+delta_brier +0.000283, significativo -- los pesos re-optimizados por
+fold externo empeoran fuera de muestra respecto a los pesos de
+produccion actuales). Esto significa que el modelo lineal actual ya esta
+cerca del optimo alcanzable dado el conjunto de informacion existente --
+**el cuello de botella es la informacion disponible, no la capacidad del
+modelo de combinarla**. Cada pilar individual tiene AUC debil porque las
+variables subyacentes (ERA/OPS de temporada con shrinkage) tienen un
+techo de senal bajo para predecir un partido individual, no porque la
+combinacion lineal este mal ajustada.
+
+**5. Expectativa de mejora al incorporar nuevas fuentes**: juicio
+informado por literatura de sabermetria (no medido, marcado
+explicitamente como tal) -- un partido individual de MLB tiene un techo
+de prediccion bajo por diseno (alta varianza intrinseca del deporte);
+modelos publicos conocidos basados en features pre-partido (sin cuotas
+de mercado) suelen reportar AUC ~0.58-0.63, no mucho mas alto que los
+pilares fuertes actuales (0.53-0.55). Cualquier fuente nueva deberia
+evaluarse esperando una mejora incremental (del mismo orden de magnitud
+que la ablacion de los pilares core, Brier ~0.0005-0.001), no un salto
+transformador.
+
+**Trend e Historical, en el contexto de este diagnostico**: ambas lineas
+de investigacion (rolling OPS/ERA 7d/14d para Trend, historial
+head-to-head para Historical) se cerraron por falta de evidencia de
+mejora bajo el mismo protocolo LOSO + bootstrap CI usado aca -- ningun
+candidato de ninguna de las dos lineas supero la validacion, y en ambos
+casos hubo un candidato especificamente peor de forma significativa. Ver
+las secciones dedicadas arriba para el detalle completo.
+
+**Decision del usuario**: con este diagnostico documentado, la siguiente
+prioridad es evaluar Statcast como fuente de datos nueva -- pero
+exigiendo el mismo estandar de evidencia (LOSO + bootstrap CI) antes de
+integrar cualquier cosa al modelo. Ver
+`jsa/docs/statcast_integration_design.md` para el documento de diseno
+tecnico previo a escribir codigo.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
