@@ -1,33 +1,26 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada mientras historical_ingest.yml/
-# historical_ingest_simple.yml (los archivos permanentes) terminan de
-# indexarse. Se retira/reemplaza según haga falta en cada uso.
+# Uso temporal de un path ya registrado en GitHub Actions -- en ESTE uso:
+# descarga el artifact de la corrida diaria mas reciente (mlb_edge.db real)
+# y corre scratchpad_extract_report_data.py (funciones oficiales de
+# tracking/results_tracker.py), dejando el JSON gzip+base64 en el log.
+# Se restaura a modo season-ingest al terminar.
 on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'Año de temporada a ingerir (ej. 2025)'
-        required: true
+        description: 'Ignorado en este modo (extract-report-data)'
+        required: false
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  ingest-season:
+  extract-report-data:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
-    # para jobs en runners hosteados que ningún timeout-minutes puede
-    # superar. 300 min cortó la corrida de 2025 a mitad de camino (el fix
-    # de climatología del Paso 4 de la auditoría de look-ahead bias subió
-    # el costo real por juego). Con WEATHER_CLIMATOLOGY_YEARS bajado de 5
-    # a 3 + cache de climatología dentro de la corrida, una temporada
-    # completa debería entrar cómoda en ~4h30m-4h50m -- 340 deja margen
-    # real sin acercarse al tope de la plataforma.
-    timeout-minutes: 340
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -37,12 +30,14 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
-
-      - if: always()
-        uses: actions/upload-artifact@v7
+      # Artifact de la corrida daily-pipeline 29655363367 (2026-07-18
+      # 18:11 UTC, schedule, commit 79a01ca en main).
+      - uses: actions/download-artifact@v6
         with:
-          name: historical-backtest-db-${{ inputs.season }}
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+          name: mlb-edge-daily-output-29655363367
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29655363367
+
+      - run: ls -la
+
+      - run: python scratchpad_extract_report_data.py
