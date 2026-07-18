@@ -1299,6 +1299,81 @@ spike) y el audit LOSO contra datos reales, revisando el resultado con
 el usuario antes de escribir una sola linea en `offense.py`/`starter.py`/
 `bullpen.py`/`trend.py`.
 
+## Resultado real de la ingesta minima + `jsa_statcast_candidate_audit.yml` -- linea cerrada, NO adoptada
+
+**Costo real de la ingesta** (5 corridas de `jsa_statcast_minimal_ingest.yml`,
+en paralelo, 0 errores en 45 chunks): 142,515 eventos de bateo reales
+almacenados, 550.5 MB descargados en total, ~48 minutos de computo de
+GitHub Actions repartidos en 5 jobs paralelos (tiempo de reloj real
+~15 min, la corrida mas lenta). Costo trivial comparado con las horas por
+temporada que tomo la re-ingesta de Trend.
+
+**Comparacion LOSO** (run
+[29664006135](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29664006135),
+13,101 juegos, criterio de exito de la Seccion 7 del diseno tecnico:
+`delta_brier_mean` negativo Y `significant=True` Y `|delta_brier_mean|
+>= 0.001` -- las 3 condiciones a la vez):
+
+| Hipotesis | Pilar objetivo | AUC | Cobertura | Δ Brier vs. actual | Significativo | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|
+| `h1_offense_xwoba` | offense | 0.517 | 84.3% | **+0.001240** | Si | **No** |
+| `h2_starter_xwoba_allowed` | starter | 0.501 | 59.4% | **+0.001233** | Si | **No** |
+| `h3_bullpen_xwoba_allowed` | bullpen | 0.501 | 84.2% | **+0.001523** | Si | **No** |
+| `h4_hard_hit_rolling_7d` | trend | 0.515 | 35.5% | +0.000066 | No | No |
+| `h4_hard_hit_rolling_14d` | trend | 0.510 | 54.5% | +0.000001 | No | No |
+
+**Decision del usuario (2026-07-18): NO implementar ninguna de las 4
+hipotesis.** Este resultado es mas contundente que Trend/Historical: H1,
+H2 y H3 muestran un **deterioro estadisticamente significativo** (los 3
+CI quedan enteramente del lado positivo) al sustituir offense/starter/
+bullpen por sus versiones basadas en xwOBA -- no es solo "no mejora", es
+"empeora con confianza estadistica". H4 (candidatos de Trend, rolling
+hard-hit rate) no muestra efecto en ninguna direccion.
+
+**Caveat de cobertura, documentado pero NO usado para reabrir la
+linea sin nueva evidencia**: H2 (abridor especifico) tuvo solo 59.4% de
+cobertura -- bastante menor que H1/H3 (~84%), porque acumular una
+muestra de bateos-en-juego permitidos por ESE abridor especifico tarda
+mas en la temporada que agregarlo a nivel de equipo. Eso diluye la
+comparacion en ~40% de los juegos con z=0 neutral, y probablemente
+contribuye al deterioro observado en H2 independientemente de si xwOBA
+en si es mejor o peor señal. Consistente con el diagnostico del techo
+del modelo: esta implementacion especifica de xwOBA (calculada solo de
+bateos-en-juego -- eventos con `type=='X'` -- sin walks/strikeouts que
+ERA/OPS si capturan) resulto ser una señal MAS POBRE, no mas rica, que
+la que ya se usa.
+
+**Que se conserva**: toda la infraestructura
+(`historical_statcast_event`, `statcast_ingestion.py`,
+`statcast_candidate_audit.py`, los 2 workflows) sigue disponible para
+evaluar candidatos DISTINTOS sin reconstruir el pipeline de ingesta --
+en particular, una version de xwOBA que incluya TODOS los resultados de
+turno al bate (no solo bateos en juego) resolveria el problema de
+cobertura/completitud identificado arriba, y es una hipotesis
+legitimamente distinta (no una repeticion parametrica) si se decide
+retomar esta linea en el futuro.
+
+**Alcance exacto del rechazo**: se descartan especificamente estas 4
+hipotesis (xwOBA de equipo/abridor/bullpen calculado desde bateos en
+juego solamente, y hard-hit rate rolling) -- no el concepto general de
+metricas Statcast ni la arquitectura de ingesta minima construida.
+
+## Tres lineas cerradas (Trend, Historical, Statcast H1-H4) -- estado consolidado (2026-07-18)
+
+Con este resultado, las tres fases de "agregar informacion nueva" del
+roadmap estrategico terminaron sin evidencia de mejora bajo el mismo
+protocolo LOSO + bootstrap CI + criterio de tamaño de efecto minimo. En
+los tres casos hubo ademas al menos un candidato especificamente PEOR de
+forma significativa (Trend: `era_rolling_14d`; Historical:
+`h2h_win_pct_last_5`; Statcast: H1, H2 y H3 los tres). El diagnostico del
+techo del modelo (ver seccion dedicada arriba) sigue siendo la lectura
+vigente: el cuello de botella no esta en como se combinan los pilares
+(la optimizacion de pesos ya esta cerca del optimo), sino en el techo de
+informacion de las señales concretas ya probadas -- pero esto aplica
+estrictamente al espacio de informacion evaluado hasta ahora, no es una
+afirmacion general sobre el techo teorico de predecir MLB (ver la nota
+de alcance explicita en el diagnostico).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
