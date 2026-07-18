@@ -186,14 +186,59 @@ de prioridad:
 
 Cada hipotesis se evalua exactamente igual que Trend/Historical: LOSO
 completo sobre las 5 temporadas, bootstrap CI de 500 resamples del delta
-de Brier contra el pilar ACTUAL (no contra 0), `significant=True` +
-delta negativo como unico criterio de adopcion. Se prioriza H1-H3 sobre
-H4 porque compiten contra un insumo ya validado (mayor rigor de la
-prueba) y porque, si NINGUNA de H1-H3 supera a su version actual, eso
-seria evidencia adicional de que el techo de informacion no esta en la
-precision de la metrica de bateo/pitcheo sino en otro lado -- un
+de Brier contra el pilar ACTUAL (no contra 0). El criterio de adopcion
+completo (significancia + tamaño de efecto + costo) se detalla en la
+Seccion 7 -- significancia estadistica sola NO alcanza. Se prioriza
+H1-H3 sobre H4 porque compiten contra un insumo ya validado (mayor rigor
+de la prueba) y porque, si NINGUNA de H1-H3 supera a su version actual,
+eso seria evidencia adicional de que el techo de informacion no esta en
+la precision de la metrica de bateo/pitcheo sino en otro lado -- un
 resultado diagnostico valioso en si mismo, igual que lo fue el cierre de
 Trend/Historical.
+
+## 7. Criterios de éxito y fracaso (cuándo aceptar, cuándo descartar)
+
+Definidos ANTES de correr el protocolo, para no ajustar el criterio
+despues de ver el resultado (la misma disciplina que ya goberno Trend/
+Historical). Una hipotesis (H1-H4) se **acepta** solo si cumple las
+TRES condiciones a la vez -- ninguna es suficiente por si sola:
+
+1. **Significancia estadistica real**: `delta_brier_mean < 0` (mejora,
+   no empeoramiento) Y bootstrap CI de 500 resamples enteramente del
+   lado de la mejora (`significant=True`, mismo criterio ya usado en
+   Trend/Historical/ablacion) -- sobre LOSO completo de las 5
+   temporadas, nunca sobre una sola temporada ni sobre metricas
+   in-sample.
+2. **Tamaño de efecto minimo, no solo significancia**: una mejora
+   estadisticamente significativa pero de magnitud despreciable NO
+   justifica adoptar el candidato. Umbral propuesto: `|delta_brier_mean|
+   >= 0.001` (el mismo orden de magnitud que separo "imprescindible" de
+   "neutro" en la ablacion de la Seccion de diagnostico del ROADMAP,
+   donde los pilares imprescindibles mostraron deltas de 0.0007-0.0014)
+   -- una mejora de 0.00005, aunque el CI no cruce cero, se considera
+   **irrelevante en la practica** y no se adopta. Este umbral es una
+   propuesta inicial, ajustable con el usuario antes de correr el
+   protocolo, pero debe fijarse ANTES de ver los resultados reales.
+   Ademas del delta de Brier, se reporta el delta de ECE y de Log-loss
+   como contexto (una mejora de Brier que empeora la calibracion ECE de
+   forma notoria es una señal de alerta, no un exito limpio).
+3. **El costo operativo debe justificarse**: dado el riesgo de
+   estabilidad de la fuente (Seccion 3: sin API oficial documentada) y
+   el costo de ingesta/mantenimiento (Seccion 4), una mejora que SI
+   cumple 1 y 2 pero es marginal (cerca del umbral minimo) debe
+   sopesarse explicitamente contra ese costo antes de integrarse a
+   produccion -- no es una aprobacion automatica solo por pasar el
+   filtro estadistico. Esta evaluacion de costo/beneficio se hace con el
+   usuario, no de forma automatica por el protocolo.
+
+**Criterio de fracaso/cierre de linea** (mismo que ya se aplico a Trend/
+Historical): si NINGUNA de H1-H4 cumple las 3 condiciones, la linea de
+Statcast se cierra documentando el resultado real (igual que las
+secciones de cierre de Trend/Historical en el ROADMAP) -- no se declara
+Statcast "descartado en general" (ver Seccion 2: la conclusion se limita
+a las metricas y ventanas concretas evaluadas), pero tampoco se sigue
+intentando variaciones parametricas de las mismas 4 hipotesis esperando
+un resultado distinto sin una razon nueva.
 
 ## Próximo paso (no iniciar sin confirmación)
 

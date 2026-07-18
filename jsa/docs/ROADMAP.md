@@ -1134,6 +1134,21 @@ sobre **13,101 juegos (5 temporadas, 2022-2026) con validacion LOSO**
 (`jsa/docs/baselines/post_reingest_trend_2026-07-17/discriminative_audit_result.json`)
 -- no son observaciones anecdoticas.
 
+**Alcance explicito de estas conclusiones**: todo lo que sigue describe
+el techo alcanzable **con el espacio de informacion evaluado hasta
+ahora** -- los 7 pilares actuales (starter/bullpen/offense/team_quality/
+context/trend/historical), sus insumos concretos (ERA/OPS de temporada
+con shrinkage, clima/lesiones, rolling OPS/ERA, historial head-to-head),
+y una combinacion lineal ponderada de esos pilares. **No es una
+afirmacion sobre el techo teorico de predecir resultados de MLB en
+general.** Una fuente de informacion genuinamente distinta (Statcast,
+lineups confirmados, cuotas de mercado, u otra arquitectura de modelo no
+lineal) podria mover este techo -- de hecho es exactamente lo que la
+Fase de Statcast busca poner a prueba. Esta seccion se re-evalua cada vez
+que el espacio de informacion evaluado cambia de forma material (una
+fuente nueva se integra o se descarta con evidencia), no es una
+conclusion fija de una vez para siempre.
+
 **1. Modelo completo vs. cada pilar individual**: el modelo combinado
 calibra excelente (`loso_ece=0.00203`, practicamente perfecto) pero
 discrimina poco (`loso_brier=0.24506`, cerca del piso de p=0.5
