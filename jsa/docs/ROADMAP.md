@@ -1212,6 +1212,93 @@ integrar cualquier cosa al modelo. Ver
 `jsa/docs/statcast_integration_design.md` para el documento de diseno
 tecnico previo a escribir codigo.
 
+## Statcast Etapa 1 -- spike de factibilidad, resultado real (2026-07-18)
+
+Corrida real de `jsa_statcast_feasibility_spike.yml` (run
+[29637498610](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29637498610)),
+sin tocar el modelo ni ninguna base de JSA:
+
+- **Acceso real**: confirmado -- los 3 endpoints candidatos respondieron
+  200 OK sin errores de red/proxy. El endpoint de busqueda a nivel evento
+  (`statcast_search/csv`) trae exactamente los campos necesarios para
+  H1-H4 (`game_date`, `launch_speed`, `estimated_woba_using_speedangle`,
+  `inning_topbot`, `game_pk`, `batter`, `pitcher`), 119 columnas en
+  total, 1,072 filas para 1 equipo x 1 semana en 9.15s.
+- **Cobertura historica**: confirmada para las 5 temporadas (2022-2026),
+  incluyendo la temporada en curso.
+- **Tiempos/limites**: sin headers de rate-limit detectados; ~9s por
+  ventana de 1 equipo x 1 semana -- el principal costo a vigilar.
+- **Integridad point-in-time**: el chequeo estricto marco
+  `leakage_detected=True`, pero la causa real es una semantica de
+  parametro (`game_date_gt`/`game_date_lt` son AMBOS inclusivos, no
+  `>`/`<` estrictos como el nombre sugiere) -- no una fuga temporal
+  inherente de la fuente. Manejable con el mismo patron ya usado en
+  `_end_date()` de `point_in_time_provider.py` (nunca pedirle a la fuente
+  un recorte point-in-time directamente; solo usarla para traer HECHOS
+  crudos historicos, y hacer la reconstruccion point-in-time-safe
+  despues, en Python, exactamente como ya hacen
+  Elo/Pythagorean/head-to-head desde `historical_game`).
+
+**Decision del usuario**: Etapa 1 satisfactoria, autoriza avanzar a la
+Etapa 2 con alcance deliberadamente limitado -- ingesta minima orientada
+exclusivamente a validar H1-H4, sin construir infraestructura general.
+
+## Statcast Etapa 2 -- ingesta minima + comparacion LOSO de H1-H4 (construido, no corrido todavia)
+
+Arquitectura deliberada: **bulk-pull liga completa por ventana de fecha**
+(nunca por equipo) hacia una tabla nueva y aislada
+`historical_statcast_event` (SOLO `launch_speed` +
+`estimated_woba_using_speedangle` por evento de bateo -- ningun otro
+campo Statcast) -- mismo patron que `historical_game` (se ingiere el
+hecho crudo una vez; toda la reconstruccion point-in-time-safe pasa
+DESPUES, en Python, dia por dia, nunca pidiendole a la fuente un recorte
+directo). Esto es deliberadamente mas barato que replicar el patron de
+Trend (llamada HTTP por equipo por juego), aprovechando que una sola
+consulta sin filtro de equipo trae toda la liga para esa ventana.
+
+- `jsa/historical/statcast_ingestion.py`: `ingest_statcast_season_minimal()`
+  -- chunkea la temporada en ventanas de 30 dias, reporta EXPLICITAMENTE
+  el costo real (tiempo total, bytes de respuesta, eventos por chunk,
+  chunks con error) en el resumen devuelto, tal como exigio el usuario
+  para poder comparar costo vs. beneficio predictivo.
+- `jsa/historical/statcast_candidate_audit.py`: `compute_statcast_candidates()`
+  point-in-time-safe, dia-batched, **reseteado por temporada** (mismo
+  criterio que `offense`/`starter`/`bullpen`, no acumula entre
+  temporadas como head-to-head). Atribuye cada evento a equipo que
+  batea/equipo que lanza via `inning_topbot`, y a abridor especifico via
+  `historical_game.home_pitcher_id`/`away_pitcher_id` ya ingerido (sin
+  necesitar ningun mapeo nuevo de abreviatura de equipo -- se evito ese
+  riesgo usando `game_pk` como llave de union, ya confiable).
+  - H1: xwOBA de equipo (ofensiva) acumulado en la temporada -- candidato
+    de `offense`.
+  - H2: xwOBA permitido acumulado del ABRIDOR de ese juego especifico --
+    candidato de `starter`.
+  - H3: xwOBA permitido acumulado del BULLPEN de equipo -- candidato de
+    `bullpen`.
+  - H4: hard-hit rate de equipo (ofensiva) rolling 7d/14d -- candidato de
+    Trend (comparado contra Trend=0, no contra `offense`).
+  - `evaluate_statcast_candidates()`: mismo patron LOSO + bootstrap CI de
+    500 resamples que Trend/Historical, pero H1-H3 comparan contra el
+    valor REAL de produccion del pilar correspondiente (no contra 0,
+    porque starter/bullpen/offense ya son imprescindibles -- barra mas
+    alta que Trend/Historical).
+- 15 tests nuevos (`test_statcast_ingestion.py`: 8 casos incluyendo
+  parseo CSV filtrado a `type=='X'`, chunks de fecha no solapados,
+  manejo de errores de red, resumibilidad/`force`;
+  `test_statcast_candidate_audit.py`: 7 casos incluyendo el sanity check
+  point-in-time de "primer juego de la temporada sin historial todavia"
+  y los 2 sanity checks anti-fuga estandar del proyecto).
+- `jsa_statcast_minimal_ingest.yml` (ingesta por temporada, timeout 180
+  min) + `jsa_statcast_candidate_audit.yml` (solo lectura, timeout 30
+  min) -- ninguno de los dos se disparo todavia, queda para hacerlo con
+  confirmacion explicita del usuario.
+
+No se decide todavia si algun candidato se implementa -- eso requiere
+correr la ingesta real (midiendo el costo real, no solo el estimado del
+spike) y el audit LOSO contra datos reales, revisando el resultado con
+el usuario antes de escribir una sola linea en `offense.py`/`starter.py`/
+`bullpen.py`/`trend.py`.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
