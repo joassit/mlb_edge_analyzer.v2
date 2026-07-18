@@ -1,0 +1,63 @@
+name: jsa-statcast-candidate-audit
+
+# One-off, solo lectura: comparacion LOSO de las 4 hipotesis Statcast
+# (H1-H4, ver jsa/docs/statcast_integration_design.md) contra el pilar de
+# produccion correspondiente (offense/starter/bullpen/trend). Requiere
+# haber corrido jsa_statcast_minimal_ingest.yml antes para las temporadas
+# pedidas. Nunca golpea Baseball Savant, nunca modifica ningun pilar ni
+# registry -- solo lee JSA_HISTORICAL_DATABASE_URL y devuelve el
+# resultado como JSON.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a incluir, separadas por coma (ej. 2022,2023,2024,2025,2026) -- deben tener Statcast ya ingerido'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+
+permissions:
+  contents: read
+
+jobs:
+  statcast-candidate-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run statcast-candidate-audit
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          python -m jsa.historical.cli statcast-candidate-audit \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            --out jsa_statcast_candidate_audit_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-statcast-candidate-audit-${{ github.run_id }}
+          path: jsa_statcast_candidate_audit_result.json
+          if-no-files-found: warn
+          retention-days: 30

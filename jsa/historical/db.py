@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Column, Date, DateTime, Integer, MetaData, String, Table, UniqueConstraint, create_engine, select
+from sqlalchemy import JSON, Column, Date, DateTime, Float, Integer, MetaData, String, Table, UniqueConstraint, create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -93,6 +93,36 @@ historical_ingestion_run_metadata = Table(
     Column("schema_version", String, nullable=False),
     Column("provider_version", String, nullable=False),
     Column("forced_reingestion", Integer, nullable=False, default=0),
+)
+
+# Tabla nueva y aislada para la Etapa 2 del spike de Statcast (ver
+# jsa/docs/statcast_integration_design.md) -- eventos crudos de bateo
+# (batted-ball events) tal como los devuelve Baseball Savant, SIN
+# agregar todavia. La agregacion point-in-time-safe (cumulativa por
+# temporada para H1/H2/H3, rolling 7d/14d para H4) se hace en Python
+# desde esta tabla, exactamente igual que Elo/Pythagorean/head-to-head
+# se calculan desde `historical_game` ya ingerido -- nunca se le pide a
+# la fuente un recorte "como si fuera" point-in-time (Baseball Savant no
+# tiene garantia documentada de esa semantica, ver seccion 4 del
+# diagnostico del spike de factibilidad). Deliberadamente NO se agrega
+# a `GameSnapshot`/`historical_snapshot` -- son candidatos bajo
+# evaluacion, no un pilar confirmado (mismo criterio que Elo/Pythagorean
+# nunca tocaron `team_quality` hasta demostrar mejora).
+historical_statcast_event = Table(
+    "historical_statcast_event", metadata,
+    Column("row_id", Integer, primary_key=True, autoincrement=True),
+    Column("recorded_at", DateTime, nullable=False),
+    Column("season", Integer, nullable=False),
+    Column("game_pk", Integer, nullable=False),
+    Column("game_date", Date, nullable=False),
+    Column("at_bat_number", Integer, nullable=False),
+    Column("pitch_number", Integer, nullable=False),
+    Column("inning_topbot", String, nullable=True),
+    Column("batter_id", Integer, nullable=True),
+    Column("pitcher_id", Integer, nullable=True),
+    Column("launch_speed", Float, nullable=True),
+    Column("xwoba", Float, nullable=True),
+    UniqueConstraint("game_pk", "at_bat_number", "pitch_number", name="uq_historical_statcast_event"),
 )
 
 
@@ -191,6 +221,51 @@ def record_ingestion_run_metadata(
 def games_for_season(engine: Engine, season: int) -> list[dict]:
     with engine.connect() as conn:
         rows = conn.execute(select(historical_game).where(historical_game.c.season == season)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def bulk_insert_statcast_events(engine: Engine, season: int, events: list[dict]) -> int:
+    """Insert masivo (una sola transaccion) de eventos crudos de bateo --
+    `events` es una lista de dicts con exactamente las columnas de
+    `historical_statcast_event` salvo `row_id`/`recorded_at`/`season`.
+    Duplicados (misma `game_pk`+`at_bat_number`+`pitch_number`, ej. una
+    re-ingesta sin `clear_statcast_season()` previo) se ignoran de forma
+    portable SQLite/Postgres -- mismo criterio que el resto del proyecto,
+    pero a nivel de tabla completa (`executemany` vs. fila por fila) por
+    volumen: una temporada son decenas de miles de filas, no cientos."""
+    if not events:
+        return 0
+    now = datetime.now(timezone.utc)
+    rows = [{**e, "season": season, "recorded_at": now} for e in events]
+    with engine.begin() as conn:
+        dialect_name = conn.engine.dialect.name
+        if dialect_name == "postgresql":
+            from sqlalchemy.dialects import postgresql
+            stmt = postgresql.insert(historical_statcast_event).on_conflict_do_nothing()
+        elif dialect_name == "sqlite":
+            from sqlalchemy.dialects import sqlite
+            stmt = sqlite.insert(historical_statcast_event).on_conflict_do_nothing()
+        else:
+            stmt = historical_statcast_event.insert()
+        conn.execute(stmt, rows)
+    return len(rows)
+
+
+def clear_statcast_season(engine: Engine, season: int) -> int:
+    with engine.begin() as conn:
+        result = conn.execute(historical_statcast_event.delete().where(historical_statcast_event.c.season == season))
+    return result.rowcount
+
+
+def count_statcast_events_for_season(engine: Engine, season: int) -> int:
+    with engine.connect() as conn:
+        rows = conn.execute(select(historical_statcast_event.c.row_id).where(historical_statcast_event.c.season == season)).all()
+    return len(rows)
+
+
+def statcast_events_for_seasons(engine: Engine, seasons: list[int]) -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(select(historical_statcast_event).where(historical_statcast_event.c.season.in_(seasons))).mappings().all()
     return [dict(r) for r in rows]
 
 
