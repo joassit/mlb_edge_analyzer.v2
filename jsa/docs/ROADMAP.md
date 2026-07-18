@@ -1061,6 +1061,68 @@ mismo criterio que Trend: correr esto contra datos reales y revisar el
 resultado con el usuario antes de escribir una sola linea en
 `historical.py`.
 
+## Resultado real de `jsa_historical_historical_candidate_audit.yml` -- linea cerrada, NO adoptada
+
+Corrida real sobre las 5 temporadas (2022-2026, 13,101 juegos, run
+[29625728340](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29625728340)).
+
+**Auditoria descriptiva**: cobertura excelente -- **96.1%** de los juegos
+tienen al menos un enfrentamiento previo dentro de la ventana 2022-2026
+(vs. 85% en Trend), con un promedio de 20.7 enfrentamientos previos por
+juego (mediana 15, hasta 87 en rivalidades de division con mas historial
+acumulado). La disponibilidad de datos NO es el problema -- los 4
+candidatos presentan distribuciones coherentes, centradas cerca de 0,
+sin anomalias de calidad.
+
+**Comparacion LOSO** (sustituir Historical=0 por cada candidato,
+z-scoreado, mismo peso, bootstrap CI vs. el estado real de produccion):
+
+| Candidato | AUC individual | Cobertura | Δ Brier vs. Historical=0 | Significativo |
+|---|---|---|---|---|
+| `h2h_win_pct_all_time` | 0.532 | 96.1% | +0.000051 | No |
+| `h2h_win_pct_last_5` | 0.524 | 96.1% | **+0.000348** | **Si** |
+| `h2h_run_diff_avg` | 0.539 | 96.1% | +0.000033 | No |
+| `h2h_recency_weighted` | 0.525 | 96.1% | +0.000136 | No |
+
+**Decision del usuario (2026-07-18): NO implementar Historical con estos
+candidatos.** La capacidad predictiva individual es debil (AUC 0.52-0.54)
+y ningun candidato mejora el Brier de forma significativa; el unico
+resultado estadisticamente significativo (`h2h_win_pct_last_5`, CI
++0.000143 a +0.000562, enteramente positivo) es un **deterioro** -- por
+lo tanto queda explicitamente descartado en su forma actual, no solo
+"sin evidencia de mejora". `historical.py` se mantiene como stub
+documentado (`advantage=0` siempre) -- esta es la conclusion correcta
+del experimento, no una limitacion pendiente de resolver.
+
+**Que se conserva**: toda la infraestructura
+(`compute_head_to_head_history()`, `run_descriptive_audit()`,
+`evaluate_historical_candidates()`, el workflow) sigue disponible para
+evaluar candidatos DISTINTOS sin reconstruir el pipeline.
+
+**Alcance exacto del rechazo**: se descartan especificamente estos 4
+candidatos de historial head-to-head (win% all-time, win% ultimos 5,
+diferencia de carreras promedio, ponderado por recencia) -- **no el
+concepto general de senales historicas**. Cualquier propuesta futura
+debe partir de una hipotesis distinta (ej. rendimiento en el mismo
+estadio, historial reciente contra el mismo abridor rival, contexto de
+"favorito habitual" medido de otra forma) y someterse de nuevo a
+validacion LOSO completa antes de implementarse -- no se asume que
+"historial head-to-head en general no aporta" a partir de este resultado.
+
+## Trend e Historical -- ambas lineas cerradas en su formulacion actual (2026-07-18)
+
+Con el resultado de arriba, las dos fases del roadmap estrategico que
+buscaban activar los pilares stub (`trend`/`historical`) quedan cerradas
+con evidencia real: en ambos casos, los candidatos evaluados no superaron
+la validacion LOSO -- en ambos casos hubo ademas un candidato
+especificamente PEOR de forma estadisticamente significativa
+(`era_rolling_14d` para Trend, `h2h_win_pct_last_5` para Historical).
+Decision explicita del usuario: priorizar de aqui en adelante mejoras que
+ya demostraron aportar valor medible, en vez de seguir agregando
+variables cuya contribucion no supera la validacion estadistica. Los dos
+pilares siguen activos y reportando (Seccion 7.1: todo pilar debe
+evaluarse), transparentes sobre su propia limitacion, tal como estan hoy.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
