@@ -1564,6 +1564,69 @@ unicas vias no cerradas requieren datos genuinamente nuevos (boxscore/
 linescore, xwOBA con walks/strikeouts incluidos, IP real por juego via
 `gameLog`) -- ninguna construida ni autorizada todavia.
 
+## `cross_model` -- puente de resultados entre JSA, Game Flow y el modelo legado (2026-07-19)
+
+El usuario pidio "una base de datos de la cual podamos correr distintos
+modelos [JSA, MLB legado, Game Flow]" -- precisado a: poder **cruzar
+resultados con SQL directo** entre los 3 sistemas (comparar precision,
+no solo compartir infraestructura). No hizo falta un proyecto nuevo: los
+3 sistemas ya coexisten en este repositorio, cada uno con su propia base
+deliberadamente aislada (`DATABASE_URL`/`HISTORICAL_DATABASE_URL` legado,
+`JSA_DATABASE_URL`/`JSA_HISTORICAL_DATABASE_URL` JSA). `game_pk` es
+`Integer` en los 3 -- confirmado por investigacion directa del codigo
+legado (`db/database.py`, `historical_engine/db.py`), sin friccion para
+un join.
+
+**Decision de diseño (confirmada por el usuario)**: un sync/ETL de solo
+lectura, nunca instrumentar `persist_run()` (JSA) ni `save_picks()`/
+`save_analysis()` (legado) -- cero riesgo sobre los pipelines de
+produccion existentes, reversible, suficiente para analisis/comparacion.
+
+**Construido** (`cross_model/`, paquete nuevo en la raiz del repo, fuera
+de `jsa/` y del codigo legado para no comprometer el aislamiento de
+ninguno de los dos):
+- `cross_model/db.py`: tabla `unified_model_predictions` (`game_pk,
+  game_date, season, system, model_name, model_version, raw_score,
+  home_win_prob, predicted_winner, actual_winner, correct, source_ref`,
+  unique en `(game_pk, system, model_name, model_version)`) +
+  `upsert_prediction()` (upsert real, nunca duplica) +
+  `accuracy_by_system_and_model()` (el ejemplo concreto de "cruzar con
+  SQL directo": accuracy por sistema+modelo en una sola consulta).
+- `cross_model/sync_jsa.py`: sincroniza `evidence_score_raw` (JSA
+  historico, real, 5 temporadas ya ingeridas) y GF1/GF2 (Game Flow) desde
+  `jsa/historical/db.py` -- CLI `python -m cross_model.sync_jsa
+  --jsa-historical-db ... --season ...`.
+- `jsa/storage/dialect_utils.py::upsert()`: helper nuevo, dialect-aware
+  (Postgres/SQLite), agregado al modulo YA compartido entre todos los
+  motores de storage de JSA -- reusado por `cross_model/db.py` sin
+  duplicar la logica de `ON CONFLICT DO UPDATE`.
+- 14 tests nuevos (`cross_model/tests/`, su propio `pytest.ini`/
+  `conftest.py` -- corre standalone con `pytest cross_model/`): schema,
+  upsert idempotente, sync end-to-end contra una base JSA sembrada
+  sinteticamente, y la demostracion explicita de cruzar JSA vs. Game Flow
+  para los mismos juegos con una sola consulta SQL. Suite completa de
+  `jsa/` reverificada tras el cambio a `dialect_utils.py`: 314 passed, 3
+  skipped. `tests/test_historical_isolation.py` (legado) tambien
+  reverificado: 6 passed -- `cross_model` no toca ninguna tabla de
+  produccion de ninguno de los 2 sistemas.
+
+**Alcance de esta entrega**: solo JSA + Game Flow (ambos con datos reales
+verificables en este sandbox). El sync del modelo legado
+(`sync_legacy.py`, mismo patron, leyendo `db.picks`/`db.actual_results`/
+`historical_engine.db.historical_prediction`) queda **documentado, no
+construido** -- su base de produccion real (`mlb_edge.db`/Postgres) vive
+fuera del alcance de este sandbox, no hay forma de probarlo end-to-end
+aqui. Ver `jsa/docs/cross_model_design.md` para el diseño completo,
+incluyendo por que `home_win_prob` queda NULL en toda fila sincronizada
+hoy (ningun sistema produce todavia una probabilidad genuinamente
+calibrada).
+
+**Que falta para produccion real**: apuntar `UNIFIED_DATABASE_URL` (y las
+demas URLs de conexion, si se quiere de verdad una sola instancia) al
+mismo servidor Postgres -- decision de infraestructura, no de codigo;
+`sync_legacy.py`; un workflow de GitHub Actions que corra el sync
+on-demand (no construido, se corre manualmente por ahora).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

@@ -26,3 +26,22 @@ def insert_ignore_duplicates(conn: Connection, table: Table, **values) -> None:
     else:
         stmt = table.insert().values(**values)
     conn.execute(stmt)
+
+
+def upsert(conn: Connection, table: Table, *, index_elements: list[str], **values) -> None:
+    """Insert, o ACTUALIZAR si ya existe (conflicto en `index_elements`) --
+    portable entre SQLite y Postgres. A diferencia de
+    `insert_ignore_duplicates()`, esto si sobreescribe la fila existente
+    con los valores nuevos -- para casos donde un valor persistido puede
+    cambiar legitimamente al re-correr (ej. `actual_winner` que se llena
+    recien despues de que el juego termina)."""
+    dialect_name = conn.engine.dialect.name
+    if dialect_name == "postgresql":
+        stmt = postgresql.insert(table).values(**values)
+        stmt = stmt.on_conflict_do_update(index_elements=index_elements, set_=values)
+    elif dialect_name == "sqlite":
+        stmt = sqlite.insert(table).values(**values)
+        stmt = stmt.on_conflict_do_update(index_elements=index_elements, set_=values)
+    else:
+        stmt = table.insert().values(**values)
+    conn.execute(stmt)
