@@ -1299,6 +1299,208 @@ spike) y el audit LOSO contra datos reales, revisando el resultado con
 el usuario antes de escribir una sola linea en `offense.py`/`starter.py`/
 `bullpen.py`/`trend.py`.
 
+## Resultado real de la ingesta minima + `jsa_statcast_candidate_audit.yml` -- linea cerrada, NO adoptada
+
+**Costo real de la ingesta** (5 corridas de `jsa_statcast_minimal_ingest.yml`,
+en paralelo, 0 errores en 45 chunks): 142,515 eventos de bateo reales
+almacenados, 550.5 MB descargados en total, ~48 minutos de computo de
+GitHub Actions repartidos en 5 jobs paralelos (tiempo de reloj real
+~15 min, la corrida mas lenta). Costo trivial comparado con las horas por
+temporada que tomo la re-ingesta de Trend.
+
+**Comparacion LOSO** (run
+[29664006135](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29664006135),
+13,101 juegos, criterio de exito de la Seccion 7 del diseno tecnico:
+`delta_brier_mean` negativo Y `significant=True` Y `|delta_brier_mean|
+>= 0.001` -- las 3 condiciones a la vez):
+
+| Hipotesis | Pilar objetivo | AUC | Cobertura | Δ Brier vs. actual | Significativo | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|
+| `h1_offense_xwoba` | offense | 0.517 | 84.3% | **+0.001240** | Si | **No** |
+| `h2_starter_xwoba_allowed` | starter | 0.501 | 59.4% | **+0.001233** | Si | **No** |
+| `h3_bullpen_xwoba_allowed` | bullpen | 0.501 | 84.2% | **+0.001523** | Si | **No** |
+| `h4_hard_hit_rolling_7d` | trend | 0.515 | 35.5% | +0.000066 | No | No |
+| `h4_hard_hit_rolling_14d` | trend | 0.510 | 54.5% | +0.000001 | No | No |
+
+**Decision del usuario (2026-07-18): NO implementar ninguna de las 4
+hipotesis.** Este resultado es mas contundente que Trend/Historical: H1,
+H2 y H3 muestran un **deterioro estadisticamente significativo** (los 3
+CI quedan enteramente del lado positivo) al sustituir offense/starter/
+bullpen por sus versiones basadas en xwOBA -- no es solo "no mejora", es
+"empeora con confianza estadistica". H4 (candidatos de Trend, rolling
+hard-hit rate) no muestra efecto en ninguna direccion.
+
+**Caveat de cobertura, documentado pero NO usado para reabrir la
+linea sin nueva evidencia**: H2 (abridor especifico) tuvo solo 59.4% de
+cobertura -- bastante menor que H1/H3 (~84%), porque acumular una
+muestra de bateos-en-juego permitidos por ESE abridor especifico tarda
+mas en la temporada que agregarlo a nivel de equipo. Eso diluye la
+comparacion en ~40% de los juegos con z=0 neutral, y probablemente
+contribuye al deterioro observado en H2 independientemente de si xwOBA
+en si es mejor o peor señal. Consistente con el diagnostico del techo
+del modelo: esta implementacion especifica de xwOBA (calculada solo de
+bateos-en-juego -- eventos con `type=='X'` -- sin walks/strikeouts que
+ERA/OPS si capturan) resulto ser una señal MAS POBRE, no mas rica, que
+la que ya se usa.
+
+**Que se conserva**: toda la infraestructura
+(`historical_statcast_event`, `statcast_ingestion.py`,
+`statcast_candidate_audit.py`, los 2 workflows) sigue disponible para
+evaluar candidatos DISTINTOS sin reconstruir el pipeline de ingesta --
+en particular, una version de xwOBA que incluya TODOS los resultados de
+turno al bate (no solo bateos en juego) resolveria el problema de
+cobertura/completitud identificado arriba, y es una hipotesis
+legitimamente distinta (no una repeticion parametrica) si se decide
+retomar esta linea en el futuro.
+
+**Alcance exacto del rechazo**: se descartan especificamente estas 4
+hipotesis (xwOBA de equipo/abridor/bullpen calculado desde bateos en
+juego solamente, y hard-hit rate rolling) -- no el concepto general de
+metricas Statcast ni la arquitectura de ingesta minima construida.
+
+## `team_quality`: Elo y Pythagorean Expectation bajo el criterio formal de 3 condiciones -- linea cerrada (2026-07-19)
+
+El usuario propuso revisar un lote de metricas nuevas (posicion en tabla/
+W-L, carreras generadas/permitidas, HR, hits, LOB, capitalizacion de
+carreras por hit, fortaleza de abridor/bullpen/closer, limitar a 5
+entradas). Antes de construir nada nuevo, se verifico que dos de esas
+ideas -- posicion en tabla/W-L y carreras generadas/permitidas -- ya
+tenian una implementacion offline construida hace varias sesiones
+(`resolution_audit.py::compute_elo_and_pythagorean()`, point-in-time-safe,
+100% calculable desde `historical_game` ya ingerido, sin tocar la API):
+Elo (equivalente a W-L, `elo_k=20`, reinicio por temporada) y Pythagorean
+Expectation (equivalente a carreras generadas/permitidas, exponente 1.83).
+Esos resultados ya existian con LOSO + bootstrap CI, pero nunca se
+habian evaluado contra el criterio formal de 3 condiciones (Seccion 7 de
+`jsa/docs/statcast_integration_design.md`) que se establecio recien con
+la linea de Statcast. Se aplico ese criterio retroactivamente a los
+resultados reales ya calculados sobre el dataset actual mas grande
+(`jsa/docs/baselines/post_reingest_trend_2026-07-17/resolution_audit_result.json`,
+13,101 juegos, 2022-2026) -- sin recalcular nada, sin nueva ingesta.
+
+| Alternativa | Pilar objetivo | AUC | Δ Brier vs. `team_quality` actual | Significativo | \|Δ\| >= 0.001 | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|
+| Elo (`elo_diff`) | team_quality | 0.559 | **+0.000460** | Si (CI: [0.0000397, 0.000867]) | No | **No** |
+| Pythagorean Expectation | team_quality | 0.559 | **+0.000479** | Si (CI: [0.0000130, 0.000914]) | No | **No** |
+
+**Ambas alternativas fallan en 2 de las 3 condiciones a la vez**: el
+delta de Brier es positivo (serian PEORES si sustituyeran a
+`team_quality`, no mejores) Y estadisticamente significativo (el CI de
+bootstrap queda enteramente del lado positivo) Y el tamaño de efecto
+(~0.00046-0.00048) queda de todas formas por debajo del minimo de
+`0.001` aunque el signo hubiera sido favorable. Con un dataset mas chico
+(baseline `pre_trend_2026-07-16`, 13,099 juegos) Elo habia dado
+`significant=False` -- con mas datos reales (post re-ingesta de Trend) el
+resultado se volvio inequivoco: ambas alternativas son significativamente
+peores que la implementacion actual de `team_quality` (lesiones + closer
+disponible + fielding_pct).
+
+**Decision: linea cerrada, no se adopta ninguna.** Confirma con evidencia
+formal lo que ya sugeria el resultado preliminar: agregar record de
+temporada o diferencial de carreras como sustituto de `team_quality` no
+mejora el modelo bajo el mismo protocolo que Trend/Historical/Statcast.
+
+**Que se conserva**: `resolution_audit.py::compute_elo_and_pythagorean()`
+y `evaluate_team_quality_alternatives()` siguen disponibles para evaluar
+una alternativa genuinamente distinta a `team_quality` en el futuro (por
+ejemplo, Elo con regresion entre temporadas, o un `pyth_exponent`
+recalibrado) sin reconstruir el pipeline -- pero seria una hipotesis
+nueva, no una repeticion de esta.
+
+**Alcance exacto del rechazo**: se descarta especificamente reemplazar
+`team_quality` por Elo o por Pythagorean Expectation tal como estan
+definidos hoy -- no se descarta la idea de que W-L/run-differential
+puedan aportar algo en una formulacion distinta (por ejemplo, como señal
+adicional combinada con lo que ya usa `team_quality`, en vez de un
+reemplazo total).
+
+## Cuatro lineas cerradas (Trend, Historical, Statcast H1-H4, Elo/Pythagorean) -- estado consolidado (2026-07-19)
+
+Con este resultado, las cuatro fases de "agregar informacion nueva" del
+roadmap estrategico terminaron sin evidencia de mejora bajo el mismo
+protocolo LOSO + bootstrap CI + criterio de tamaño de efecto minimo. En
+tres de los cuatro casos hubo ademas al menos un candidato especificamente
+PEOR de forma estadisticamente significativa (Trend: `era_rolling_14d`;
+Historical: `h2h_win_pct_last_5`; Statcast: H1, H2 y H3 los tres;
+Elo/Pythagorean: las dos alternativas completas). El diagnostico del
+techo del modelo (ver seccion dedicada arriba) sigue siendo la lectura
+vigente: el cuello de botella no esta en como se combinan los pilares
+(la optimizacion de pesos ya esta cerca del optimo), sino en el techo de
+informacion de las señales concretas ya probadas -- pero esto aplica
+estrictamente al espacio de informacion evaluado hasta ahora, no es una
+afirmacion general sobre el techo teorico de predecir MLB (ver la nota
+de alcance explicita en el diagnostico).
+
+## Game Flow Engine v1.0 -- Etapa 1 (construido, no corrido todavia, 2026-07-19)
+
+Auditoria previa (2026-07-19, mismo dia): se confirmo que JSA no modela
+el desarrollo temporal del partido -- evalua un `GameSnapshot` estatico
+pre-partido, sin conceptos de inning, transicion al bullpen, situacion de
+salvamento ni estado esperado del juego. El usuario propuso un Game Flow
+Engine completo (Starter/Bullpen/Closer Projection, dominancia por fases,
+pesos dinamicos, Win State Projection); tras verificar variable por
+variable contra el codigo real, la mayoria no tiene dato hoy (matchup vs.
+lineup, pitch count real, dias de descanso, forma reciente -- ya
+evaluada y rechazada como Trend --, xFIP/WHIP/K%/BB% del cerrador) o
+requiere boxscore/linescore no ingerido (HR/hits/LOB/entradas). El
+usuario re-escopo la propuesta a una Etapa 1 deliberadamente limitada:
+solo lo construible con datos YA persistidos, como modulo de generacion
+de candidatos (mismo rol que Trend/Historical/Statcast/Elo-Pythagorean),
+nunca wireado a `engine/pillars/` ni a `BASE_PILLAR_WEIGHTS` sin
+evidencia. Ver `jsa/docs/game_flow_design.md` para el diseno completo.
+
+**2 hipotesis evaluadas** (`jsa/historical/game_flow_candidate_audit.py`):
+- `gf1_starter_durability`: sustituye el insumo de `starter` (hoy ERA con
+  shrinkage) por un diff de "probabilidad de completar >=6 entradas",
+  derivado de `home/away_starter_projected_ip` (el mismo proxy que ya usa
+  `context_detector.py` para `long_outing`/`short_outing_bullpen_game`),
+  modelado como Normal(mu=projected_ip, sigma=1.2 heuristico). Prueba si
+  la durabilidad esperada predice el resultado distinto a la calidad
+  (ERA) del abridor.
+- `gf2_bullpen_dependency`: sustituye el insumo de `bullpen` (hoy ERA con
+  shrinkage + penalizacion de closer) por ese mismo diff escalado por
+  cuanto se espera que dependa el partido del bullpen
+  (`expected_bullpen_ip = 9 - projected_ip` de cada equipo). Prueba si la
+  ventaja de bullpen importa mas en partidos bullpen-dependientes.
+
+**Sin ninguna ingesta nueva**: ambas hipotesis se derivan enteramente de
+campos que ya estan en `historical_snapshot` desde la ingesta original --
+a diferencia de Statcast, este workflow no depende de correr una ingesta
+previa.
+
+**Limitacion honesta documentada** (ver diseno, Seccion 3): no existe en
+ningun lado del proyecto un registro de cuantas entradas lanzo
+efectivamente un abridor en un juego historico especifico
+(`historical_game` solo persiste el resultado final) -- por lo tanto
+`sigma=1.2` es un heuristico sin calibrar contra ese ground truth (mismo
+criterio de honestidad que `SHRINKAGE_K_IP`/`OFFENSE_FACTOR_EXPONENT` en
+`config.py`). GF1/GF2 se validan igual que Elo/Pythagorean/Statcast:
+sustituyendo el diff en el pilar objetivo y midiendo si mejora la
+prediccion real de `home_win` via LOSO -- no calibrando su propia
+probabilidad interna contra IP real por juego (ese dato no existe; seria
+obtenible via `stats=gameLog` por pitcher, mucho mas barato que el
+boxscore completo de Fase 2, pero NO autorizado en esta entrega).
+
+**Deliberadamente fuera de esta Etapa 1**: Closer Rating (separar el ERA
+del cerrador del resto del bullpen -- requiere un campo nuevo en
+`historical_snapshot` y su propia re-ingesta de 5 temporadas, no
+autorizada todavia); dominancia por fases, Win State Projection, pesos
+dinamicos, First 5 Innings (requieren boxscore/linescore real, ninguno
+ingerido).
+
+**Mismo criterio de 3 condiciones que Statcast** (Seccion 5 del diseno):
+significancia + `|delta_brier_mean| >= 0.001` + costo justificado por el
+usuario -- ninguna adopcion automatica.
+
+Implementacion: `jsa/historical/game_flow_candidate_audit.py` (2
+hipotesis, LOSO + bootstrap CI), CLI `game-flow-candidate-audit`,
+workflow `.github/workflows/jsa_game_flow_candidate_audit.yml`
+(`workflow_dispatch`, solo lectura), 8 tests en
+`jsa/tests/test_game_flow_candidate_audit.py` (formas, monotonicidad,
+sanity checks anti-fuga -- coinflip puro y recuperacion de senal
+inyectada --, punta a punta). Suite completa de `jsa/` verificada:
+314 passed, 3 skipped tras el agregado.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
