@@ -49,11 +49,24 @@ def migrate(sqlite_path: str = "mlb_edge.db") -> dict[str, int]:
                     continue
 
                 datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
+                # Columnas NOT NULL con default escalar (ej. Pick.calibration_phase/
+                # forced, default=False): SQLite nunca reforzo esa restriccion
+                # retroactivamente sobre filas viejas (ni en ALTER TABLE ADD COLUMN
+                # ni en insert crudo), asi que el dump trae NULL real en algunas --
+                # Postgres si la exige. Se rellena con el mismo default que ya
+                # usaria el ORM al insertar una fila nueva, nunca un valor inventado.
+                not_null_scalar_defaults = {
+                    c.name: c.default.arg for c in table.columns
+                    if not c.nullable and c.default is not None and c.default.is_scalar
+                }
                 for row in rows:
                     for col in datetime_cols:
                         value = row.get(col)
                         if isinstance(value, str):
                             row[col] = datetime.fromisoformat(value)
+                    for col_name, default_value in not_null_scalar_defaults.items():
+                        if row.get(col_name) is None:
+                            row[col_name] = default_value
 
                 conn.execute(table.insert(), rows)
                 migrated[table.name] = len(rows)
