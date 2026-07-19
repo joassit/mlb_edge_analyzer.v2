@@ -1431,6 +1431,76 @@ estrictamente al espacio de informacion evaluado hasta ahora, no es una
 afirmacion general sobre el techo teorico de predecir MLB (ver la nota
 de alcance explicita en el diagnostico).
 
+## Game Flow Engine v1.0 -- Etapa 1 (construido, no corrido todavia, 2026-07-19)
+
+Auditoria previa (2026-07-19, mismo dia): se confirmo que JSA no modela
+el desarrollo temporal del partido -- evalua un `GameSnapshot` estatico
+pre-partido, sin conceptos de inning, transicion al bullpen, situacion de
+salvamento ni estado esperado del juego. El usuario propuso un Game Flow
+Engine completo (Starter/Bullpen/Closer Projection, dominancia por fases,
+pesos dinamicos, Win State Projection); tras verificar variable por
+variable contra el codigo real, la mayoria no tiene dato hoy (matchup vs.
+lineup, pitch count real, dias de descanso, forma reciente -- ya
+evaluada y rechazada como Trend --, xFIP/WHIP/K%/BB% del cerrador) o
+requiere boxscore/linescore no ingerido (HR/hits/LOB/entradas). El
+usuario re-escopo la propuesta a una Etapa 1 deliberadamente limitada:
+solo lo construible con datos YA persistidos, como modulo de generacion
+de candidatos (mismo rol que Trend/Historical/Statcast/Elo-Pythagorean),
+nunca wireado a `engine/pillars/` ni a `BASE_PILLAR_WEIGHTS` sin
+evidencia. Ver `jsa/docs/game_flow_design.md` para el diseno completo.
+
+**2 hipotesis evaluadas** (`jsa/historical/game_flow_candidate_audit.py`):
+- `gf1_starter_durability`: sustituye el insumo de `starter` (hoy ERA con
+  shrinkage) por un diff de "probabilidad de completar >=6 entradas",
+  derivado de `home/away_starter_projected_ip` (el mismo proxy que ya usa
+  `context_detector.py` para `long_outing`/`short_outing_bullpen_game`),
+  modelado como Normal(mu=projected_ip, sigma=1.2 heuristico). Prueba si
+  la durabilidad esperada predice el resultado distinto a la calidad
+  (ERA) del abridor.
+- `gf2_bullpen_dependency`: sustituye el insumo de `bullpen` (hoy ERA con
+  shrinkage + penalizacion de closer) por ese mismo diff escalado por
+  cuanto se espera que dependa el partido del bullpen
+  (`expected_bullpen_ip = 9 - projected_ip` de cada equipo). Prueba si la
+  ventaja de bullpen importa mas en partidos bullpen-dependientes.
+
+**Sin ninguna ingesta nueva**: ambas hipotesis se derivan enteramente de
+campos que ya estan en `historical_snapshot` desde la ingesta original --
+a diferencia de Statcast, este workflow no depende de correr una ingesta
+previa.
+
+**Limitacion honesta documentada** (ver diseno, Seccion 3): no existe en
+ningun lado del proyecto un registro de cuantas entradas lanzo
+efectivamente un abridor en un juego historico especifico
+(`historical_game` solo persiste el resultado final) -- por lo tanto
+`sigma=1.2` es un heuristico sin calibrar contra ese ground truth (mismo
+criterio de honestidad que `SHRINKAGE_K_IP`/`OFFENSE_FACTOR_EXPONENT` en
+`config.py`). GF1/GF2 se validan igual que Elo/Pythagorean/Statcast:
+sustituyendo el diff en el pilar objetivo y midiendo si mejora la
+prediccion real de `home_win` via LOSO -- no calibrando su propia
+probabilidad interna contra IP real por juego (ese dato no existe; seria
+obtenible via `stats=gameLog` por pitcher, mucho mas barato que el
+boxscore completo de Fase 2, pero NO autorizado en esta entrega).
+
+**Deliberadamente fuera de esta Etapa 1**: Closer Rating (separar el ERA
+del cerrador del resto del bullpen -- requiere un campo nuevo en
+`historical_snapshot` y su propia re-ingesta de 5 temporadas, no
+autorizada todavia); dominancia por fases, Win State Projection, pesos
+dinamicos, First 5 Innings (requieren boxscore/linescore real, ninguno
+ingerido).
+
+**Mismo criterio de 3 condiciones que Statcast** (Seccion 5 del diseno):
+significancia + `|delta_brier_mean| >= 0.001` + costo justificado por el
+usuario -- ninguna adopcion automatica.
+
+Implementacion: `jsa/historical/game_flow_candidate_audit.py` (2
+hipotesis, LOSO + bootstrap CI), CLI `game-flow-candidate-audit`,
+workflow `.github/workflows/jsa_game_flow_candidate_audit.yml`
+(`workflow_dispatch`, solo lectura), 8 tests en
+`jsa/tests/test_game_flow_candidate_audit.py` (formas, monotonicidad,
+sanity checks anti-fuga -- coinflip puro y recuperacion de senal
+inyectada --, punta a punta). Suite completa de `jsa/` verificada:
+314 passed, 3 skipped tras el agregado.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

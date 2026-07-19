@@ -24,6 +24,7 @@ from jsa.historical.trend_candidate_audit import run_full_trend_candidate_audit
 from jsa.historical.historical_candidate_audit import run_full_historical_candidate_audit
 from jsa.historical.statcast_ingestion import ingest_statcast_season_minimal
 from jsa.historical.statcast_candidate_audit import run_full_statcast_candidate_audit
+from jsa.historical.game_flow_candidate_audit import run_full_game_flow_candidate_audit
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
@@ -145,6 +146,14 @@ def main() -> None:
     statcast_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
     statcast_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
     statcast_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    game_flow_candidate_parser = subparsers.add_parser(
+        "game-flow-candidate-audit",
+        help="Comparacion LOSO de las 2 hipotesis del Game Flow Engine v1.0 Etapa 1 (GF1 durabilidad del abridor, GF2 dependencia de bullpen) contra el pilar de produccion correspondiente (starter/bullpen). No requiere ninguna ingesta nueva -- solo lectura, nunca modifica ningun pilar.",
+    )
+    game_flow_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    game_flow_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    game_flow_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -295,6 +304,16 @@ def main() -> None:
         setup_plain_logging()
         result = run_full_statcast_candidate_audit(sorted(args.seasons), args.db)
         logger.info("statcast-candidate-audit completo -- n_games=%s", result.get("n_games"))
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "game-flow-candidate-audit":
+        setup_plain_logging()
+        result = run_full_game_flow_candidate_audit(sorted(args.seasons), args.db)
+        logger.info("game-flow-candidate-audit completo -- n_games=%s", result.get("n_games"))
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:
