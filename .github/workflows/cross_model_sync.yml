@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: true
+      sync_jsa_gameflow:
+        description: 'Sincronizar JSA/Game Flow -- desactivar si ya estan sincronizados y solo se quiere probar/re-correr el sync del legado (evita re-sincronizar filas identicas via UPDATE, mucho mas lento que el INSERT inicial)'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -44,6 +49,7 @@ jobs:
           pip install -r jsa/requirements.txt
 
       - name: Sync JSA (evidence_score_raw) + Game Flow (GF1/GF2)
+        if: ${{ inputs.sync_jsa_gameflow }}
         env:
           JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
         run: |
