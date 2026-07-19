@@ -32,14 +32,21 @@ totalmente separado.
 - `sync_jsa.py`: sincroniza `evidence_score_raw` (JSA historico) y GF1/GF2
   (Game Flow) desde `jsa/historical/db.py` -- CLI:
   `python -m cross_model.sync_jsa --jsa-historical-db ... --season ...`
+- `sync_legacy.py`: sincroniza picks `moneyline` reales del modelo legado
+  (`db/database.py::picks`/`actual_results`) -- CLI:
+  `python -m cross_model.sync_legacy --legacy-db ... --unified-db ...`.
+  Probado con una base sintetica (mismo patron que
+  `tests/test_historical_isolation.py`); no probado end-to-end contra la
+  base de produccion real (`secrets.DATABASE_URL`) desde este sandbox --
+  eso corre en `.github/workflows/cross_model_sync.yml`, que usa el mismo
+  secret que ya usa `daily_pipeline.yml`.
+- `.github/workflows/cross_model_sync.yml`: corre los 3 syncs
+  (`workflow_dispatch`, on-demand) usando `secrets.DATABASE_URL` (legado)
+  y `secrets.JSA_HISTORICAL_DATABASE_URL` (JSA + destino unificado --
+  misma instancia de Postgres ya verificada real).
 
 ## Que NO existe todavia
 
-- Sync del modelo MLB legado (`db/database.py::picks`/`actual_results`,
-  `historical_engine/db.py::historical_prediction`) -- su base de
-  produccion real vive fuera del alcance de este sandbox; el diseño del
-  sync (`sync_legacy.py`, mismo patron que `sync_jsa.py`) esta
-  documentado en `jsa/docs/cross_model_design.md` pero no construido.
 - Ninguna escritura automatica desde los pipelines en vivo -- este es un
   sync bajo demanda (ETL), no instrumentacion de `persist_run()` ni de
   `save_picks()`. Ver `jsa/docs/cross_model_design.md` Seccion 2 para la

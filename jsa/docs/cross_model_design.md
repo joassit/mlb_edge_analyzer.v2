@@ -43,12 +43,10 @@ de los dos cambia una linea de su codigo de escritura), reversible
 (borrar `cross_model/` no afecta a JSA ni al legado), y suficiente para
 el objetivo real (analisis/comparacion, no serving en tiempo real).
 
-## 3. Alcance de esta entrega: JSA + Game Flow
+## 3. Alcance de esta entrega: JSA + Game Flow + legado (via secret real)
 
-El legado usa una base de produccion real (`mlb_edge.db`/Postgres) fuera
-del alcance de este sandbox -- no hay forma de probar su sync
-end-to-end aqui. Se construyo primero la parte verificable con datos
-reales: `sync_jsa.py` sincroniza dos fuentes, ambas dentro de
+Se construyo primero la parte verificable con datos reales dentro de
+este sandbox: `sync_jsa.py` sincroniza dos fuentes, ambas dentro de
 `jsa/historical/db.py` (ya ingerido, 5 temporadas reales):
 
 - `sync_jsa_evidence_score()`: `evidence_score_raw` por juego (el score
@@ -57,11 +55,27 @@ reales: `sync_jsa.py` sincroniza dos fuentes, ambas dentro de
   (donde hay cobertura), leido de
   `game_flow_candidate_audit.load_records_with_game_flow_candidates()`.
 
-`sync_legacy.py` (mismo patron, leyendo `db.picks`/`db.actual_results` y
-`historical_engine.db.historical_prediction`) queda **documentado aqui,
-no construido** -- es la extension natural una vez que se decida como
-acceder a la base de produccion real del legado desde donde corra este
-sync.
+El usuario autorizo explicitamente usar el secret ya configurado
+`DATABASE_URL` (el mismo que usa `daily_pipeline.yml` para el modelo
+legado en produccion) para tambien sincronizar picks reales del legado.
+`sync_legacy.py` lee `db.database.Pick`/`ActualResult` -- filtrado a
+mercado `moneyline` (el unico directamente comparable con predicciones
+home/away de JSA/Game Flow) -- con su PROPIO engine/sesion construido a
+partir de la URL recibida (nunca usa `db.database.SessionLocal`, que
+queda atado al `DATABASE_URL` que existiera al importar el modulo por
+primera vez; mismo patron que
+`tests/test_historical_isolation.py::_seed_production_db()`). Probado
+con una base sintetica (13 tests en `cross_model/tests/`, incluyendo uno
+que hashea `picks`/`actual_results` antes y despues para confirmar cero
+escritura); el sync contra la base de produccion real corre en
+`.github/workflows/cross_model_sync.yml`, no directamente desde este
+sandbox (sin acceso de red a esa base desde aqui).
+
+`home_win_prob` para el legado SI se llena con un numero real (a
+diferencia de JSA/Game Flow): `Pick.model_prob` es la probabilidad que
+el legado ya usa para apostar dinero real -- se normaliza a "probabilidad
+de que gane home" (`model_prob` si `selection=='home'`, `1-model_prob` si
+`selection=='away'`).
 
 ## 4. Schema de `unified_model_predictions`
 
@@ -98,12 +112,17 @@ via un self-join sobre `game_pk` filtrando por `system`.
 
 ## 6. Que falta para produccion real
 
-- Apuntar `UNIFIED_DATABASE_URL` (y, si se quiere de verdad "una sola
-  instancia", tambien `JSA_HISTORICAL_DATABASE_URL`/`DATABASE_URL`/
-  `HISTORICAL_DATABASE_URL`/`JSA_DATABASE_URL`) al mismo servidor
-  Postgres -- decision de infraestructura, no de codigo.
-- `sync_legacy.py` (Seccion 3) -- requiere acceso a la base de produccion
-  real del legado.
+- Confirmar que `cross_model_sync.yml` corrio contra el secret real sin
+  error (dispara desde `main`, mismo requisito de `workflow_dispatch` que
+  el resto de los workflows de JSA) y revisar el artifact de accuracy.
+- Si se quiere de verdad "una sola instancia" para TODO (no solo el
+  destino unificado), apuntar tambien `HISTORICAL_DATABASE_URL`/
+  `JSA_DATABASE_URL` al mismo servidor Postgres -- decision de
+  infraestructura, no de codigo (el sync ya funciona hoy sin eso, leyendo
+  cada fuente por separado).
+- Extender `sync_legacy.py` a `historical_engine.db.historical_prediction`
+  si se decide tambien traer el backtest historico del legado (hoy solo
+  se sincronizan los picks reales de produccion, `db.picks`).
 - Si en el futuro se calibra `evidence_score_raw` (Fase 4 del ROADMAP de
   JSA) o el legado expone una probabilidad calibrada nueva, extender los
   syncs para llenar `home_win_prob` real en vez de dejarlo NULL.

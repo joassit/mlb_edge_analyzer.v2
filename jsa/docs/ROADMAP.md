@@ -1600,7 +1600,7 @@ ninguno de los dos):
   (Postgres/SQLite), agregado al modulo YA compartido entre todos los
   motores de storage de JSA -- reusado por `cross_model/db.py` sin
   duplicar la logica de `ON CONFLICT DO UPDATE`.
-- 14 tests nuevos (`cross_model/tests/`, su propio `pytest.ini`/
+- 9 tests nuevos (`cross_model/tests/`, su propio `pytest.ini`/
   `conftest.py` -- corre standalone con `pytest cross_model/`): schema,
   upsert idempotente, sync end-to-end contra una base JSA sembrada
   sinteticamente, y la demostracion explicita de cruzar JSA vs. Game Flow
@@ -1610,22 +1610,39 @@ ninguno de los dos):
   reverificado: 6 passed -- `cross_model` no toca ninguna tabla de
   produccion de ninguno de los 2 sistemas.
 
-**Alcance de esta entrega**: solo JSA + Game Flow (ambos con datos reales
-verificables en este sandbox). El sync del modelo legado
-(`sync_legacy.py`, mismo patron, leyendo `db.picks`/`db.actual_results`/
-`historical_engine.db.historical_prediction`) queda **documentado, no
-construido** -- su base de produccion real (`mlb_edge.db`/Postgres) vive
-fuera del alcance de este sandbox, no hay forma de probarlo end-to-end
-aqui. Ver `jsa/docs/cross_model_design.md` para el diseño completo,
-incluyendo por que `home_win_prob` queda NULL en toda fila sincronizada
-hoy (ningun sistema produce todavia una probabilidad genuinamente
-calibrada).
+**Extension (2026-07-19, misma sesion): sync del modelo legado autorizado
+explicitamente por el usuario ("Utiliza el secret")**. Se agrego
+`cross_model/sync_legacy.py`: sincroniza picks `moneyline` reales
+(`db.database.Pick`/`ActualResult`) -- con su PROPIO engine/sesion
+construido desde la URL recibida, nunca `db.database.SessionLocal`
+(evita quedar atado al `DATABASE_URL` que existiera al importar el
+modulo). A diferencia de JSA/Game Flow, `home_win_prob` del legado SI se
+llena con un numero real: `Pick.model_prob` es la probabilidad que ese
+sistema ya usa para apostar dinero real en produccion, normalizada a
+"probabilidad de que gane home". Probado con una base de produccion
+sintetica (4 tests nuevos, incluyendo uno que hashea `picks`/
+`actual_results` antes y despues del sync para confirmar cero escritura
+-- mismo criterio que `tests/test_historical_isolation.py`); 13 tests
+totales en `cross_model/tests/`, todos passing.
 
-**Que falta para produccion real**: apuntar `UNIFIED_DATABASE_URL` (y las
-demas URLs de conexion, si se quiere de verdad una sola instancia) al
-mismo servidor Postgres -- decision de infraestructura, no de codigo;
-`sync_legacy.py`; un workflow de GitHub Actions que corra el sync
-on-demand (no construido, se corre manualmente por ahora).
+Se agrego `.github/workflows/cross_model_sync.yml` (`workflow_dispatch`,
+on-demand): corre los 3 syncs usando `secrets.DATABASE_URL` (el MISMO
+secret que ya usa `daily_pipeline.yml` para el legado en produccion) y
+`secrets.JSA_HISTORICAL_DATABASE_URL` (como fuente de JSA/Game Flow Y
+como destino de `unified_model_predictions` -- misma instancia de
+Postgres ya verificada real en corridas anteriores de esta sesion), mas
+un paso final que imprime `accuracy_by_system_and_model()` como artifact.
+No se disparo todavia -- requiere que el workflow exista en `main`
+primero (mismo requisito que todos los `workflow_dispatch` de esta
+sesion), pendiente de merge y confirmacion explicita antes de correr
+contra la base de produccion real del legado.
+
+**Que falta para produccion real**: mergear y disparar
+`cross_model_sync.yml` contra el secret real; si se quiere una sola
+instancia fisica para TODO (no solo el destino unificado), apuntar
+tambien `HISTORICAL_DATABASE_URL`/`JSA_DATABASE_URL` al mismo servidor
+Postgres -- decision de infraestructura, no de codigo (el sync ya
+funciona hoy sin eso).
 
 ## Explicitamente NO construido todavia (y por que)
 
