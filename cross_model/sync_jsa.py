@@ -53,26 +53,30 @@ def _game_dates_by_pk(engine, seasons: list[int]) -> dict[int, "object"]:
 
 def sync_jsa_evidence_score(jsa_historical_db_url: str, unified_db_url: str, seasons: list[int]) -> int:
     """Sincroniza `evidence_score_raw` (el score real de produccion de
-    JSA, tal como quedo persistido en `historical_report`) por juego."""
+    JSA, tal como quedo persistido en `historical_report`) por juego.
+    Junta todas las filas en memoria y las escribe con
+    `upsert_predictions_bulk()` -- un solo lote de transacciones en vez
+    de una por juego (relevante contra Postgres remoto, ver
+    `cross_model/db.py`)."""
     hist_engine = historical_db.get_engine(jsa_historical_db_url)
     unified_engine = unified_db.get_engine(unified_db_url)
     unified_db.init_storage(unified_engine)
 
     game_dates = _game_dates_by_pk(hist_engine, seasons)
     records = load_game_pillar_data(hist_engine, seasons)
-    n = 0
+    rows = []
     for r in records:
         game_date = game_dates.get(r["game_pk"])
         if game_date is None:
             continue
-        predicted_winner = _predicted_winner_from_score(r["evidence_score_raw"])
-        unified_db.upsert_prediction(
-            unified_engine, game_pk=r["game_pk"], game_date=game_date, season=r["season"],
+        rows.append(dict(
+            game_pk=r["game_pk"], game_date=game_date, season=r["season"],
             system=JSA_SYSTEM, model_name=JSA_EVIDENCE_MODEL_NAME, model_version=JSA_EVIDENCE_MODEL_VERSION,
-            raw_score=r["evidence_score_raw"], home_win_prob=None, predicted_winner=predicted_winner,
+            raw_score=r["evidence_score_raw"], home_win_prob=None,
+            predicted_winner=_predicted_winner_from_score(r["evidence_score_raw"]),
             actual_winner=_actual_winner(r["home_win"]), source_ref="jsa_historical.historical_report",
-        )
-        n += 1
+        ))
+    n = unified_db.upsert_predictions_bulk(unified_engine, rows)
     logger.info("sync_jsa_evidence_score completo -- n_games=%d", n)
     return n
 
@@ -80,14 +84,15 @@ def sync_jsa_evidence_score(jsa_historical_db_url: str, unified_db_url: str, sea
 def sync_game_flow_candidates(jsa_historical_db_url: str, unified_db_url: str, seasons: list[int]) -> int:
     """Sincroniza GF1/GF2 (el diff crudo de cada hipotesis, ver
     `jsa/docs/game_flow_design.md`) por juego -- una fila por hipotesis
-    con cobertura (`diff is not None`) en ese juego."""
+    con cobertura (`diff is not None`) en ese juego. Mismo criterio de
+    lote que `sync_jsa_evidence_score()`."""
     hist_engine = historical_db.get_engine(jsa_historical_db_url)
     unified_engine = unified_db.get_engine(unified_db_url)
     unified_db.init_storage(unified_engine)
 
     game_dates = _game_dates_by_pk(hist_engine, seasons)
     records = load_records_with_game_flow_candidates(hist_engine, seasons)
-    n = 0
+    rows = []
     for r in records:
         game_date = game_dates.get(r["game_pk"])
         if game_date is None:
@@ -97,13 +102,13 @@ def sync_game_flow_candidates(jsa_historical_db_url: str, unified_db_url: str, s
             diff = r["game_flow_diffs"][hyp]
             if diff is None:
                 continue
-            unified_db.upsert_prediction(
-                unified_engine, game_pk=r["game_pk"], game_date=game_date, season=r["season"],
+            rows.append(dict(
+                game_pk=r["game_pk"], game_date=game_date, season=r["season"],
                 system=GAME_FLOW_SYSTEM, model_name=hyp, model_version=GAME_FLOW_MODEL_VERSION,
                 raw_score=diff, home_win_prob=None, predicted_winner=_predicted_winner_from_score(diff),
                 actual_winner=actual_winner, source_ref="jsa_historical.game_flow_candidate_audit",
-            )
-            n += 1
+            ))
+    n = unified_db.upsert_predictions_bulk(unified_engine, rows)
     logger.info("sync_game_flow_candidates completo -- n_rows=%d", n)
     return n
 

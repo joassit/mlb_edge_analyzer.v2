@@ -53,6 +53,20 @@ def init_storage(engine: Engine) -> None:
     metadata.create_all(engine)
 
 
+def _prediction_row(
+    *, game_pk: int, game_date: date, season: int, system: str, model_name: str,
+    model_version: str, raw_score: float | None, home_win_prob: float | None,
+    predicted_winner: str | None, actual_winner: str | None, source_ref: str | None,
+) -> dict:
+    correct = (predicted_winner == actual_winner) if (predicted_winner is not None and actual_winner is not None) else None
+    return dict(
+        recorded_at=datetime.now(timezone.utc), game_pk=game_pk, game_date=game_date, season=season,
+        system=system, model_name=model_name, model_version=model_version,
+        raw_score=raw_score, home_win_prob=home_win_prob, predicted_winner=predicted_winner,
+        actual_winner=actual_winner, correct=correct, source_ref=source_ref,
+    )
+
+
 def upsert_prediction(
     engine: Engine, *, game_pk: int, game_date: date, season: int, system: str, model_name: str,
     model_version: str, raw_score: float | None, home_win_prob: float | None,
@@ -61,17 +75,39 @@ def upsert_prediction(
     """Re-ejecutable: upsert por `(game_pk, system, model_name,
     model_version)` -- nunca duplica filas, y actualiza `actual_winner`/
     `correct` cuando ya se conocen (por ejemplo, si el sync corrio antes
-    de que el juego terminara)."""
-    correct = (predicted_winner == actual_winner) if (predicted_winner is not None and actual_winner is not None) else None
+    de que el juego terminara). Conveniencia de UNA fila -- para
+    sincronizar muchos juegos usar `upsert_predictions_bulk()`, mucho mas
+    rapido contra Postgres remoto (evita un COMMIT/round-trip de red por
+    fila)."""
+    row = _prediction_row(
+        game_pk=game_pk, game_date=game_date, season=season, system=system, model_name=model_name,
+        model_version=model_version, raw_score=raw_score, home_win_prob=home_win_prob,
+        predicted_winner=predicted_winner, actual_winner=actual_winner, source_ref=source_ref,
+    )
     with engine.begin() as conn:
-        upsert(
-            conn, unified_model_predictions,
-            index_elements=["game_pk", "system", "model_name", "model_version"],
-            recorded_at=datetime.now(timezone.utc), game_pk=game_pk, game_date=game_date, season=season,
-            system=system, model_name=model_name, model_version=model_version,
-            raw_score=raw_score, home_win_prob=home_win_prob, predicted_winner=predicted_winner,
-            actual_winner=actual_winner, correct=correct, source_ref=source_ref,
-        )
+        upsert(conn, unified_model_predictions, index_elements=["game_pk", "system", "model_name", "model_version"], **row)
+
+
+def upsert_predictions_bulk(engine: Engine, rows: list[dict], *, batch_size: int = 500) -> int:
+    """Igual que `upsert_prediction()`, pero para muchas filas a la vez --
+    UNA sola transaccion (COMMIT) por lote de `batch_size` en vez de una
+    por fila. Contra un Postgres remoto, el costo dominante de escribir
+    fila por fila es el commit (fsync de WAL) repetido miles de veces, no
+    el INSERT en si -- agrupar en lotes evita esa repeticion sin cambiar
+    la semantica de upsert (misma funcion `upsert()` dialect-aware, mismo
+    conflicto `(game_pk, system, model_name, model_version)`).
+
+    `rows`: lista de dicts con las MISMAS keys que los kwargs de
+    `upsert_prediction()` (`game_pk, game_date, season, system,
+    model_name, model_version, raw_score, home_win_prob,
+    predicted_winner, actual_winner, source_ref`)."""
+    prepared = [_prediction_row(**r) for r in rows]
+    for start in range(0, len(prepared), batch_size):
+        batch = prepared[start:start + batch_size]
+        with engine.begin() as conn:
+            for row in batch:
+                upsert(conn, unified_model_predictions, index_elements=["game_pk", "system", "model_name", "model_version"], **row)
+    return len(prepared)
 
 
 def predictions_for_game(engine: Engine, game_pk: int) -> list[dict]:

@@ -53,20 +53,20 @@ def sync_legacy_moneyline_picks(legacy_db_url: str, unified_db_url: str) -> int:
         actual_winners = {r.game_pk: r.winner for r in session.query(production_db.ActualResult).all()}
         picks = session.query(production_db.Pick).filter(production_db.Pick.market == "moneyline").all()
 
-        n = 0
+        rows = []
         for p in picks:
             home_prob = _home_win_prob(p.selection, p.model_prob)
             if home_prob is None:
                 continue  # selection ajeno a home/away (no deberia pasar en moneyline, pero nunca se asume)
             game_date_parsed = date.fromisoformat(p.game_date)
-            unified_db.upsert_prediction(
-                unified_engine, game_pk=p.game_pk, game_date=game_date_parsed, season=game_date_parsed.year,
+            rows.append(dict(
+                game_pk=p.game_pk, game_date=game_date_parsed, season=game_date_parsed.year,
                 system=LEGACY_SYSTEM, model_name=f"legacy_{p.prob_source or 'unknown'}",
                 model_version=p.model_version or "unknown",
                 raw_score=home_prob - 0.5, home_win_prob=home_prob, predicted_winner=p.selection,
                 actual_winner=actual_winners.get(p.game_pk), source_ref="db.picks",
-            )
-            n += 1
+            ))
+        n = unified_db.upsert_predictions_bulk(unified_engine, rows)
         logger.info("sync_legacy_moneyline_picks completo -- n_picks=%d", n)
         return n
     finally:
