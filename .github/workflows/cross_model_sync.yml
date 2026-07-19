@@ -67,18 +67,40 @@ jobs:
             --unified-db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
             "${SEASON_FLAGS[@]}"
 
+      # Fallback cuando NO hay secrets.DATABASE_URL (caso real de este repo,
+      # confirmado en el run 29675977651): daily_pipeline.yml persiste
+      # mlb_edge.db entre corridas via actions/cache (best-effort, mismo
+      # prefijo de key `mlb-edge-db-`) en vez de un Postgres real -- este
+      # paso restaura esa MISMA cache para poder sincronizar los picks
+      # reales que ya existen ahi, sin necesitar ningun secret nuevo ni
+      # una base externa.
+      - name: Restore mlb_edge.db desde cache (solo si no hay DATABASE_URL externo)
+        if: ${{ inputs.sync_legacy }}
+        id: restore-legacy-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: mlb_edge.db
+          key: mlb-edge-db-nonexistent-key-force-restore-keys-lookup
+          restore-keys: |
+            mlb-edge-db-
+
       - name: Sync modelo legado (picks moneyline)
         if: ${{ inputs.sync_legacy }}
         env:
           DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
           JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
         run: |
-          if [ -z "$DATABASE_URL_SECRET" ]; then
-            echo "DATABASE_URL no esta configurado -- se omite el sync del modelo legado (solo se sincronizo JSA/Game Flow arriba)." >&2
+          if [ -n "$DATABASE_URL_SECRET" ]; then
+            LEGACY_DB="$DATABASE_URL_SECRET"
+          elif [ -f mlb_edge.db ]; then
+            echo "DATABASE_URL no esta configurado -- usando mlb_edge.db restaurado de la cache de daily_pipeline.yml (${{ steps.restore-legacy-cache.outputs.cache-matched-key }})."
+            LEGACY_DB="sqlite:///mlb_edge.db"
+          else
+            echo "DATABASE_URL no esta configurado y no se encontro ninguna cache de mlb_edge.db -- se omite el sync del modelo legado." >&2
             exit 0
           fi
           python -m cross_model.sync_legacy \
-            --legacy-db "$DATABASE_URL_SECRET" \
+            --legacy-db "$LEGACY_DB" \
             --unified-db "$JSA_HISTORICAL_DATABASE_URL_SECRET"
 
       - name: Reporte de accuracy por sistema+modelo
