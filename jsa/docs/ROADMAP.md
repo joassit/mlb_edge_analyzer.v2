@@ -1730,6 +1730,45 @@ validacion que el propio spec prohibe declarar sin evidencia (Seccion
   sobre JSA, es una extension natural via Market Registry (Seccion
   10.5bis), no un cambio al nucleo.
 
+## Propuesta de evolución del usuario cruzada contra las 5 líneas cerradas -- ningún código nuevo todavía (2026-07-19)
+
+El usuario entregó una propuesta extensa (fortaleza de equipo vía Elo/
+carreras generadas-permitidas, matchup de pitcheo, Inning Dominance
+Rating, gestión dinámica de pitcheo/bullpen/closer por innings esperados,
+Game Flow Engine, especialización por mercado First5/Moneyline/Totales)
+pidiendo crearla como rama nueva. Antes de escribir código de producción
+se verificó sección por sección contra la evidencia ya generada en esta
+misma sesión (ver secciones arriba) -- documentado completo en
+`jsa/docs/team_strength_evolution_design.md`.
+
+**Resultado**: la mayor parte de la propuesta (fortaleza de equipo vía
+Elo/Pythagorean, gestión dinámica de peso bullpen/closer por innings
+esperados, Game Flow Engine) es una reformulación de exactamente lo que
+ya se probó y se cerró hoy mismo bajo el protocolo LOSO + bootstrap CI de
+la Sección 9 de la propia propuesta -- rechazado por evidencia real, no
+por falta de intento. Escribirlo de nuevo en el proyecto legado (sin la
+infraestructura de validación de `jsa/`) violaría el Principio #2 de la
+propuesta ("incorporar variables nuevas únicamente si demuestran mejora
+mediante backtesting").
+
+**Quedan 3 líneas genuinamente abiertas** (ninguna con código nuevo
+todavía, todas bloqueadas por falta de ingesta no autorizada, excepto
+la primera):
+1. Matchup Pitcher vs Lineup por mano (LHP/RHP) + Chase Rate -- distinto
+   de Statcast H1 (que no separaba por mano); Chase Rate nunca se
+   implementó (requiere datos pitch-level nuevos).
+2. Especialización por mercado First 5 / Totales -- no existe en ningún
+   proyecto del repo hoy. Totales es factible sin ingesta nueva (el
+   ground truth ya existe); First 5 sigue bloqueado por falta de
+   linescore por entrada, mismo motivo que Inning Dominance.
+3. Closer Rating aislado / Inning Dominance -- ya estaban bloqueados
+   desde `game_flow_design.md`, sin cambio de estado.
+
+**Recomendación registrada, sin ejecutar**: Totales es la línea de menor
+costo (sin ingesta nueva) para un primer candidate audit de
+especialización por mercado. Pendiente de autorización explícita del
+usuario, mismo criterio que las 5 líneas anteriores.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un
