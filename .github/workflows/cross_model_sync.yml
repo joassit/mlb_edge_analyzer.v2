@@ -62,7 +62,7 @@ jobs:
             "${SEASON_FLAGS[@]}"
 
       - name: Sync modelo legado (picks moneyline)
-        if: ${{ inputs.sync_legacy == 'true' }}
+        if: ${{ inputs.sync_legacy }}
         env:
           DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
           JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
