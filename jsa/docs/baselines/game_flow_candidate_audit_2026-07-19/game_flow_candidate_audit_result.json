@@ -1,0 +1,80 @@
+{
+  "n_games": 13101,
+  "seasons_used": [2022, 2023, 2024, 2025, 2026],
+  "phase_loso_comparison": {
+    "gf1_starter_durability": {
+      "target_pillar": "starter",
+      "individual_stats": {
+        "n_missing": 2156,
+        "coverage_pct": 0.8354324097397146,
+        "auc": 0.522062273572333,
+        "ks_statistic": 0.04171576285015541,
+        "pearson_corr_with_outcome": 0.032971351444494076,
+        "mutual_information": 0.003155545189547748
+      },
+      "loso_if_substituted": {
+        "loso_brier": 0.24596825547968665,
+        "loso_log_loss": 0.6908204639653006,
+        "loso_accuracy": 0.550873979085566,
+        "loso_ece": 0.004338778930744462,
+        "per_season_metrics": {
+          "2022": {"n_games": 2739, "brier": 0.24168668939106225, "log_loss": 0.676085852002791, "accuracy": 0.579408543263965},
+          "2023": {"n_games": 2887, "brier": 0.2481218561619186, "log_loss": 0.707227036131096, "accuracy": 0.5275372358850018},
+          "2024": {"n_games": 2838, "brier": 0.2458328821380705, "log_loss": 0.684847494726183, "accuracy": 0.5556730091613813},
+          "2025": {"n_games": 2837, "brier": 0.24611889301337617, "log_loss": 0.6941638974398777, "accuracy": 0.5498766302432146},
+          "2026": {"n_games": 1800, "brier": 0.24900525281722452, "log_loss": 0.6910750718850278, "accuracy": 0.5388888888888889}
+        }
+      },
+      "current_target_pillar_per_season_metrics": {
+        "2022": {"n_games": 2739, "brier": 0.24017137385633042, "log_loss": 0.6730813692504918, "accuracy": 0.5845198977729098},
+        "2023": {"n_games": 2887, "brier": 0.24739014537340803, "log_loss": 0.6881895285286076, "accuracy": 0.5386214063041219},
+        "2024": {"n_games": 2838, "brier": 0.24537515352626654, "log_loss": 0.683738742360786, "accuracy": 0.5517970401691332},
+        "2025": {"n_games": 2837, "brier": 0.24588989432289657, "log_loss": 0.6847833869133599, "accuracy": 0.5417694747973211},
+        "2026": {"n_games": 1800, "brier": 0.24693779730002355, "log_loss": 0.6869560660347687, "accuracy": 0.5511111111111111}
+      },
+      "bootstrap_ci_delta_brier_vs_current": {
+        "delta_brier_mean": 0.0009108481270294215,
+        "ci_5": 0.00039694762573230606,
+        "ci_95": 0.0014426925025133191,
+        "significant": true
+      }
+    },
+    "gf2_bullpen_dependency": {
+      "target_pillar": "bullpen",
+      "individual_stats": {
+        "n_missing": 1821,
+        "coverage_pct": 0.8610029768719945,
+        "auc": 0.5612042941753173,
+        "ks_statistic": 0.09293408360534226,
+        "pearson_corr_with_outcome": 0.10679359141690462,
+        "mutual_information": 0.008989360484267017
+      },
+      "loso_if_substituted": {
+        "loso_brier": 0.24544791266994792,
+        "loso_log_loss": 0.6897809387245851,
+        "loso_accuracy": 0.5512556293412717,
+        "loso_ece": 0.004793474387308211,
+        "per_season_metrics": {
+          "2022": {"n_games": 2739, "brier": 0.2416681694673187, "log_loss": 0.7037884473719432, "accuracy": 0.5841548010222709},
+          "2023": {"n_games": 2887, "brier": 0.24750080313338224, "log_loss": 0.6883494518995432, "accuracy": 0.5334257014201593},
+          "2024": {"n_games": 2838, "brier": 0.24554706851965258, "log_loss": 0.6842964587618082, "accuracy": 0.5479210711768852},
+          "2025": {"n_games": 2837, "brier": 0.24573134791129939, "log_loss": 0.6844931864990538, "accuracy": 0.5431794148748679},
+          "2026": {"n_games": 1800, "brier": 0.2473037525493315, "log_loss": 0.6877434073230071, "accuracy": 0.5477777777777778}
+        }
+      },
+      "current_target_pillar_per_season_metrics": {
+        "2022": {"n_games": 2739, "brier": 0.24017137385633042, "log_loss": 0.6730813692504918, "accuracy": 0.5845198977729098},
+        "2023": {"n_games": 2887, "brier": 0.24739014537340803, "log_loss": 0.6881895285286076, "accuracy": 0.5386214063041219},
+        "2024": {"n_games": 2838, "brier": 0.24537515352626654, "log_loss": 0.683738742360786, "accuracy": 0.5517970401691332},
+        "2025": {"n_games": 2837, "brier": 0.24588989432289657, "log_loss": 0.6847833869133599, "accuracy": 0.5417694747973211},
+        "2026": {"n_games": 1800, "brier": 0.24693779730002355, "log_loss": 0.6869560660347687, "accuracy": 0.5511111111111111}
+      },
+      "bootstrap_ci_delta_brier_vs_current": {
+        "delta_brier_mean": 0.000390505317290678,
+        "ci_5": 6.448654899943922e-05,
+        "ci_95": 0.0007649813763261902,
+        "significant": true
+      }
+    }
+  }
+}

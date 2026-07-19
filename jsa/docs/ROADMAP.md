@@ -1501,6 +1501,149 @@ sanity checks anti-fuga -- coinflip puro y recuperacion de senal
 inyectada --, punta a punta). Suite completa de `jsa/` verificada:
 314 passed, 3 skipped tras el agregado.
 
+## Resultado real de `jsa_game_flow_candidate_audit.yml` -- linea cerrada, NO adoptada
+
+Corrida real (run
+[29669963835](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29669963835),
+13,101 juegos, 5 temporadas 2022-2026, ~50 segundos -- solo lectura,
+sin ingesta, commit base `6d430f9` tras el merge de PR #34). Mismo
+criterio de 3 condiciones que Statcast (Seccion 5 del diseno tecnico):
+`delta_brier_mean` negativo Y `significant=True` Y `|delta_brier_mean|
+>= 0.001` -- las 3 a la vez:
+
+| Hipotesis | Pilar objetivo | AUC | Cobertura | Δ Brier vs. actual | Significativo | \|Δ\|>=0.001 | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|---|
+| `gf1_starter_durability` | starter | 0.522 | 83.5% | **+0.000911** | Si | No | **No** |
+| `gf2_bullpen_dependency` | bullpen | 0.561 | 86.1% | **+0.000391** | Si | No | **No** |
+
+**Decision (2026-07-19): NO implementar ninguna de las 2 hipotesis.**
+Mismo patron que Elo/Pythagorean y Statcast H1-H3: ambas alternativas
+son **significativamente PEORES** que los insumos actuales de
+`starter`/`bullpen` (los 2 CI de bootstrap quedan enteramente del lado
+positivo -- deterioro, no mejora) Y ninguna alcanza el tamaño de efecto
+minimo de `0.001` de todas formas (GF1 se acerca mas, `0.000911`, pero
+sigue por debajo Y en la direccion equivocada).
+
+**Lectura**: la reformulacion de "calidad del abridor" como
+"probabilidad de completar 6 entradas" (GF1) y la ponderacion de
+"ventaja de bullpen" por dependencia esperada (GF2) no capturan
+informacion nueva que ERA/bullpen-ERA ya no capturen -- son
+transformaciones de las MISMAS variables subyacentes (`projected_ip`,
+`bullpen_era`), no una fuente de informacion distinta. Consistente con
+el diagnostico del techo del modelo: recombinar/reponderar señales ya
+usadas rara vez mueve el Brier; solo lo hizo agregar informacion
+genuinamente nueva, y en las 3 fuentes probadas hasta ahora (Trend,
+Historical, Statcast) tampoco funciono.
+
+**Que se conserva**: `game_flow_candidate_audit.py` sigue disponible
+para evaluar hipotesis futuras derivadas de un ground truth real de IP
+por juego (via `stats=gameLog`, ver limitacion de diseno Seccion 3) o de
+boxscore/linescore (Closer Rating, dominancia por fases) -- ninguna de
+esas dos vias esta autorizada ni construida todavia.
+
+**Alcance exacto del rechazo**: se descartan especificamente estas 2
+transformaciones de `projected_ip`/`bullpen_era` (Normal con
+`sigma=1.2` sin calibrar, dependencia lineal de bullpen) -- no el
+concepto general de modelar durabilidad/dependencia de bullpen, si en
+el futuro se dispone de ground truth real de IP por juego.
+
+## Cinco lineas cerradas (Trend, Historical, Statcast H1-H4, Elo/Pythagorean, Game Flow GF1-GF2) -- estado consolidado (2026-07-19)
+
+Las 5 lineas de "agregar informacion nueva o recombinar la existente"
+evaluadas hasta ahora bajo el mismo protocolo LOSO + bootstrap CI +
+tamaño de efecto minimo terminaron sin evidencia de mejora. En 4 de las
+5 hubo ademas al menos un candidato especificamente PEOR de forma
+significativa (Trend: `era_rolling_14d`; Historical:
+`h2h_win_pct_last_5`; Statcast: H1, H2 y H3; Elo/Pythagorean: ambas;
+Game Flow: ambas). El diagnostico del techo del modelo sigue siendo la
+lectura vigente, con su alcance explicito: aplica al espacio de
+informacion evaluado hasta ahora (7 pilares, sus insumos concretos, y
+ahora tambien sus recombinaciones/reponderaciones), no es una
+afirmacion sobre el techo teorico de predecir MLB en general. Las
+unicas vias no cerradas requieren datos genuinamente nuevos (boxscore/
+linescore, xwOBA con walks/strikeouts incluidos, IP real por juego via
+`gameLog`) -- ninguna construida ni autorizada todavia.
+
+## `cross_model` -- puente de resultados entre JSA, Game Flow y el modelo legado (2026-07-19)
+
+El usuario pidio "una base de datos de la cual podamos correr distintos
+modelos [JSA, MLB legado, Game Flow]" -- precisado a: poder **cruzar
+resultados con SQL directo** entre los 3 sistemas (comparar precision,
+no solo compartir infraestructura). No hizo falta un proyecto nuevo: los
+3 sistemas ya coexisten en este repositorio, cada uno con su propia base
+deliberadamente aislada (`DATABASE_URL`/`HISTORICAL_DATABASE_URL` legado,
+`JSA_DATABASE_URL`/`JSA_HISTORICAL_DATABASE_URL` JSA). `game_pk` es
+`Integer` en los 3 -- confirmado por investigacion directa del codigo
+legado (`db/database.py`, `historical_engine/db.py`), sin friccion para
+un join.
+
+**Decision de diseño (confirmada por el usuario)**: un sync/ETL de solo
+lectura, nunca instrumentar `persist_run()` (JSA) ni `save_picks()`/
+`save_analysis()` (legado) -- cero riesgo sobre los pipelines de
+produccion existentes, reversible, suficiente para analisis/comparacion.
+
+**Construido** (`cross_model/`, paquete nuevo en la raiz del repo, fuera
+de `jsa/` y del codigo legado para no comprometer el aislamiento de
+ninguno de los dos):
+- `cross_model/db.py`: tabla `unified_model_predictions` (`game_pk,
+  game_date, season, system, model_name, model_version, raw_score,
+  home_win_prob, predicted_winner, actual_winner, correct, source_ref`,
+  unique en `(game_pk, system, model_name, model_version)`) +
+  `upsert_prediction()` (upsert real, nunca duplica) +
+  `accuracy_by_system_and_model()` (el ejemplo concreto de "cruzar con
+  SQL directo": accuracy por sistema+modelo en una sola consulta).
+- `cross_model/sync_jsa.py`: sincroniza `evidence_score_raw` (JSA
+  historico, real, 5 temporadas ya ingeridas) y GF1/GF2 (Game Flow) desde
+  `jsa/historical/db.py` -- CLI `python -m cross_model.sync_jsa
+  --jsa-historical-db ... --season ...`.
+- `jsa/storage/dialect_utils.py::upsert()`: helper nuevo, dialect-aware
+  (Postgres/SQLite), agregado al modulo YA compartido entre todos los
+  motores de storage de JSA -- reusado por `cross_model/db.py` sin
+  duplicar la logica de `ON CONFLICT DO UPDATE`.
+- 9 tests nuevos (`cross_model/tests/`, su propio `pytest.ini`/
+  `conftest.py` -- corre standalone con `pytest cross_model/`): schema,
+  upsert idempotente, sync end-to-end contra una base JSA sembrada
+  sinteticamente, y la demostracion explicita de cruzar JSA vs. Game Flow
+  para los mismos juegos con una sola consulta SQL. Suite completa de
+  `jsa/` reverificada tras el cambio a `dialect_utils.py`: 314 passed, 3
+  skipped. `tests/test_historical_isolation.py` (legado) tambien
+  reverificado: 6 passed -- `cross_model` no toca ninguna tabla de
+  produccion de ninguno de los 2 sistemas.
+
+**Extension (2026-07-19, misma sesion): sync del modelo legado autorizado
+explicitamente por el usuario ("Utiliza el secret")**. Se agrego
+`cross_model/sync_legacy.py`: sincroniza picks `moneyline` reales
+(`db.database.Pick`/`ActualResult`) -- con su PROPIO engine/sesion
+construido desde la URL recibida, nunca `db.database.SessionLocal`
+(evita quedar atado al `DATABASE_URL` que existiera al importar el
+modulo). A diferencia de JSA/Game Flow, `home_win_prob` del legado SI se
+llena con un numero real: `Pick.model_prob` es la probabilidad que ese
+sistema ya usa para apostar dinero real en produccion, normalizada a
+"probabilidad de que gane home". Probado con una base de produccion
+sintetica (4 tests nuevos, incluyendo uno que hashea `picks`/
+`actual_results` antes y despues del sync para confirmar cero escritura
+-- mismo criterio que `tests/test_historical_isolation.py`); 13 tests
+totales en `cross_model/tests/`, todos passing.
+
+Se agrego `.github/workflows/cross_model_sync.yml` (`workflow_dispatch`,
+on-demand): corre los 3 syncs usando `secrets.DATABASE_URL` (el MISMO
+secret que ya usa `daily_pipeline.yml` para el legado en produccion) y
+`secrets.JSA_HISTORICAL_DATABASE_URL` (como fuente de JSA/Game Flow Y
+como destino de `unified_model_predictions` -- misma instancia de
+Postgres ya verificada real en corridas anteriores de esta sesion), mas
+un paso final que imprime `accuracy_by_system_and_model()` como artifact.
+No se disparo todavia -- requiere que el workflow exista en `main`
+primero (mismo requisito que todos los `workflow_dispatch` de esta
+sesion), pendiente de merge y confirmacion explicita antes de correr
+contra la base de produccion real del legado.
+
+**Que falta para produccion real**: mergear y disparar
+`cross_model_sync.yml` contra el secret real; si se quiere una sola
+instancia fisica para TODO (no solo el destino unificado), apuntar
+tambien `HISTORICAL_DATABASE_URL`/`JSA_DATABASE_URL` al mismo servidor
+Postgres -- decision de infraestructura, no de codigo (el sync ya
+funciona hoy sin eso).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias

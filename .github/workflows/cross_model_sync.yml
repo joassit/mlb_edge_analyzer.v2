@@ -1,0 +1,97 @@
+name: cross-model-sync
+
+# Sincroniza predicciones reales de los 3 sistemas hacia
+# unified_model_predictions (ver jsa/docs/cross_model_design.md). Solo
+# LEE de las bases de cada sistema -- nunca escribe a game_analysis/
+# picks/actual_results (legado) ni a historical_report/historical_game
+# (JSA). Usa el MISMO secret DATABASE_URL que ya usa daily_pipeline.yml
+# para el legado, y el MISMO JSA_HISTORICAL_DATABASE_URL que ya usan los
+# workflows de jsa/historical/ -- tambien como destino de la tabla
+# compartida (misma instancia de Postgres ya verificada real).
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas de JSA/Game Flow a sincronizar, separadas por coma (ej. 2022,2023,2024,2025,2026)'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+      sync_legacy:
+        description: 'Tambien sincronizar picks moneyline del modelo legado (requiere secrets.DATABASE_URL)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  cross-model-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r jsa/requirements.txt
+
+      - name: Sync JSA (evidence_score_raw) + Game Flow (GF1/GF2)
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica de JSA ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          python -m cross_model.sync_jsa \
+            --jsa-historical-db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            --unified-db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}"
+
+      - name: Sync modelo legado (picks moneyline)
+        if: ${{ inputs.sync_legacy == 'true' }}
+        env:
+          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL_SECRET" ]; then
+            echo "DATABASE_URL no esta configurado -- se omite el sync del modelo legado (solo se sincronizo JSA/Game Flow arriba)." >&2
+            exit 0
+          fi
+          python -m cross_model.sync_legacy \
+            --legacy-db "$DATABASE_URL_SECRET" \
+            --unified-db "$JSA_HISTORICAL_DATABASE_URL_SECRET"
+
+      - name: Reporte de accuracy por sistema+modelo
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          python -c "
+          import json
+          from cross_model import db as unified_db
+          engine = unified_db.get_engine('$JSA_HISTORICAL_DATABASE_URL_SECRET')
+          result = unified_db.accuracy_by_system_and_model(engine)
+          print(json.dumps(result, indent=2, default=str))
+          " | tee cross_model_accuracy_report.json
+
+      - name: Upload accuracy report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cross-model-accuracy-${{ github.run_id }}
+          path: cross_model_accuracy_report.json
+          if-no-files-found: warn
+          retention-days: 30
