@@ -366,6 +366,16 @@ del proyecto puede hacer: crear la cuenta.
 
 ### Migrar a Postgres gratuito (Neon o Supabase), paso a paso
 
+**Atajo recomendado si corres en GitHub Actions** (el caso real de este
+repo: `mlb_edge.db` vive en la cache de `daily_pipeline.yml`, no en un
+checkout local): después del paso 1 de abajo (crear la cuenta y agregar
+el secret `DATABASE_URL`, paso 4), disparar
+`.github/workflows/migrate_legacy_to_postgres.yml` a mano hace los pasos
+2-3 automáticamente -- restaura esa misma cache y copia el histórico real
+al Postgres nuevo en un solo workflow, sin necesitar un `mlb_edge.db`
+local. Idempotente: si se corre dos veces por error, ninguna tabla ya
+poblada en el destino se duplica.
+
 1. **Crea la base de datos gratuita.**
    - [Neon](https://neon.tech): crea cuenta → "New Project" → copia el
      "Connection string" (ya viene con `?sslmode=require`).

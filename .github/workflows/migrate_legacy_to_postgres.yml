@@ -1,0 +1,53 @@
+name: migrate-legacy-to-postgres
+
+# One-off: migra el histórico real de mlb_edge.db (restaurado de la cache
+# best-effort que ya mantiene daily_pipeline.yml) hacia el Postgres
+# externo configurado en secrets.DATABASE_URL (ver README.md, seccion
+# "Migrar a Postgres gratuito"). Nunca borra la cache ni el histórico
+# original -- solo copia. Idempotente por tabla (scripts/
+# migrate_sqlite_to_postgres.py salta cualquier tabla que el destino ya
+# tenga poblada), asi que correrlo dos veces por error no duplica nada.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore mlb_edge.db desde cache
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: mlb_edge.db
+          key: mlb-edge-db-nonexistent-key-force-restore-keys-lookup
+          restore-keys: |
+            mlb-edge-db-
+
+      - name: Migrar a Postgres
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::secrets.DATABASE_URL no esta configurado -- agregalo en Settings > Secrets and variables > Actions antes de correr esta migracion (ver README.md, 'Migrar a Postgres gratuito', paso 4)."
+            exit 1
+          fi
+          if [ ! -f mlb_edge.db ]; then
+            echo "::error::No se encontro ninguna cache de mlb_edge.db para restaurar -- nada que migrar."
+            exit 1
+          fi
+          python -m scripts.migrate_sqlite_to_postgres
