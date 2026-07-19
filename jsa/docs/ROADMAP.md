@@ -1501,6 +1501,69 @@ sanity checks anti-fuga -- coinflip puro y recuperacion de senal
 inyectada --, punta a punta). Suite completa de `jsa/` verificada:
 314 passed, 3 skipped tras el agregado.
 
+## Resultado real de `jsa_game_flow_candidate_audit.yml` -- linea cerrada, NO adoptada
+
+Corrida real (run
+[29669963835](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29669963835),
+13,101 juegos, 5 temporadas 2022-2026, ~50 segundos -- solo lectura,
+sin ingesta, commit base `6d430f9` tras el merge de PR #34). Mismo
+criterio de 3 condiciones que Statcast (Seccion 5 del diseno tecnico):
+`delta_brier_mean` negativo Y `significant=True` Y `|delta_brier_mean|
+>= 0.001` -- las 3 a la vez:
+
+| Hipotesis | Pilar objetivo | AUC | Cobertura | Δ Brier vs. actual | Significativo | \|Δ\|>=0.001 | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|---|
+| `gf1_starter_durability` | starter | 0.522 | 83.5% | **+0.000911** | Si | No | **No** |
+| `gf2_bullpen_dependency` | bullpen | 0.561 | 86.1% | **+0.000391** | Si | No | **No** |
+
+**Decision (2026-07-19): NO implementar ninguna de las 2 hipotesis.**
+Mismo patron que Elo/Pythagorean y Statcast H1-H3: ambas alternativas
+son **significativamente PEORES** que los insumos actuales de
+`starter`/`bullpen` (los 2 CI de bootstrap quedan enteramente del lado
+positivo -- deterioro, no mejora) Y ninguna alcanza el tamaño de efecto
+minimo de `0.001` de todas formas (GF1 se acerca mas, `0.000911`, pero
+sigue por debajo Y en la direccion equivocada).
+
+**Lectura**: la reformulacion de "calidad del abridor" como
+"probabilidad de completar 6 entradas" (GF1) y la ponderacion de
+"ventaja de bullpen" por dependencia esperada (GF2) no capturan
+informacion nueva que ERA/bullpen-ERA ya no capturen -- son
+transformaciones de las MISMAS variables subyacentes (`projected_ip`,
+`bullpen_era`), no una fuente de informacion distinta. Consistente con
+el diagnostico del techo del modelo: recombinar/reponderar señales ya
+usadas rara vez mueve el Brier; solo lo hizo agregar informacion
+genuinamente nueva, y en las 3 fuentes probadas hasta ahora (Trend,
+Historical, Statcast) tampoco funciono.
+
+**Que se conserva**: `game_flow_candidate_audit.py` sigue disponible
+para evaluar hipotesis futuras derivadas de un ground truth real de IP
+por juego (via `stats=gameLog`, ver limitacion de diseno Seccion 3) o de
+boxscore/linescore (Closer Rating, dominancia por fases) -- ninguna de
+esas dos vias esta autorizada ni construida todavia.
+
+**Alcance exacto del rechazo**: se descartan especificamente estas 2
+transformaciones de `projected_ip`/`bullpen_era` (Normal con
+`sigma=1.2` sin calibrar, dependencia lineal de bullpen) -- no el
+concepto general de modelar durabilidad/dependencia de bullpen, si en
+el futuro se dispone de ground truth real de IP por juego.
+
+## Cinco lineas cerradas (Trend, Historical, Statcast H1-H4, Elo/Pythagorean, Game Flow GF1-GF2) -- estado consolidado (2026-07-19)
+
+Las 5 lineas de "agregar informacion nueva o recombinar la existente"
+evaluadas hasta ahora bajo el mismo protocolo LOSO + bootstrap CI +
+tamaño de efecto minimo terminaron sin evidencia de mejora. En 4 de las
+5 hubo ademas al menos un candidato especificamente PEOR de forma
+significativa (Trend: `era_rolling_14d`; Historical:
+`h2h_win_pct_last_5`; Statcast: H1, H2 y H3; Elo/Pythagorean: ambas;
+Game Flow: ambas). El diagnostico del techo del modelo sigue siendo la
+lectura vigente, con su alcance explicito: aplica al espacio de
+informacion evaluado hasta ahora (7 pilares, sus insumos concretos, y
+ahora tambien sus recombinaciones/reponderaciones), no es una
+afirmacion sobre el techo teorico de predecir MLB en general. Las
+unicas vias no cerradas requieren datos genuinamente nuevos (boxscore/
+linescore, xwOBA con walks/strikeouts incluidos, IP real por juego via
+`gameLog`) -- ninguna construida ni autorizada todavia.
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
