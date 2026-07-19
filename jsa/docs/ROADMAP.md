@@ -1358,14 +1358,71 @@ hipotesis (xwOBA de equipo/abridor/bullpen calculado desde bateos en
 juego solamente, y hard-hit rate rolling) -- no el concepto general de
 metricas Statcast ni la arquitectura de ingesta minima construida.
 
-## Tres lineas cerradas (Trend, Historical, Statcast H1-H4) -- estado consolidado (2026-07-18)
+## `team_quality`: Elo y Pythagorean Expectation bajo el criterio formal de 3 condiciones -- linea cerrada (2026-07-19)
 
-Con este resultado, las tres fases de "agregar informacion nueva" del
+El usuario propuso revisar un lote de metricas nuevas (posicion en tabla/
+W-L, carreras generadas/permitidas, HR, hits, LOB, capitalizacion de
+carreras por hit, fortaleza de abridor/bullpen/closer, limitar a 5
+entradas). Antes de construir nada nuevo, se verifico que dos de esas
+ideas -- posicion en tabla/W-L y carreras generadas/permitidas -- ya
+tenian una implementacion offline construida hace varias sesiones
+(`resolution_audit.py::compute_elo_and_pythagorean()`, point-in-time-safe,
+100% calculable desde `historical_game` ya ingerido, sin tocar la API):
+Elo (equivalente a W-L, `elo_k=20`, reinicio por temporada) y Pythagorean
+Expectation (equivalente a carreras generadas/permitidas, exponente 1.83).
+Esos resultados ya existian con LOSO + bootstrap CI, pero nunca se
+habian evaluado contra el criterio formal de 3 condiciones (Seccion 7 de
+`jsa/docs/statcast_integration_design.md`) que se establecio recien con
+la linea de Statcast. Se aplico ese criterio retroactivamente a los
+resultados reales ya calculados sobre el dataset actual mas grande
+(`jsa/docs/baselines/post_reingest_trend_2026-07-17/resolution_audit_result.json`,
+13,101 juegos, 2022-2026) -- sin recalcular nada, sin nueva ingesta.
+
+| Alternativa | Pilar objetivo | AUC | Δ Brier vs. `team_quality` actual | Significativo | \|Δ\| >= 0.001 | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|
+| Elo (`elo_diff`) | team_quality | 0.559 | **+0.000460** | Si (CI: [0.0000397, 0.000867]) | No | **No** |
+| Pythagorean Expectation | team_quality | 0.559 | **+0.000479** | Si (CI: [0.0000130, 0.000914]) | No | **No** |
+
+**Ambas alternativas fallan en 2 de las 3 condiciones a la vez**: el
+delta de Brier es positivo (serian PEORES si sustituyeran a
+`team_quality`, no mejores) Y estadisticamente significativo (el CI de
+bootstrap queda enteramente del lado positivo) Y el tamaño de efecto
+(~0.00046-0.00048) queda de todas formas por debajo del minimo de
+`0.001` aunque el signo hubiera sido favorable. Con un dataset mas chico
+(baseline `pre_trend_2026-07-16`, 13,099 juegos) Elo habia dado
+`significant=False` -- con mas datos reales (post re-ingesta de Trend) el
+resultado se volvio inequivoco: ambas alternativas son significativamente
+peores que la implementacion actual de `team_quality` (lesiones + closer
+disponible + fielding_pct).
+
+**Decision: linea cerrada, no se adopta ninguna.** Confirma con evidencia
+formal lo que ya sugeria el resultado preliminar: agregar record de
+temporada o diferencial de carreras como sustituto de `team_quality` no
+mejora el modelo bajo el mismo protocolo que Trend/Historical/Statcast.
+
+**Que se conserva**: `resolution_audit.py::compute_elo_and_pythagorean()`
+y `evaluate_team_quality_alternatives()` siguen disponibles para evaluar
+una alternativa genuinamente distinta a `team_quality` en el futuro (por
+ejemplo, Elo con regresion entre temporadas, o un `pyth_exponent`
+recalibrado) sin reconstruir el pipeline -- pero seria una hipotesis
+nueva, no una repeticion de esta.
+
+**Alcance exacto del rechazo**: se descarta especificamente reemplazar
+`team_quality` por Elo o por Pythagorean Expectation tal como estan
+definidos hoy -- no se descarta la idea de que W-L/run-differential
+puedan aportar algo en una formulacion distinta (por ejemplo, como señal
+adicional combinada con lo que ya usa `team_quality`, en vez de un
+reemplazo total).
+
+## Cuatro lineas cerradas (Trend, Historical, Statcast H1-H4, Elo/Pythagorean) -- estado consolidado (2026-07-19)
+
+Con este resultado, las cuatro fases de "agregar informacion nueva" del
 roadmap estrategico terminaron sin evidencia de mejora bajo el mismo
 protocolo LOSO + bootstrap CI + criterio de tamaño de efecto minimo. En
-los tres casos hubo ademas al menos un candidato especificamente PEOR de
-forma significativa (Trend: `era_rolling_14d`; Historical:
-`h2h_win_pct_last_5`; Statcast: H1, H2 y H3 los tres). El diagnostico del
+tres de los cuatro casos hubo ademas al menos un candidato especificamente
+PEOR de forma estadisticamente significativa (Trend: `era_rolling_14d`;
+Historical: `h2h_win_pct_last_5`; Statcast: H1, H2 y H3 los tres;
+Elo/Pythagorean: las dos alternativas completas). El diagnostico del
 techo del modelo (ver seccion dedicada arriba) sigue siendo la lectura
 vigente: el cuello de botella no esta en como se combinan los pilares
 (la optimizacion de pesos ya esta cerca del optimo), sino en el techo de
