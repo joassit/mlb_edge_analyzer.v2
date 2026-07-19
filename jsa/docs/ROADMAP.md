@@ -1501,6 +1501,62 @@ sanity checks anti-fuga -- coinflip puro y recuperacion de senal
 inyectada --, punta a punta). Suite completa de `jsa/` verificada:
 314 passed, 3 skipped tras el agregado.
 
+## Resultado real de `jsa-game-flow-candidate-audit` -- linea de Etapa 1 cerrada, NO adoptada (2026-07-19)
+
+Corrida real sobre las 5 temporadas (2022-2026, 13,101 juegos, run
+[29669963835](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29669963835)),
+mismo dia que la construccion del modulo. Ninguna de las 2 hipotesis
+cumple el criterio pre-acordado de 3 condiciones (`game_flow_design.md`
+Seccion 5): `delta_brier_mean < 0` Y `significant=True` Y
+`|delta_brier_mean| >= 0.001`.
+
+| Hipotesis | Pilar objetivo | AUC individual | Cobertura | Δ Brier vs. actual | Significativo | \|Δ\| >= 0.001 | Cumple los 3 criterios |
+|---|---|---|---|---|---|---|---|
+| `gf1_starter_durability` | starter | 0.522 | 83.5% | **+0.000911** | Si (CI: [0.000397, 0.001443]) | No | **No** |
+| `gf2_bullpen_dependency` | bullpen | 0.561 | 86.1% | **+0.000391** | Si (CI: [0.0000645, 0.000765]) | No | **No** |
+
+**Ambas hipotesis fallan en 2 de las 3 condiciones a la vez**: el delta
+de Brier es positivo (serian PEORES que el insumo actual de
+`starter`/`bullpen`, no mejores) Y estadisticamente significativo (el CI
+de bootstrap de ambas queda enteramente del lado positivo) -- mismo
+patron de "doble falla" que Elo/Pythagorean sobre `team_quality`, mas
+contundente que "sin evidencia de mejora". El tamaño de efecto de GF1
+(~0.00091) queda cerca pero por debajo del minimo `0.001`; el de GF2
+(~0.00039) queda claramente por debajo.
+
+**Nota sobre GF2**: pese a tener el AUC individual mas alto de las dos
+hipotesis (0.561, superior incluso al AUC actual reportado de `bullpen`
+en el diagnostico del techo del modelo, 0.552), sustituir el insumo
+completo de `bullpen` por el diff escalado por dependencia esperada
+empeora el Evidence Score combinado de forma significativa -- confirma de
+nuevo (como con Elo/Pythagorean) que un AUC individual mas alto en la
+variable candidata no garantiza una mejora al sustituir el insumo del
+pilar completo.
+
+**Que se conserva**: toda la infraestructura
+(`game_flow_candidate_audit.py`, el workflow, los tests) sigue disponible
+para evaluar candidatos DISTINTOS sin reconstruir el pipeline. La
+limitacion honesta ya documentada en el diseno (sin ground truth de IP
+real por juego, `sigma=1.2` heuristico sin calibrar) sigue siendo la
+sospecha mas probable de por que GF1 en particular no mejora -- la Etapa
+1b (IP real via `stats=gameLog` por pitcher, mas barata que boxscore
+completo, no autorizada todavia) permitiria calibrar `sigma` contra datos
+reales en vez de un heuristico, y es una hipotesis legitimamente distinta
+si se retoma esta linea.
+
+**Alcance exacto del rechazo**: se descartan especificamente GF1 y GF2 tal
+como estan formuladas en esta Etapa 1 -- no el concepto general de
+modelar el flujo del partido. Etapas posteriores del Game Flow Engine
+(Closer Rating independiente, dominancia por fases Early/Middle/Late,
+Win State Projection, distribucion dinamica del pitcheo) siguen bloqueadas
+por falta de boxscore/linescore ingerido, sin relacion con este resultado
+-- no se cierran por este experimento, solo GF1/GF2 en su formulacion
+actual.
+
+Resultado completo archivado en
+`jsa/docs/baselines/game_flow_candidate_audit_2026-07-19/` (JSON crudo +
+README).
+
 ## Explicitamente NO construido todavia (y por que)
 
 Estas piezas requieren mas historial de produccion real acumulado (varias
