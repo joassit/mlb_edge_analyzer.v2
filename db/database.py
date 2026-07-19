@@ -742,6 +742,22 @@ def get_predictions_without_result(days_back: int = 21) -> list[dict]:
         session.close()
 
 
+def game_pk_has_prediction(game_pk: int) -> bool:
+    """True si ya existe al menos una fila de GameAnalysis para este
+    game_pk -- usado por tracking.results_tracker.update_results() antes
+    de reconciliar un juego pospuesto contra su reposición
+    (data.mlb_api.find_makeup_game_result()): si la reposición YA fue
+    predicha de forma independiente (MLB Stats API le da un game_pk
+    distinto), es el mismo partido real contado dos veces -- copiarle el
+    marcador también al original duplicaría el conteo en
+    compute_metrics()/ROI en vez de resolverlo."""
+    session = SessionLocal()
+    try:
+        return session.query(GameAnalysis.id).filter(GameAnalysis.game_pk == game_pk).first() is not None
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     init_db()
     print(f"Base de datos lista en: {DATABASE_URL}")

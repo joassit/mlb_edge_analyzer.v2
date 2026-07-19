@@ -886,3 +886,20 @@ def test_get_predictions_without_result_excludes_games_with_saved_result(isolate
     pending = isolated_db.get_predictions_without_result()
 
     assert all(p["game_pk"] != 113 for p in pending)
+
+
+# --- game_pk_has_prediction: guarda anti-duplicado de la reconciliación
+# de juegos pospuestos (tracking.results_tracker.update_results() +
+# data.mlb_api.find_makeup_game_result()) ---
+
+def test_game_pk_has_prediction_true_when_game_analysis_row_exists(isolated_db):
+    isolated_db.save_analysis({
+        "game_pk": 823356, "game_date": "2026-07-11",
+        "away_team": "Milwaukee Brewers", "home_team": "Pittsburgh Pirates",
+    })
+
+    assert isolated_db.game_pk_has_prediction(823356) is True
+
+
+def test_game_pk_has_prediction_false_when_no_row_exists(isolated_db):
+    assert isolated_db.game_pk_has_prediction(999999) is False

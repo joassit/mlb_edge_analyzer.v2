@@ -1,0 +1,37 @@
+name: tmp-verify-orphan-fix
+
+# Workflow temporal, SOLO en main: valida en vivo, contra una copia
+# efimera del mlb_edge.db real (artifact de la corrida diaria de hoy),
+# el fix de reconciliacion de juegos pospuestos antes de confiar en el.
+# Se retira apenas termina la validacion -- no es parte permanente del
+# proyecto.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-orphan-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      # Artifact de la corrida daily-pipeline 29695076371 (2026-07-19
+      # 16:32 UTC, workflow_dispatch manual, commit 0c7b704 en main --
+      # el mismo commit base de este workflow).
+      - uses: actions/download-artifact@v6
+        with:
+          name: mlb-edge-daily-output-29695076371
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 29695076371
+
+      - run: python scratchpad_verify_orphan_fix.py

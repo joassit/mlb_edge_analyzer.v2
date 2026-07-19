@@ -15,10 +15,11 @@ Más de 0.25 significa que el modelo está peor que no decir nada.
 import logging
 import math
 
-from data.mlb_api import get_game_result
+from data.mlb_api import get_game_result, find_makeup_game_result
 from db.database import (
     SessionLocal, GameAnalysis, ActualResult, Bet, Pick,
     save_result, get_predictions_without_result, settle_bets_for_game, settle_picks_for_game,
+    game_pk_has_prediction,
 )
 # ECE/MCE ya viven en historical_engine/stats_utils.py (funciones puras, sin
 # DB ni estado) -- se reutilizan acá en vez de duplicar la fórmula. Esto NO
@@ -51,7 +52,44 @@ def update_results(days_back: int = 21) -> int:
             continue
 
         if result is None:
-            continue  # el juego todavía no termina, o se pospuso
+            # Puede ser que el juego todavía no termine, o que se haya
+            # pospuesto y MLB Stats API nunca complete un marcador bajo
+            # este mismo game_pk (ver comentario en get_game_result()) --
+            # en ese segundo caso, el juego real se reprogramó bajo un
+            # game_pk NUEVO, así que se busca ahí antes de rendirse.
+            try:
+                makeup = find_makeup_game_result(
+                    pred["game_pk"], pred["away_team"], pred["home_team"], pred["game_date"]
+                )
+            except Exception as e:
+                logger.warning(f"No se pudo buscar juego de reposición de game_pk={pred['game_pk']}: {e}")
+                continue
+
+            if makeup is None:
+                continue  # sigue genuinamente pendiente, o no se encontró la reposición
+
+            resolved_pk = makeup.pop("resolved_via_game_pk")
+            if game_pk_has_prediction(resolved_pk):
+                # El juego de reposición YA fue predicho de forma
+                # independiente bajo su propio game_pk (mismo partido
+                # real, dos IDs distintos en MLB Stats API) -- copiarle el
+                # marcador también a este game_pk original duplicaría el
+                # conteo de un mismo juego real en compute_metrics()/ROI.
+                # Se deja sin resolver a propósito (huérfano permanente,
+                # documentado, no un bug silencioso).
+                logger.warning(
+                    f"game_pk={pred['game_pk']} ({pred['away_team']} @ {pred['home_team']}, "
+                    f"{pred['game_date']}) se pospuso y reprogramó, pero el juego real "
+                    f"(game_pk={resolved_pk}) ya fue predicho por separado -- NO se reconcilia "
+                    f"para no contar el mismo partido dos veces."
+                )
+                continue
+
+            result = makeup
+            logger.info(
+                f"game_pk={pred['game_pk']} ({pred['away_team']} @ {pred['home_team']}): resultado "
+                f"recuperado vía juego de reposición game_pk={resolved_pk} (pospuesto originalmente)."
+            )
 
         save_result({
             "game_pk": pred["game_pk"],

@@ -557,3 +557,83 @@ def test_update_results_defaults_to_21_day_window(monkeypatch):
     results_tracker.update_results()
 
     assert captured["days_back"] == 21
+
+
+_PENDING_PREDICTION = {
+    "game_pk": 823357, "game_date": "2026-07-10",
+    "away_team": "Milwaukee Brewers", "home_team": "Pittsburgh Pirates",
+}
+
+
+def test_update_results_reconciles_postponed_game_via_makeup(monkeypatch):
+    # Caso real confirmado en la investigación de filas huérfanas (informe
+    # técnico del 2026-07-19): game_pk=823357 se pospuso, el juego real se
+    # jugó como game_pk=823356 (NO predicho por separado) -- debe
+    # resolverse guardando el resultado bajo el game_pk/game_date
+    # ORIGINALES, no bajo el de reposición.
+    monkeypatch.setattr(results_tracker, "get_predictions_without_result", lambda days_back: [_PENDING_PREDICTION])
+    monkeypatch.setattr(results_tracker, "get_game_result", lambda game_pk: None)
+    monkeypatch.setattr(
+        results_tracker, "find_makeup_game_result",
+        lambda game_pk, away_team, home_team, game_date: {
+            "home_score": 3, "away_score": 2, "winner": "home", "total_runs": 5,
+            "resolved_via_game_pk": 823356,
+        },
+    )
+    monkeypatch.setattr(results_tracker, "game_pk_has_prediction", lambda game_pk: False)
+
+    saved = {}
+    monkeypatch.setattr(results_tracker, "save_result", lambda row: saved.update(row))
+    monkeypatch.setattr(results_tracker, "settle_bets_for_game", lambda game_pk, winner: 0)
+    monkeypatch.setattr(results_tracker, "settle_picks_for_game", lambda game_pk, result: 0)
+
+    updated = results_tracker.update_results()
+
+    assert updated == 1
+    assert saved == {
+        "game_pk": 823357, "game_date": "2026-07-10",
+        "home_score": 3, "away_score": 2, "winner": "home", "total_runs": 5,
+    }
+
+
+def test_update_results_skips_reconciliation_when_makeup_already_predicted_separately(monkeypatch):
+    # Caso real confirmado (07-07 y 07-18): la reposición del juego
+    # pospuesto a veces YA fue predicha de forma independiente bajo su
+    # propio game_pk -- copiarle el marcador también al original
+    # duplicaría el conteo del mismo partido real en compute_metrics()/ROI.
+    # Debe quedar sin resolver a propósito.
+    monkeypatch.setattr(results_tracker, "get_predictions_without_result", lambda days_back: [_PENDING_PREDICTION])
+    monkeypatch.setattr(results_tracker, "get_game_result", lambda game_pk: None)
+    monkeypatch.setattr(
+        results_tracker, "find_makeup_game_result",
+        lambda game_pk, away_team, home_team, game_date: {
+            "home_score": 3, "away_score": 2, "winner": "home", "total_runs": 5,
+            "resolved_via_game_pk": 823356,
+        },
+    )
+    monkeypatch.setattr(results_tracker, "game_pk_has_prediction", lambda game_pk: True)
+
+    save_calls = []
+    monkeypatch.setattr(results_tracker, "save_result", lambda row: save_calls.append(row))
+
+    updated = results_tracker.update_results()
+
+    assert updated == 0
+    assert save_calls == []
+
+
+def test_update_results_leaves_pending_when_no_makeup_found(monkeypatch):
+    monkeypatch.setattr(results_tracker, "get_predictions_without_result", lambda days_back: [_PENDING_PREDICTION])
+    monkeypatch.setattr(results_tracker, "get_game_result", lambda game_pk: None)
+    monkeypatch.setattr(
+        results_tracker, "find_makeup_game_result",
+        lambda game_pk, away_team, home_team, game_date: None,
+    )
+
+    save_calls = []
+    monkeypatch.setattr(results_tracker, "save_result", lambda row: save_calls.append(row))
+
+    updated = results_tracker.update_results()
+
+    assert updated == 0
+    assert save_calls == []

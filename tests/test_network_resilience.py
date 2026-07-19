@@ -12,7 +12,7 @@ import requests
 
 import data.mlb_api as mlb_api_mod
 import data.stats as stats_mod
-from data.mlb_api import get_game_result, get_schedule
+from data.mlb_api import get_game_result, get_schedule, find_makeup_game_result
 from data.stats import get_league_ops, get_pitcher_era_ip, get_team_ops
 
 
@@ -101,3 +101,116 @@ def test_get_game_result_logs_warning_when_final_but_postponed_with_no_linescore
 
     assert result is None
     assert any("game_pk=823062" in r.message and "Postponed" in r.message for r in caplog.records)
+
+
+class _FakeJsonResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _postponed_status_payload(reschedule_game_date="2026-07-11"):
+    """Respuesta de schedule?gamePk=X para un juego pospuesto -- mismo
+    shape real observado en la investigación de las 4 filas huérfanas de
+    los informes técnicos del 2026-07-07 al 07-18."""
+    return {
+        "dates": [{
+            "games": [{
+                "status": {"abstractGameState": "Final", "detailedState": "Postponed"},
+                "rescheduleGameDate": reschedule_game_date,
+                "linescore": {"teams": {}},
+            }]
+        }]
+    }
+
+
+def test_find_makeup_game_result_returns_none_when_original_not_postponed(monkeypatch):
+    # Si el game_pk original no está en estado Postponed (p.ej. sigue
+    # genuinamente en curso), no tiene sentido gastar la llamada extra de
+    # búsqueda -- se corta después de la primera consulta.
+    calls = []
+
+    def _fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        return _FakeJsonResp({
+            "dates": [{"games": [{"status": {"abstractGameState": "Live", "detailedState": "In Progress"}}]}]
+        })
+
+    monkeypatch.setattr(mlb_api_mod.session, "get", _fake_get)
+
+    result = find_makeup_game_result(823357, "Milwaukee Brewers", "Pittsburgh Pirates", "2026-07-10")
+
+    assert result is None
+    assert len(calls) == 1
+
+
+def test_find_makeup_game_result_finds_real_game_under_different_game_pk(monkeypatch):
+    # Caso real confirmado: game_pk=823357 (Brewers @ Pirates, 2026-07-10)
+    # pospuesto por clima -- el juego real se jugó como game_pk=823356 el
+    # 07-11 (final 3-2).
+    responses = [
+        _postponed_status_payload(reschedule_game_date="2026-07-11"),
+        {
+            "dates": [{
+                "games": [
+                    {
+                        "gamePk": 823356,
+                        "teams": {
+                            "away": {"team": {"name": "Milwaukee Brewers"}},
+                            "home": {"team": {"name": "Pittsburgh Pirates"}},
+                        },
+                        "status": {"abstractGameState": "Final"},
+                        "linescore": {"teams": {"home": {"runs": 3}, "away": {"runs": 2}}},
+                    },
+                    {
+                        # Otro partido cualquiera en la ventana -- no debe confundirse
+                        "gamePk": 900001,
+                        "teams": {
+                            "away": {"team": {"name": "Some Team"}},
+                            "home": {"team": {"name": "Other Team"}},
+                        },
+                        "status": {"abstractGameState": "Final"},
+                        "linescore": {"teams": {"home": {"runs": 1}, "away": {"runs": 0}}},
+                    },
+                ]
+            }]
+        },
+    ]
+    calls = []
+
+    def _fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        return _FakeJsonResp(responses[len(calls) - 1])
+
+    monkeypatch.setattr(mlb_api_mod.session, "get", _fake_get)
+
+    result = find_makeup_game_result(823357, "Milwaukee Brewers", "Pittsburgh Pirates", "2026-07-10")
+
+    assert result == {
+        "home_score": 3, "away_score": 2, "winner": "home", "total_runs": 5,
+        "resolved_via_game_pk": 823356,
+    }
+    assert len(calls) == 2
+
+
+def test_find_makeup_game_result_returns_none_when_no_matching_makeup_in_window(monkeypatch):
+    responses = [
+        _postponed_status_payload(reschedule_game_date="2026-07-11"),
+        {"dates": [{"games": []}]},
+    ]
+    calls = []
+
+    def _fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        return _FakeJsonResp(responses[len(calls) - 1])
+
+    monkeypatch.setattr(mlb_api_mod.session, "get", _fake_get)
+
+    result = find_makeup_game_result(823357, "Milwaukee Brewers", "Pittsburgh Pirates", "2026-07-10")
+
+    assert result is None

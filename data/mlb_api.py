@@ -1,6 +1,6 @@
 import logging
 import requests
-from datetime import date
+from datetime import date, timedelta
 from config import MLB_API_BASE
 from data.contracts import require, SchemaError
 from data.http import session
@@ -141,6 +141,102 @@ def get_game_result(game_pk: int) -> dict | None:
         "winner": "home" if home_score > away_score else "away",
         "total_runs": home_score + away_score,
     }
+
+
+def find_makeup_game_result(game_pk: int, away_team: str, home_team: str, game_date: str) -> dict | None:
+    """
+    Para un game_pk cuyo get_game_result() ya devolvió None por el caso
+    "Postponed con linescore vacío" (ver comentario ahí): busca el juego
+    real de reposición. Confirmado auditando las 4 filas huérfanas de los
+    informes técnicos del 2026-07-07 al 07-18 -- MLB Stats API SIEMPRE le
+    asigna un game_pk NUEVO a la reprogramación de un juego pospuesto,
+    nunca reutiliza el original, así que la única forma de encontrarlo es
+    por mismo matchup (equipos) + ventana de fechas, nunca por ID.
+
+    Devuelve None si el game_pk original no está en estado Postponed (evita
+    gastar la llamada extra de búsqueda en juegos que de verdad siguen sin
+    jugarse), si la API falla, o si no se encuentra ningún juego Final con
+    marcador real para ese matchup en la ventana. El dict devuelto incluye
+    "resolved_via_game_pk" -- el caller DEBE verificar (vía
+    db.database.game_pk_has_prediction()) que ese game_pk no haya sido ya
+    predicho de forma independiente antes de guardar este resultado: si lo
+    fue, es el mismo partido real contado dos veces bajo dos game_pk
+    distintos, y copiarle el marcador también al original duplicaría el
+    conteo en compute_metrics()/ROI (visto en la práctica: el huérfano del
+    07-07 y el del 07-18 son justo ese caso).
+    """
+    try:
+        resp = session.get(
+            f"{MLB_API_BASE}/schedule",
+            params={"sportId": 1, "gamePk": game_pk, "hydrate": "linescore"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"No se pudo verificar el estado de game_pk={game_pk} para buscar su reposición: {e}")
+        return None
+
+    dates = payload.get("dates", [])
+    if not dates or not dates[0].get("games"):
+        return None
+    status = dates[0]["games"][0].get("status", {})
+    if status.get("detailedState") != "Postponed":
+        return None  # no es el caso que sabemos reconciliar (sigue genuinamente pendiente, u otro estado)
+
+    reschedule_hint = dates[0]["games"][0].get("rescheduleGameDate") or (dates[0]["games"][0].get("rescheduleDate") or "")[:10]
+
+    try:
+        base = date.fromisoformat(game_date)
+    except ValueError:
+        return None
+    anchor = base
+    if reschedule_hint:
+        try:
+            anchor = date.fromisoformat(reschedule_hint)
+        except ValueError:
+            pass
+
+    start = (min(base, anchor) - timedelta(days=1)).strftime("%Y-%m-%d")
+    end = (max(base, anchor) + timedelta(days=5)).strftime("%Y-%m-%d")
+
+    try:
+        resp2 = session.get(
+            f"{MLB_API_BASE}/schedule",
+            params={"sportId": 1, "startDate": start, "endDate": end, "hydrate": "team,linescore"},
+            timeout=20,
+        )
+        resp2.raise_for_status()
+        payload2 = resp2.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"No se pudo buscar el juego de reposición de game_pk={game_pk} ({away_team} @ {home_team}): {e}")
+        return None
+
+    for date_block in payload2.get("dates", []):
+        for g in date_block.get("games", []):
+            candidate_pk = g.get("gamePk")
+            if candidate_pk == game_pk:
+                continue
+            teams = g.get("teams", {})
+            a = teams.get("away", {}).get("team", {}).get("name")
+            h = teams.get("home", {}).get("team", {}).get("name")
+            if a != away_team or h != home_team:
+                continue
+            if g.get("status", {}).get("abstractGameState") != "Final":
+                continue
+            linescore = g.get("linescore", {}).get("teams", {})
+            home_score = linescore.get("home", {}).get("runs")
+            away_score = linescore.get("away", {}).get("runs")
+            if home_score is None or away_score is None:
+                continue
+            return {
+                "home_score": home_score,
+                "away_score": away_score,
+                "winner": "home" if home_score > away_score else "away",
+                "total_runs": home_score + away_score,
+                "resolved_via_game_pk": candidate_pk,
+            }
+    return None
 
 if __name__ == "__main__":
     for g in get_schedule():
