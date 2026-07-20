@@ -1632,17 +1632,57 @@ secret que ya usa `daily_pipeline.yml` para el legado en produccion) y
 como destino de `unified_model_predictions` -- misma instancia de
 Postgres ya verificada real en corridas anteriores de esta sesion), mas
 un paso final que imprime `accuracy_by_system_and_model()` como artifact.
-No se disparo todavia -- requiere que el workflow exista en `main`
-primero (mismo requisito que todos los `workflow_dispatch` de esta
-sesion), pendiente de merge y confirmacion explicita antes de correr
-contra la base de produccion real del legado.
 
-**Que falta para produccion real**: mergear y disparar
-`cross_model_sync.yml` contra el secret real; si se quiere una sola
-instancia fisica para TODO (no solo el destino unificado), apuntar
-tambien `HISTORICAL_DATABASE_URL`/`JSA_DATABASE_URL` al mismo servidor
-Postgres -- decision de infraestructura, no de codigo (el sync ya
-funciona hoy sin eso).
+**Resuelto (2026-07-19, misma sesion): `secrets.DATABASE_URL` paso de no
+existir a apuntar a un Neon Postgres real.** El legado nunca habia tenido
+un Postgres externo configurado -- `daily_pipeline.yml` corria contra el
+fallback de `actions/cache` (best-effort, `mlb_edge.db` SQLite entre
+corridas). El usuario decidio migrar a Neon para no arriesgar perder el
+historico. Bug real encontrado y corregido en el camino: la migracion
+(`scripts/migrate_sqlite_to_postgres.py`) fallo primero por falta de
+`psycopg2-binary` en `requirements.txt` (PR #42), y despues con
+`IntegrityError: NotNullViolation` en `picks.calibration_phase`/`forced`
+-- causa real: `db/database.py::_auto_add_missing_columns()` agrega
+columnas nuevas via `ALTER TABLE ADD COLUMN` crudo sin `NOT NULL`, asi
+que filas viejas de SQLite tienen `NULL` real ahi aunque el modelo
+declare `nullable=False`; Postgres si lo exige. Arreglado rellenando esas
+columnas con su default declarado antes de insertar (PR #43, con test
+que reproduce el historial real de `ALTER TABLE` en vez de
+`create_all()`, que si habria impedido sembrar el NULL en el test).
+
+**Migracion real completada** (`migrate_legacy_to_postgres.yml`, run
+[29702267751](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29702267751),
+tras el merge de PR #43): `game_analysis`: 144 filas, `actual_results`:
+127, `feature_snapshots`: 144, `picks`: 134, `bets`: 0 -- sin errores.
+
+**`cross_model_sync.yml` corrido contra el Neon real** (run
+[29702495152](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29702495152),
+`sync_legacy=true` usando ya `secrets.DATABASE_URL` real -- no el
+fallback de cache -- `sync_jsa_gameflow=false` para evitar el
+re-sync lento ya documentado arriba): `sync_legacy_moneyline_picks`
+sincronizo `n_picks=134`. `accuracy_by_system_and_model()` final con los
+3 sistemas:
+
+| Sistema | Modelo | Version | Juegos | Aciertos | Accuracy |
+|---|---|---|---|---|---|
+| jsa | evidence_score_raw | jsa-v3.0-historical-backtest | 11,277 | 6,192 | 54.91% |
+| game_flow | gf1_starter_durability | game_flow_v1_etapa1 | 10,778 | 5,583 | 51.80% |
+| game_flow | gf2_bullpen_dependency | game_flow_v1_etapa1 | 11,280 | 6,140 | 54.43% |
+| mlb_legacy | legacy_skellam | 0.5.0-reconectado | 75 | 40 | 53.33% |
+| mlb_legacy | legacy_skellam | 0.6.0-skellam-calibrado | 39 | 16 | 41.03% |
+| mlb_legacy | legacy_unknown | 0.5.0-reconectado | 2 | 1 | 50.00% |
+
+La muestra del legado (116 picks) es chica frente a JSA/Game Flow
+(~11k juegos cada uno) porque solo cubre lo que el pipeline diario de
+produccion alcanzo a generar hasta ahora -- no es una limitacion del
+sync, es cuantos picks reales existen todavia.
+
+**Objetivo original cumplido**: los 3 sistemas (JSA, Game Flow, legado)
+coexisten en el mismo Postgres real (`unified_model_predictions`) y se
+pueden cruzar con SQL directo, sin instrumentar ningun pipeline de
+produccion existente. `daily_pipeline.yml` ya esta preparado para usar
+`secrets.DATABASE_URL` automaticamente en su proxima corrida (via
+`HAS_EXTERNAL_DB`) sin cambio de codigo adicional.
 
 ## Explicitamente NO construido todavia (y por que)
 
@@ -1729,6 +1769,101 @@ validacion que el propio spec prohibe declarar sin evidencia (Seccion
   bookmaker. Si en el futuro se quiere una capa de "edge vs. mercado"
   sobre JSA, es una extension natural via Market Registry (Seccion
   10.5bis), no un cambio al nucleo.
+
+## Fase 3 -- Significancia estadistica formal + Experiment Registry poblado (2026-07-20)
+
+Primera pieza de infraestructura (no de "agregar informacion nueva", ya
+agotada en las 5 lineas cerradas de arriba) construida desde el
+diagnostico del techo del modelo: Seccion 12.8 exigia bootstrap/McNemar/
+permutacion antes de graduar nada de `experimental` a `active` -- hasta
+ahora solo existia el bootstrap pareado (duplicado en 5 modulos
+distintos), y `experiment_registry` seguia vacio pese a que 5
+investigaciones reales ya habian corrido bajo el mismo protocolo.
+
+**`jsa/historical/significance.py`** (nuevo, unico lugar de esta logica
+de ahora en adelante): `paired_bootstrap_ci()` (el mismo bootstrap
+pareado de siempre, extraido de `discriminative_audit.py` -- los 5
+modulos que lo usaban ahora importan de aca, cero cambio de
+comportamiento, 53 tests de candidate audits pre-existentes reverificados
+sin modificar). Se agregan las 2 pruebas que faltaban:
+- `mcnemar_test()`: pareado sobre aciertos/errores binarios (`p>=0.5==y`,
+  mismo criterio que `accuracy()`), correccion de continuidad, chi2 1 gl.
+- `permutation_test_delta_brier()`: sign-flip pareado sobre el delta de
+  Brier -- decide de nuevo con probabilidad 0.5 cual prediccion es
+  "baseline"/"alt" DENTRO de cada juego, preserva la estructura pareada.
+- `full_significance_report()`: combina las 3 (alpha=0.10 consistente en
+  las 3, mismo nivel que el CI de bootstrap al 90% ya usado desde
+  Statcast) + el tamaño de efecto minimo (`|Δ|>=0.001`) -- `passes_all_
+  three=True` unicamente si TODAS coinciden en mejora real. Bar mas
+  estricto que cualquier candidate audit anterior (que solo exigia
+  bootstrap + tamaño de efecto), reservado para decidir promocion real de
+  `experimental` a `active` -- nunca para reportar un resultado cualquiera.
+
+**`jsa/historical/rule_candidate_audit.py`** (nuevo): primera evaluacion
+formal de las 6 reglas heredadas (`engine/rule_definitions.py`) contra el
+historico real -- ninguna tenia todavia un experimento de respaldo
+(`engine/rule_engine.py` las evalua y traza desde el dia 1, pero
+`applied_to_weights` es `False` siempre porque `status="experimental"`
+para las 6). Verificado contra `snapshot_reconstruction.py` cuales
+triggers tienen dato real: 5 de 6 (`long_outing`,
+`short_outing_bullpen_game`, `key_offensive_injuries`, `double_header`,
+`extreme_travel`). `bullpen_fatigue` queda excluida -- su campo
+(`home/away_bullpen_ip_last_3_days`) esta declarado en `domain/models.py`
+pero nunca se llena en ningun lado de la ingesta (siempre `None`);
+testearla ahora seria fingir evidencia sobre un trigger que nunca puede
+disparar.
+
+Mecanismo: para cada regla y cada juego, reconstruye un `GameSnapshot`
+real del payload persistido (`GameSnapshot(**payload)`, mismo patron que
+`validation.py::benchmark_season()`) y llama a `context_detector.py::
+detect_context()` sin modificarlo -- el trigger evaluado es EXACTAMENTE
+el de produccion, nunca una reimplementacion paralela. Donde el trigger
+dispara, recalcula el score con los pesos que resultarian de aplicar la
+regla en solitario (`engine/weight_engine.py::apply_weights()`, reusado
+tal cual); donde no dispara, el score no cambia. Compara via LOSO +
+`full_significance_report()` contra `evidence_score_raw` real (pesos
+base, ninguna regla aplicada -- el estado real de produccion hoy).
+
+**`jsa/historical/experiment_backfill.py`** (nuevo): formaliza las 5
+lineas ya cerradas (Trend, Historical, Statcast, Elo/Pythagorean, Game
+Flow) como filas reales de `experiment_registry`, citando los numeros YA
+obtenidos (documentados arriba en este mismo archivo) y sus run_id de
+GitHub Actions donde aplica -- nunca recalcula nada. Idempotente (mismo
+criterio que `registries/seed.py`).
+
+**CLI** (`jsa/historical/cli.py`): `rule-candidate-audit --db ... --season
+... [--sync-to-registries --registries-db ...]` -- sin el flag, solo
+reporta (igual que cualquier candidate audit anterior); con el flag,
+ADEMAS escribe un `experiment_registry` por regla (`decision=
+"promoted_active"` o `"rejected"`) y, si `passes_all_three=True`, agrega
+una fila nueva a `rule_registry` con `status="active"` y
+`experiments_supporting_rule=[experiment_id]` real -- la primera vez que
+esto pasa en el proyecto (append-only, nunca sobreescribe la fila
+`experimental` anterior). `backfill-closed-experiments
+[--registries-db ...]` para el paso anterior.
+
+**Workflows nuevos**: `jsa_rule_candidate_audit.yml`
+(`workflow_dispatch(seasons, sync_to_registries=false por default)` --
+promover una regla a produccion real requiere decidirlo explicitamente en
+cada dispatch, nunca automatico) y `jsa_backfill_closed_experiments.yml`
+(sin inputs, idempotente).
+
+**Tests**: `test_significance.py` (11, incluyendo predicciones identicas
+-> nada significativo, alternativa claramente mejor/peor -> las 3
+pruebas de acuerdo en la direccion correcta) + `test_rule_candidate_
+audit.py` (10, incluyendo sanity check anti-fuga -- coinflip puro sin
+senal inyectada -> ninguna regla pasa las 3 pruebas -- y recuperacion de
+señal real inyectada especificamente en el subconjunto de juegos
+disparados, usando el `weight_adjustments` real de la regla como
+generador). 21 tests nuevos, mas los 53 de candidate audits
+pre-existentes reverificados tras la extraccion de `paired_bootstrap_ci`.
+
+**Pendiente antes de correr contra Postgres real**: disparar
+`jsa_backfill_closed_experiments.yml` primero (puebla las 5 lineas
+cerradas), despues `jsa_rule_candidate_audit.yml` con
+`sync_to_registries=false` para revisar el resultado real de las 5
+reglas, y solo con confirmacion explicita del usuario re-disparar con
+`sync_to_registries=true` si alguna merece promocion.
 
 ## Regla dura para todo lo anterior
 

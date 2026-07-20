@@ -56,6 +56,7 @@ from jsa.domain.models import SEVEN_PILLARS
 from jsa.engine.pillars.base import discretize_diff, shrunk_era
 from jsa.historical import calibration
 from jsa.historical import db as historical_db
+from jsa.historical.significance import paired_bootstrap_ci as _paired_bootstrap_ci
 from jsa.historical.validation import _calibration_buckets
 
 logger = logging.getLogger("jsa.historical")
@@ -109,27 +110,6 @@ def _baseline_pairs_by_season(records: list[dict]) -> dict[int, list[tuple[float
     for r in records:
         pairs_by_season.setdefault(r["season"], []).append((r["evidence_score_raw"], r["home_win"]))
     return pairs_by_season
-
-
-def _paired_bootstrap_ci(baseline_pairs: list[tuple[float, int]], alt_pairs: list[tuple[float, int]], n_resamples: int = 500, seed: int = 0) -> dict | None:
-    """CI 90% del delta de Brier (alt - baseline) via bootstrap PAREADO
-    sobre predicciones LOSO ya calculadas (nunca vuelve a entrenar nada,
-    solo remuestrea que juegos entran en el promedio) -- para no aceptar
-    un delta como real si el intervalo cruza cero."""
-    n = len(baseline_pairs)
-    if n == 0 or len(alt_pairs) != n:
-        return None
-    rng = np.random.default_rng(seed)
-    base_sq_err = np.array([(p - y) ** 2 for p, y in baseline_pairs])
-    alt_sq_err = np.array([(p - y) ** 2 for p, y in alt_pairs])
-    diffs = alt_sq_err - base_sq_err
-    resampled = np.array([diffs[rng.integers(0, n, n)].mean() for _ in range(n_resamples)])
-    return {
-        "delta_brier_mean": float(diffs.mean()),
-        "ci_5": float(np.percentile(resampled, 5)),
-        "ci_95": float(np.percentile(resampled, 95)),
-        "significant": bool(np.percentile(resampled, 5) > 0 or np.percentile(resampled, 95) < 0),
-    }
 
 
 # --- Fase 1: auditoria individual de pilares ---

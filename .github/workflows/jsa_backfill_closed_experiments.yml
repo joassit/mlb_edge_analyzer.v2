@@ -1,0 +1,41 @@
+name: jsa-backfill-closed-experiments
+
+# One-off: puebla experiment_registry (JSA_DATABASE_URL) con las 5 lineas
+# de investigacion YA cerradas con evidencia real (Trend, Historical,
+# Statcast, Elo/Pythagorean, Game Flow) -- Fase 3 (Seccion 12.8) exige que
+# el Experiment Registry este poblado con experimentos reales, no vacio.
+# Nunca recalcula nada -- los numeros ya se obtuvieron en corridas reales
+# documentadas en jsa/docs/ROADMAP.md (ver jsa/historical/
+# experiment_backfill.py). Idempotente: correrlo dos veces no duplica
+# nada (se salta cualquier experiment_id que ya tenga fila).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backfill-closed-experiments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run backfill-closed-experiments
+        env:
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_DATABASE_URL_SECRET" ]; then
+            echo "JSA_DATABASE_URL no esta configurado -- experiment_registry vive ahi." >&2
+            exit 1
+          fi
+          python -m jsa.historical.cli backfill-closed-experiments --registries-db "$JSA_DATABASE_URL_SECRET"
