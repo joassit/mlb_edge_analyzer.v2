@@ -124,6 +124,44 @@ def test_gate_threshold_sweep_rejects_pure_coinflip(hist_url):
         assert result["market_results"][market_id]["status"] != "validated_70"
 
 
+def test_percentiles_basic_deterministic_values():
+    values = [float(v) for v in range(1, 101)]  # 1..100
+    result = gts._percentiles(values)
+    assert result["p0"] == 1.0
+    assert result["p50"] == pytest.approx(51.0, abs=1.0)
+    assert result["p100"] == 100.0
+
+
+def test_percentiles_empty_returns_empty_dict():
+    assert gts._percentiles([]) == {}
+
+
+def test_diagnose_gate_inputs_reports_percentiles_for_both_markets(hist_url):
+    engine = historical_db.get_engine(hist_url)
+    for season, seed in ((2022, 20), (2023, 21), (2024, 22), (2025, 23), (2026, 24)):
+        _seed_season(engine, season, 200, seed=seed, signal_strength=1.0)
+
+    result = gts.run_gate_threshold_diagnostic([2022, 2023, 2024, 2025, 2026], hist_url)
+    assert result["n_games"] == 1000
+    assert set(result["cri_score_percentiles"]) == {"p0", "p10", "p25", "p50", "p75", "p90", "p100"}
+    assert set(result["uncertainty_index_percentiles"]) == {"p0", "p10", "p25", "p50", "p75", "p90", "p100"}
+    assert set(result["market_probability_percentiles"]) == set(gts.MARKETS_WITH_MODEL)
+    for market_id in gts.MARKETS_WITH_MODEL:
+        probs = result["market_probability_percentiles"][market_id]
+        assert 0.0 <= probs["p0"] <= probs["p100"] <= 1.0
+    assert result["grid_reference"]["p_min_grid"] == list(gts.P_MIN_GRID)
+
+
+def test_diagnose_gate_inputs_never_touches_any_registry(hist_url):
+    """Sanity check de diseno: run_gate_threshold_diagnostic no acepta ni
+    usa ningun parametro de registries -- es imposible que este comando
+    escriba en gate_registry por accidente."""
+    import inspect
+    sig = inspect.signature(gts.run_gate_threshold_diagnostic)
+    assert "registries_database_url" not in sig.parameters
+    assert list(sig.parameters) == ["seasons", "historical_database_url"]
+
+
 def test_gate_threshold_sweep_validates_strong_real_signal(hist_url):
     """Con una senal real y fuerte (evidence_score_raw predice bien el
     resultado en las 5 temporadas), el nested walk-forward deberia
