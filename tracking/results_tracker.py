@@ -592,6 +592,153 @@ def compute_pick_performance(days: int = 30) -> dict:
     }
 
 
+# Rango [low, high) de edge del pick. Un pick forzado no se elige por edge
+# (existe solo para cumplir "siempre al menos un pick por partido"), así
+# que compute_edge_lift() lo excluye por completo -- mezclarlo diluiría
+# cualquier patrón real de "a partir de qué edge el modelo sí tiene skill".
+# El primer bucket cubre edge negativo: no debería pasar en un pick real
+# (select_picks_for_game() exige edge positivo), pero un bucket explícito
+# dejaría cualquier caso así a la vista en vez de perderlo en silencio.
+_EDGE_BUCKETS = [
+    (-1.01, 0.00, "<0%"),
+    (0.00, 0.02, "0-2%"),
+    (0.02, 0.04, "2-4%"),
+    (0.04, 0.06, "4-6%"),
+    (0.06, 0.09, "6-9%"),
+    (0.09, 1.01, "9%+"),
+]
+
+
+def _bucket_index_for_edge(edge: float) -> int | None:
+    for i, (low, high, _label) in enumerate(_EDGE_BUCKETS):
+        if low <= edge < high:
+            return i
+    return None
+
+
+def compute_edge_lift(days: int = 30) -> dict:
+    """
+    Win rate y ROI de los picks REALES (forced=False) agrupados por rango
+    de edge -- responde una pregunta que compute_pick_performance() no
+    puede: ¿el edge realmente predice desempeño, o un edge de 4% se
+    comporta igual que uno de 9%? Si el ROI no sube con el edge, el
+    "edge" del heurístico es ruido de la fórmula, no una señal explotable
+    -- justo lo que el umbral de 200 picks liquidados existe para
+    determinar con evidencia en vez de intuición.
+
+    Mismo dedup por (game_pk, market) que compute_pick_performance() (nos
+    quedamos con el pick más reciente por juego+mercado).
+    """
+    from datetime import date, timedelta
+
+    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    session = SessionLocal()
+    try:
+        picks = (
+            session.query(Pick)
+            .filter(Pick.game_date >= cutoff, Pick.result.in_([PickResult.WIN, PickResult.LOSS, PickResult.PUSH]),
+                    Pick.forced.is_(False), Pick.edge.isnot(None))
+            .all()
+        )
+    finally:
+        session.close()
+
+    latest_by_game_market = {}
+    for p in picks:
+        key = (p.game_pk, p.market)
+        prev = latest_by_game_market.get(key)
+        if prev is None or p.created_at > prev.created_at:
+            latest_by_game_market[key] = p
+    picks = list(latest_by_game_market.values())
+
+    bucket_picks = [[] for _ in _EDGE_BUCKETS]
+    n_out_of_range = 0
+    for p in picks:
+        idx = _bucket_index_for_edge(p.edge)
+        if idx is None:
+            n_out_of_range += 1
+            continue
+        bucket_picks[idx].append(p)
+
+    buckets = [
+        {"label": label, **_summarize_picks(picks_in_bucket)}
+        for (_low, _high, label), picks_in_bucket in zip(_EDGE_BUCKETS, bucket_picks)
+    ]
+
+    return {"n_picks": len(picks), "n_out_of_range": n_out_of_range, "buckets": buckets}
+
+
+# Mismos límites que _CALIBRATION_BUCKETS (0.50 a 1.01) más un bucket
+# "<50%" al frente -- un pick real nunca debería tener model_prob<0.5
+# (select_picks_for_game() elige el lado favorito), pero un pick forzado
+# sí puede, y perder esos datos en silencio ocultaría un caso real en vez
+# de mostrarlo.
+_PROB_BUCKETS = [(0.0, 0.50, "<50%")] + _CALIBRATION_BUCKETS
+
+
+def _bucket_index_for_probability(p: float) -> int | None:
+    for i, (low, high, _label) in enumerate(_PROB_BUCKETS):
+        if low <= p < high:
+            return i
+    return None
+
+
+def compute_pick_performance_by_probability(days: int = 30) -> dict:
+    """
+    Win rate y ROI de los picks agrupados por la probabilidad del modelo
+    en el lado elegido (no por edge) -- a diferencia de compute_calibration()
+    (que mide si esa probabilidad coincide con el hit rate real de TODOS
+    los juegos), esto mide directamente el resultado económico de apostar
+    en cada rango de confianza. Un rango puede estar sobreestimado en
+    probabilidad (visible en compute_calibration) sin que eso todavía se
+    traduzca en ROI negativo aquí, o viceversa -- son dos preguntas
+    relacionadas pero distintas.
+
+    Separa reales de forzados (mismo criterio que compute_pick_performance())
+    -- nunca se combinan en un solo bucket.
+    """
+    from datetime import date, timedelta
+
+    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    session = SessionLocal()
+    try:
+        picks = (
+            session.query(Pick)
+            .filter(Pick.game_date >= cutoff, Pick.result.in_([PickResult.WIN, PickResult.LOSS, PickResult.PUSH]),
+                    Pick.model_prob.isnot(None))
+            .all()
+        )
+    finally:
+        session.close()
+
+    latest_by_game_market = {}
+    for p in picks:
+        key = (p.game_pk, p.market)
+        prev = latest_by_game_market.get(key)
+        if prev is None or p.created_at > prev.created_at:
+            latest_by_game_market[key] = p
+    picks = list(latest_by_game_market.values())
+
+    def build_buckets(subset: list) -> list:
+        bucket_picks = [[] for _ in _PROB_BUCKETS]
+        for p in subset:
+            idx = _bucket_index_for_probability(p.model_prob)
+            if idx is None:
+                continue
+            bucket_picks[idx].append(p)
+        return [
+            {"label": label, **_summarize_picks(picks_in_bucket)}
+            for (_low, _high, label), picks_in_bucket in zip(_PROB_BUCKETS, bucket_picks)
+        ]
+
+    return {
+        "real": build_buckets([p for p in picks if not p.forced]),
+        "forced": build_buckets([p for p in picks if p.forced]),
+    }
+
+
 def _pick_to_dict(pick: "Pick | None") -> dict | None:
     """Representación plana de un Pick liquidado, para el reporte diario
     -- reports/generate_report.py no debe importar el modelo SQLAlchemy
@@ -759,6 +906,123 @@ def compute_clv_performance(days: int = 30) -> dict:
         "n_bets": len(bets_with_clv),
         "avg_clv": avg_clv,
         "positive_clv_rate": positive_clv / len(bets_with_clv),
+    }
+
+
+def decompose_game_projection(game_pk: int, game_date: str) -> dict | None:
+    """
+    Descompone la proyección de carreras de un juego puntual por
+    componente (ofensa/pitcheo rival/parque/clima/local) -- para auditar
+    UN pick que perdió (o ganó de forma sospechosa) y ver qué insumo pesó
+    más, en vez de solo ver el número final.
+
+    Lee el FeatureSnapshot YA CONGELADO del juego (get_feature_snapshot)
+    en vez de recalcular insumos crudos en vivo -- volver a golpear la
+    stats API hoy traería estadísticas de temporada contaminadas con
+    juegos posteriores al que se está auditando (look-ahead bias, el mismo
+    problema que FeatureSnapshot existe para evitar, ver db/database.py).
+
+    Devuelve None si no hay snapshot para este juego (predicciones de
+    antes de que existiera FeatureSnapshot) -- no hay insumos crudos que
+    descomponer.
+    """
+    from db.database import get_feature_snapshot
+    from model.predictor import decompose_from_raw_inputs
+
+    snap = get_feature_snapshot(game_pk, game_date)
+    if snap is None:
+        return None
+    return decompose_from_raw_inputs(snap["raw_inputs"])
+
+
+def compute_rolling_metrics(window: int = 30) -> dict:
+    """
+    Brier Score y ROI en VENTANA RODANTE (no un solo promedio de N días
+    como compute_metrics()/compute_pick_performance()) -- expone drift que
+    un agregado puede diluir: una racha mala reciente pesa lo mismo que una
+    racha vieja en un promedio de 30-90 días, pero acá se ve exactamente
+    en qué punto de la serie cronológica empezó a moverse.
+
+    Dos series independientes, cada una con su propia unidad de ventana:
+      - brier_series: Brier Score del heurístico (home_model_prob) sobre
+        los últimos `window` JUEGOS con resultado -- mismo dedup/validación
+        que compute_metrics() (por game_pk, fila más reciente, sólo filas
+        que pasan validate_probabilities()). Incluye además el ECE de esa
+        misma ventana (reusa _compute_model_calibration(), sin fórmula
+        nueva) como proxy de calibración rodante.
+      - roi_series: ROI/win rate (reusa _summarize_picks()) sobre los
+        últimos `window` PICKS REALES liquidados (forced=False) -- mismo
+        dedup por (game_pk, market) que compute_pick_performance().
+
+    Ambas listas quedan vacías si el proyecto todavía no acumula al menos
+    `window` juegos/picks -- no hay ventana rodante posible con menos datos
+    que el propio tamaño de la ventana.
+    """
+    session = SessionLocal()
+    try:
+        game_rows = (
+            session.query(GameAnalysis, ActualResult)
+            .join(ActualResult, GameAnalysis.game_pk == ActualResult.game_pk)
+            .order_by(GameAnalysis.id.desc())
+            .all()
+        )
+        picks = (
+            session.query(Pick)
+            .filter(Pick.result.in_([PickResult.WIN, PickResult.LOSS, PickResult.PUSH]),
+                    Pick.forced.is_(False))
+            .order_by(Pick.created_at.desc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    # Mismo dedup que compute_metrics(): recorriendo en orden id.desc(), el
+    # primer visto de cada game_pk ya es la fila más reciente.
+    seen_pks = set()
+    deduped_games = []
+    for pred, result in game_rows:
+        if pred.game_pk in seen_pks:
+            continue
+        seen_pks.add(pred.game_pk)
+        if pred.home_model_prob is not None and validate_probabilities(pred):
+            deduped_games.append((pred, result))
+    deduped_games.sort(key=lambda pr: (pr[0].game_date, pr[0].id))
+
+    # Mismo dedup que compute_pick_performance(): por (game_pk, market),
+    # recorriendo en orden created_at.desc(), el primer visto ya es el pick
+    # más reciente de ese juego+mercado.
+    latest_by_game_market = {}
+    for p in picks:
+        key = (p.game_pk, p.market)
+        if key not in latest_by_game_market:
+            latest_by_game_market[key] = p
+    deduped_picks = sorted(latest_by_game_market.values(), key=lambda p: (p.game_date, p.created_at))
+
+    brier_series = []
+    for i in range(window - 1, len(deduped_games)):
+        chunk = deduped_games[i - window + 1: i + 1]
+        brier = sum(
+            (pred.home_model_prob - (1 if result.winner == "home" else 0)) ** 2
+            for pred, result in chunk
+        ) / window
+        ece = _compute_model_calibration(chunk, "home_model_prob")["ece"]
+        brier_series.append({"date": chunk[-1][0].game_date, "n": window, "rolling_brier": brier, "rolling_ece": ece})
+
+    roi_series = []
+    for i in range(window - 1, len(deduped_picks)):
+        chunk = deduped_picks[i - window + 1: i + 1]
+        summary = _summarize_picks(chunk)
+        roi_series.append({
+            "date": chunk[-1].game_date, "n": window,
+            "rolling_roi": summary["roi"], "rolling_win_rate": summary["win_rate"],
+        })
+
+    return {
+        "window": window,
+        "brier_series": brier_series,
+        "roi_series": roi_series,
+        "n_games_available": len(deduped_games),
+        "n_real_picks_available": len(deduped_picks),
     }
 
 

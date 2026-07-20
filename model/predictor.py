@@ -11,7 +11,7 @@ volver a golpear ninguna API.
 """
 
 from config import PARK_FACTOR_WEIGHT, WEATHER_CORRECTION, NEGBIN_DISPERSION, SKELLAM_SHRINKAGE_ALPHA
-from model.runs_projection import project_team_runs, LEAGUE_AVG_ERA, LEAGUE_AVG_RUNS_PER_GAME
+from model.runs_projection import project_team_runs, decompose_team_runs_projection, LEAGUE_AVG_ERA, LEAGUE_AVG_RUNS_PER_GAME
 from model.probability import model_prob, normalize_matchup
 from model.skellam_model import skellam_win_prob
 from model.negbin_model import negbin_win_prob
@@ -19,7 +19,14 @@ from model.markets import run_line_prob, fair_total_line
 from model.adjustments import shrunk_era
 
 
-def predict_from_raw_inputs(raw: dict) -> dict:
+def _resolve_prediction_inputs(raw: dict) -> dict:
+    """
+    Preprocesamiento compartido entre predict_from_raw_inputs() y
+    decompose_from_raw_inputs() -- shrinkage de ERA del abridor y
+    resolución de parámetros congelados en el snapshot -- para que ambos
+    caminos nunca puedan desincronizarse en CÓMO se preparan los insumos
+    crudos antes de proyectar carreras.
+    """
     league_era = raw.get("league_era", LEAGUE_AVG_ERA)
     # A2: congelado en el snapshot igual que league_era -- un snapshot de
     # antes de este cambio no trae esta clave, cae a la constante actual
@@ -32,7 +39,7 @@ def predict_from_raw_inputs(raw: dict) -> dict:
     # mismo resultado que dio el día que se generó la predicción real. Un
     # snapshot de antes de esta corrección no trae estas claves -- cae a
     # los valores actuales de config.py, igual que el shrinkage de ERA de
-    # arriba cae al ERA crudo si el snapshot no trae innings_pitched.
+    # abajo cae al ERA crudo si el snapshot no trae innings_pitched.
     park_factor_weight = raw.get("park_factor_weight", PARK_FACTOR_WEIGHT)
     weather_correction = raw.get("weather_correction", WEATHER_CORRECTION)
     negbin_dispersion = raw.get("negbin_dispersion", NEGBIN_DISPERSION)
@@ -48,6 +55,56 @@ def predict_from_raw_inputs(raw: dict) -> dict:
     home_ip = raw.get("home_innings_pitched")
     away_era = shrunk_era(raw["away_era"], away_ip, league_era) if away_ip is not None else raw["away_era"]
     home_era = shrunk_era(raw["home_era"], home_ip, league_era) if home_ip is not None else raw["home_era"]
+
+    return {
+        "league_era": league_era,
+        "league_avg_runs_per_game": league_avg_runs_per_game,
+        "park_factor_weight": park_factor_weight,
+        "weather_correction": weather_correction,
+        "negbin_dispersion": negbin_dispersion,
+        "skellam_shrinkage_alpha": skellam_shrinkage_alpha,
+        "away_era": away_era,
+        "home_era": home_era,
+    }
+
+
+def decompose_from_raw_inputs(raw: dict) -> dict:
+    """
+    Descompone la proyección de carreras de AMBOS equipos por componente
+    (ofensa/pitcheo rival/parque/clima/local) -- para auditar un pick
+    puntual (p.ej. uno que perdió) y ver qué insumo pesó más, sin
+    recalcular nada a mano: reusa exactamente el mismo preprocesamiento
+    que predict_from_raw_inputs() vía _resolve_prediction_inputs(), así
+    que nunca puede desincronizarse de la predicción real que se guardó.
+    """
+    r = _resolve_prediction_inputs(raw)
+    away = decompose_team_runs_projection(
+        raw["away_ops"], r["home_era"], raw["away_bullpen_era"],
+        raw["league_ops"], r["league_era"], raw["park_factor"], raw["starter_weight"],
+        is_home=False, temp_f=raw.get("temp_f"),
+        park_factor_weight=r["park_factor_weight"], weather_correction=r["weather_correction"],
+        league_avg_runs_per_game=r["league_avg_runs_per_game"],
+    )
+    home = decompose_team_runs_projection(
+        raw["home_ops"], r["away_era"], raw["home_bullpen_era"],
+        raw["league_ops"], r["league_era"], raw["park_factor"], raw["starter_weight"],
+        is_home=True, temp_f=raw.get("temp_f"),
+        park_factor_weight=r["park_factor_weight"], weather_correction=r["weather_correction"],
+        league_avg_runs_per_game=r["league_avg_runs_per_game"],
+    )
+    return {"away": away, "home": home}
+
+
+def predict_from_raw_inputs(raw: dict) -> dict:
+    r = _resolve_prediction_inputs(raw)
+    league_era = r["league_era"]
+    league_avg_runs_per_game = r["league_avg_runs_per_game"]
+    park_factor_weight = r["park_factor_weight"]
+    weather_correction = r["weather_correction"]
+    negbin_dispersion = r["negbin_dispersion"]
+    skellam_shrinkage_alpha = r["skellam_shrinkage_alpha"]
+    away_era = r["away_era"]
+    home_era = r["home_era"]
 
     away_mu = project_team_runs(
         raw["away_ops"], home_era, raw["away_bullpen_era"],

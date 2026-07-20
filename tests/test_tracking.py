@@ -542,6 +542,220 @@ def test_compute_pick_performance_empty_when_no_picks_settled(tmp_path, monkeypa
     assert perf["overall_forced"]["n_picks"] == 0
 
 
+def test_compute_edge_lift_buckets_real_picks_by_edge_and_excludes_forced(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/edge_lift_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    # Real, edge bajo (1%) -- pierde
+    session.add(database.Pick(
+        game_pk=1, game_date=today, market="moneyline", selection="away",
+        model_prob=0.51, edge=0.01, forced=False, result="loss", profit_unit=-1.0,
+    ))
+    # Real, edge alto (10%) -- gana
+    session.add(database.Pick(
+        game_pk=2, game_date=today, market="moneyline", selection="home",
+        model_prob=0.60, edge=0.10, forced=False, result="win", profit_unit=0.9,
+    ))
+    # Forzado con edge alto -- NO debe contar (compute_edge_lift excluye forzados)
+    session.add(database.Pick(
+        game_pk=3, game_date=today, market="moneyline", selection="home",
+        model_prob=0.55, edge=0.15, forced=True, result="win", profit_unit=1.0,
+    ))
+    session.commit()
+    session.close()
+
+    lift = results_tracker.compute_edge_lift(days=30)
+
+    assert lift["n_picks"] == 2  # los 2 reales, no el forzado
+    by_label = {b["label"]: b for b in lift["buckets"]}
+    assert by_label["0-2%"]["n_picks"] == 1
+    assert by_label["0-2%"]["win_rate"] == 0.0
+    assert by_label["9%+"]["n_picks"] == 1
+    assert by_label["9%+"]["win_rate"] == 1.0
+    assert by_label["4-6%"]["n_picks"] == 0
+
+
+def test_compute_edge_lift_empty_when_no_real_picks(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/edge_lift_empty_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    lift = results_tracker.compute_edge_lift(days=30)
+
+    assert lift["n_picks"] == 0
+    assert all(b["n_picks"] == 0 for b in lift["buckets"])
+
+
+def test_compute_pick_performance_by_probability_separates_real_and_forced(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/prob_perf_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    today = date.today().isoformat()
+    session = TempSession()
+    session.add(database.Pick(
+        game_pk=1, game_date=today, market="moneyline", selection="away",
+        model_prob=0.52, forced=False, result="win", profit_unit=0.9,
+    ))
+    session.add(database.Pick(
+        game_pk=2, game_date=today, market="moneyline", selection="home",
+        model_prob=0.63, forced=False, result="loss", profit_unit=-1.0,
+    ))
+    session.add(database.Pick(
+        game_pk=3, game_date=today, market="moneyline", selection="home",
+        model_prob=0.30, forced=True, result="win", profit_unit=1.0,  # forzado, prob <50%
+    ))
+    session.commit()
+    session.close()
+
+    perf = results_tracker.compute_pick_performance_by_probability(days=30)
+
+    real_by_label = {b["label"]: b for b in perf["real"]}
+    assert real_by_label["50-55%"]["n_picks"] == 1
+    assert real_by_label["60-65%"]["n_picks"] == 1
+    assert real_by_label["<50%"]["n_picks"] == 0
+
+    forced_by_label = {b["label"]: b for b in perf["forced"]}
+    assert forced_by_label["<50%"]["n_picks"] == 1
+    assert forced_by_label["<50%"]["win_rate"] == 1.0
+
+
+def test_decompose_game_projection_returns_none_without_feature_snapshot(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/decompose_none_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(database, "SessionLocal", TempSession)
+
+    assert results_tracker.decompose_game_projection(999, "2026-07-01") is None
+
+
+def test_decompose_game_projection_reads_frozen_snapshot(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/decompose_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(database, "SessionLocal", TempSession)
+
+    raw_inputs = {
+        "away_era": 3.00, "home_era": 4.50,
+        "away_ops": 0.780, "home_ops": 0.740, "league_ops": 0.750,
+        "league_era": 4.30,
+        "away_bullpen_era": 4.30, "home_bullpen_era": 4.30,
+        "park_factor": 1.1, "starter_weight": 0.65, "temp_f": 72,
+    }
+    database.save_feature_snapshot(game_pk=42, game_date="2026-07-05", raw_inputs=raw_inputs)
+
+    decomposition = results_tracker.decompose_game_projection(42, "2026-07-05")
+
+    assert decomposition is not None
+    assert "away" in decomposition and "home" in decomposition
+    assert decomposition["home"]["local_contrib"] > 0.0
+    assert decomposition["away"]["local_contrib"] == 0.0
+
+
+def _add_game_with_result(session, game_pk, game_date, home_model_prob, winner):
+    session.add(database.GameAnalysis(
+        game_pk=game_pk, game_date=game_date, away_team="A", home_team="B",
+        home_model_prob=home_model_prob, away_model_prob=1 - home_model_prob,
+    ))
+    session.add(database.ActualResult(
+        game_pk=game_pk, game_date=game_date,
+        home_score=5 if winner == "home" else 2, away_score=2 if winner == "home" else 5,
+        winner=winner, total_runs=7,
+    ))
+
+
+def test_compute_rolling_metrics_empty_series_below_window_size(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/rolling_empty_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    _add_game_with_result(session, 1, "2026-07-01", 0.6, "home")
+    session.commit()
+    session.close()
+
+    rolling = results_tracker.compute_rolling_metrics(window=30)
+
+    assert rolling["brier_series"] == []
+    assert rolling["roi_series"] == []
+    assert rolling["n_games_available"] == 1
+
+
+def test_compute_rolling_metrics_produces_one_point_at_exact_window_size(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/rolling_window_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    for i in range(3):
+        _add_game_with_result(session, i + 1, f"2026-07-0{i+1}", 0.7, "home")
+    session.commit()
+    session.close()
+
+    rolling = results_tracker.compute_rolling_metrics(window=3)
+
+    assert len(rolling["brier_series"]) == 1
+    assert rolling["brier_series"][0]["n"] == 3
+    assert abs(rolling["brier_series"][0]["rolling_brier"] - (0.3 ** 2)) < 1e-9
+
+
+def test_compute_rolling_metrics_slides_window_producing_multiple_points(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/rolling_slide_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    for i in range(4):
+        _add_game_with_result(session, i + 1, f"2026-07-0{i+1}", 0.7, "home")
+    session.commit()
+    session.close()
+
+    rolling = results_tracker.compute_rolling_metrics(window=3)
+
+    # 4 juegos, ventana de 3 -> 2 puntos (juegos 1-3, luego 2-4)
+    assert len(rolling["brier_series"]) == 2
+    assert rolling["brier_series"][0]["date"] == "2026-07-03"
+    assert rolling["brier_series"][1]["date"] == "2026-07-04"
+
+
+def test_compute_rolling_metrics_roi_series_only_uses_real_picks(tmp_path, monkeypatch):
+    temp_engine = create_engine(f"sqlite:///{tmp_path}/rolling_roi_test.db")
+    database.Base.metadata.create_all(temp_engine)
+    TempSession = sessionmaker(bind=temp_engine)
+    monkeypatch.setattr(results_tracker, "SessionLocal", TempSession)
+
+    session = TempSession()
+    for i in range(3):
+        session.add(database.Pick(
+            game_pk=i + 1, game_date=f"2026-07-0{i+1}", market="moneyline", selection="home",
+            model_prob=0.6, forced=False, result="win", profit_unit=0.9,
+            created_at=datetime(2026, 7, i + 1, 12, 0, 0),
+        ))
+    # Forzado -- no debe contar en la ventana rodante de ROI
+    session.add(database.Pick(
+        game_pk=4, game_date="2026-07-04", market="moneyline", selection="home",
+        model_prob=0.5, forced=True, result="loss", profit_unit=-1.0,
+        created_at=datetime(2026, 7, 4, 12, 0, 0),
+    ))
+    session.commit()
+    session.close()
+
+    rolling = results_tracker.compute_rolling_metrics(window=3)
+
+    assert len(rolling["roi_series"]) == 1
+    assert rolling["roi_series"][0]["rolling_win_rate"] == 1.0
+    assert rolling["n_real_picks_available"] == 3
+
+
 def test_update_results_defaults_to_21_day_window(monkeypatch):
     # Antes en 5 -- un juego pospuesto que tarda más de esos días en
     # reanudarse bajo el mismo game_pk quedaba huérfano para siempre, ver

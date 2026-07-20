@@ -4,7 +4,7 @@ main.py en vivo como cualquier recálculo histórico sobre un FeatureSnapshot
 congelado. Si esto se rompe, se rompen los dos consumidores a la vez.
 """
 
-from model.predictor import predict_from_raw_inputs
+from model.predictor import predict_from_raw_inputs, decompose_from_raw_inputs
 
 
 def _base_raw_inputs(**overrides) -> dict:
@@ -175,3 +175,36 @@ def test_predict_from_raw_inputs_shrinkage_does_not_touch_run_line_totals_or_mu(
     for key in ("away_proj_runs", "home_proj_runs", "home_covers_rl_prob",
                 "away_covers_rl_prob", "fair_total_runs"):
         assert raw_result[key] == calibrated_result[key]
+
+
+def test_decompose_from_raw_inputs_final_runs_match_predict_from_raw_inputs():
+    # decompose_from_raw_inputs() reusa _resolve_prediction_inputs() --
+    # nunca puede desincronizarse del away_proj_runs/home_proj_runs real
+    # que guardó la predicción, solo agrega el desglose por componente.
+    raw = _base_raw_inputs(park_factor=1.1, temp_f=95)
+    prediction = predict_from_raw_inputs(raw)
+    decomposition = decompose_from_raw_inputs(raw)
+
+    assert decomposition["away"]["final_runs"] == prediction["away_proj_runs"]
+    assert decomposition["home"]["final_runs"] == prediction["home_proj_runs"]
+
+
+def test_decompose_from_raw_inputs_home_gets_local_contrib_away_does_not():
+    raw = _base_raw_inputs()
+    decomposition = decompose_from_raw_inputs(raw)
+
+    assert decomposition["home"]["local_contrib"] > 0.0
+    assert decomposition["away"]["local_contrib"] == 0.0
+
+
+def test_decompose_from_raw_inputs_uses_shrunk_era_like_predict_from_raw_inputs():
+    # El abridor visitante tiene poca muestra (20 IP) -- decompose debe
+    # aplicarle el mismo shrinkage hacia el ERA de liga que predict_from_raw_inputs(),
+    # no el ERA crudo, para que el pitcheo rival mostrado en el desglose sea
+    # consistente con la proyección real que se guardó.
+    raw = _base_raw_inputs(away_innings_pitched=20, home_innings_pitched=20)
+    prediction = predict_from_raw_inputs(raw)
+    decomposition = decompose_from_raw_inputs(raw)
+
+    assert decomposition["away"]["final_runs"] == prediction["away_proj_runs"]
+    assert decomposition["home"]["final_runs"] == prediction["home_proj_runs"]
