@@ -100,6 +100,8 @@ def run_season_ingestion(
     rule_registry_rows = registries_db.latest_by_id(registries_engine, registries_db.rule_registry, "rule_id")
     feature_registry_rows = registries_db.latest_by_id(registries_engine, registries_db.feature_registry, "feature_id")
     pillar_registry_rows = registries_db.latest_by_id(registries_engine, registries_db.pillar_registry, "pillar_id")
+    calibration_registry_rows = registries_db.latest_by_id(registries_engine, registries_db.calibration_registry, "calibration_id")
+    gate_registry_rows = registries_db.latest_by_id(registries_engine, registries_db.gate_registry, "gate_id")
     experiment_ids = set(registries_db.latest_by_id(registries_engine, registries_db.experiment_registry, "experiment_id").keys())
 
     games = fetch_season_games(season)
@@ -150,7 +152,8 @@ def run_season_ingestion(
             report = evaluate_game(
                 snapshot, run_id=run_id, model_version=production_config.MODEL_VERSION,
                 rule_registry_rows=rule_registry_rows, feature_registry_rows=feature_registry_rows,
-                pillar_registry_rows=pillar_registry_rows, registry_version_tag=REGISTRY_VERSION,
+                pillar_registry_rows=pillar_registry_rows, calibration_registry_rows=calibration_registry_rows,
+                gate_registry_rows=gate_registry_rows, registry_version_tag=REGISTRY_VERSION,
                 experiment_ids=experiment_ids, is_production=False,
             )
 

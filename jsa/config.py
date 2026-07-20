@@ -113,6 +113,14 @@ GATE_CRI_MIN = 85
 GATE_UNCERTAINTY_MAX = 40
 GATE_DOMINANCE_THRESHOLD = 0.40
 
+# --- Calibracion (Seccion 8.4.1/9.2, Fase 4) -- el UNICO calibration_id
+# que engine/orchestrator.py puede leer de calibration_registry para
+# decidir calibration_status. Mismo valor que el default de
+# `historical/cli.py calibrate --calibration-id` -- si se ajusta una
+# curva nueva bajo otro id, nunca se usa en produccion hasta que se
+# actualice esta constante a mano (nunca automatico).
+PRODUCTION_CALIBRATION_ID = "calibration-evidence_score_raw-v1"
+
 # Mercados base (Seccion 10.5) -- sembrados como `active` en el Market
 # Registry desde el dia 1 (son el set fijo de 10.5, no una extension de
 # 10.5bis). Un mercado nuevo se agrega via Market Registry, nunca editando

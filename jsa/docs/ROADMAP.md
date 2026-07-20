@@ -1865,6 +1865,117 @@ cerradas), despues `jsa_rule_candidate_audit.yml` con
 reglas, y solo con confirmacion explicita del usuario re-disparar con
 `sync_to_registries=true` si alguna merece promocion.
 
+## Resultado real de Fase 3 contra Postgres real (2026-07-20) -- ninguna regla promovida
+
+`jsa_backfill_closed_experiments.yml` corrio primero (run
+[29714734860](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29714734860)):
+10 filas insertadas en `experiment_registry` (las 5 lineas cerradas de
+arriba, cada Statcast H1-H4 como filas separadas). Despues
+`jsa_rule_candidate_audit.yml` corrio en modo solo-reporte (run
+[29714773930](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29714773930),
+13,101 juegos reales, 5 temporadas):
+
+| Regla | Dispara | Δ Brier | Bootstrap | McNemar | Permutacion | Mejora | Pasa las 3 |
+|---|---|---|---|---|---|---|---|
+| `long_outing` | 1,136 (8.7%) | -0.0000054 | No | No | No | Si (ruido) | **No** |
+| `short_outing_bullpen_game` | 1,778 (13.6%) | +0.000131 | No | No | No | No | **No** |
+| `key_offensive_injuries` | 8,566 (65.4%) | +0.000166 | No | No | No | No | **No** |
+| `double_header` | 236 (1.8%) | +0.0000090 | No | No | No | No | **No** |
+| `extreme_travel` | 299 (2.3%) | -0.0000286 | No | No | No | Si (ruido) | **No** |
+
+Deltas ordenes de magnitud por debajo del umbral minimo (`0.001`) y sin
+significancia en ninguna de las 3 pruebas -- a diferencia de Elo/
+Pythagorean (peor CON significancia), este es un resultado limpio de
+"sin efecto detectable". Reponderar pesos entre pilares para estos
+triggers especificos no mejora el modelo -- mismo diagnostico del techo
+del modelo que todas las lineas anteriores.
+
+**Decision (2026-07-20): ninguna regla se promueve.** Las 6 reglas
+heredadas quedan `experimental` (`bullpen_fatigue` sigue sin dato real
+para evaluarse). Se re-disparo `jsa_rule_candidate_audit.yml` con
+`sync_to_registries=true` (run 29714945418) para formalizar los 5
+resultados como filas `decision="rejected"` en `experiment_registry` --
+15 experimentos reales en total (10 backfill + 5 reglas), ninguna
+promocion a `rule_registry.status="active"`. **Fase 3 cerrada.**
+
+## Fase 4 -- Calibracion isotonica wireada a produccion (2026-07-20)
+
+El ajuste isotonico de `evidence_score_raw` ya estaba construido y
+validado (LOSO, 5 temporadas reales) desde la entrega anterior, pero
+`engine/orchestrator.py` nunca leia `calibration_registry` -- `calibration_
+status` quedaba `"uncalibrated"` siempre, sin importar si existia una
+curva validada. Esta entrega cierra ese vacio.
+
+**Hallazgo antes de escribir codigo** (cambio el alcance real de esta
+Fase): `engine/confidence_gate.py` dice explicitamente que el Gate nunca
+pasa por DOS razones independientes (Seccion 8.4.1 + 10.4) -- pero el
+codigo de `evaluate_gate()` solo chequeaba la primera
+(`calibration_status`). Wirear SOLO la calibracion habria dejado que el
+Gate empezara a pasar de verdad sin que su propio Gate Threshold Sweep
+(Fase 6, todavia no existe) lo respalde -- una promocion prematura,
+exactamente lo que el proyecto evita en todo lo demas. Se corrigieron
+las 2 piezas juntas, no solo la pedida originalmente.
+
+**Cambios**:
+- `engine/orchestrator.py::_build_calibration_info()` (nuevo): lee
+  `calibration_registry_rows[config.PRODUCTION_CALIBRATION_ID]` (nuevo
+  constante en `config.py`, mismo valor que el default de
+  `historical/cli.py calibrate --calibration-id`). Si existe y
+  `status=="validated"`, aplica la curva (`x_knots`/`y_knots`) sobre
+  `evidence_score_raw` via interpolacion lineal con clip en los bordes
+  (`np.interp`, reproduce exactamente `IsotonicRegression(out_of_bounds=
+  "clip").predict()` sin necesitar sklearn en el camino de produccion).
+  `raw_probability` pasa a derivarse de `evidence_score_raw` -- reemplaza
+  el valor Skellam-derivado que se usaba antes (Projected Runs, Seccion
+  9, sigue existiendo como modulo separado, solo dejo de alimentar
+  `CalibrationInfo`).
+- `engine/confidence_gate.py::evaluate_gate()`: nuevo parametro
+  `gate_registry_rows` -- corta con `reason="gate_not_validated"` si
+  `gate_registry_rows.get(f"gate-{market_id}-v1", {}).get("status") !=
+  "validated_70"`, ANTES de evaluar los criterios reales. Docstring del
+  modulo reescrito para dejar las 2 condiciones explicitas en el codigo,
+  no solo en el comentario.
+- `jsa/main.py` y `jsa/historical/pipeline.py`: ambos leen
+  `calibration_registry_rows`/`gate_registry_rows` (mismo patron
+  `registries_db.latest_by_id()` que ya usan para rule/feature/pillar
+  registry) y los pasan a `evaluate_game()` -- produccion en vivo Y el
+  motor historico comparten la MISMA logica, sin excepcion (principio
+  del proyecto desde la primera entrega).
+
+**Resultado esperado real, verificado con tests**: con una curva
+validada en `calibration_registry` pero SIN ningun `gate_registry`
+`validated_70` (el estado real hoy -- los 4 sembrados en
+`"under_validation"`), `calibration_status` pasa a `"calibrated"` y
+`final_category` deja de ser siempre `"NO_DISPONIBLE_SIN_CALIBRAR"` --
+pero el Confidence Gate sigue sin pasar, ahora con
+`reason="gate_not_validated"` en vez de `"uncalibrated"`. Comportamiento
+correcto, no un bug: falta Fase 6 (Gate Threshold Sweep) para que el
+Gate pueda pasar de verdad.
+
+**Tests**: `test_calibration_wiring.py` (6, unitarios sobre
+`_build_calibration_info()`: sin entrada, entrada no validada, entrada
+validada con knots vacios, curva real aplicada correctamente,
+clipping fuera de rango, id de calibracion equivocado ignorado) +
+`test_confidence_gate.py` extendido (2 tests nuevos: Gate bloqueado por
+`gate_not_validated` aun calibrado, entrada de gate_registry ausente) +
+`test_pipeline_integration.py` extendido (2 tests nuevos end-to-end:
+categoria real una vez que existe una curva validada pero Gate sigue
+bloqueado por `gate_not_validated`; con AMBOS registries validados, el
+Gate ya no se bloquea por infraestructura, solo por sus criterios
+reales). Suite completa de `jsa/` reverificada tras el cambio: sin
+regresiones.
+
+**Explicitamente NO en esta entrega**: ningun calibration_registry ni
+gate_registry real se pobló en Postgres -- `calibration_registry` sigue
+vacio (nadie corrio `historical/cli.py calibrate` contra el Postgres
+real todavia) y los 4 `gate_registry` siguen `"under_validation"`
+(sembrados). El mecanismo esta listo y probado; activar calibracion real
+en produccion requiere primero correr `calibrate` contra el histórico
+real (con confirmacion explicita, mismo patron de siempre), y activar el
+Gate de verdad requiere Fase 6 completa (Gate Threshold Sweep,
+walk-forward >=3 temporadas) -- ninguna de las dos autorizada todavia en
+esta entrega.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un

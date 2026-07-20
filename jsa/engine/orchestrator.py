@@ -11,6 +11,8 @@ exactamente la misma logica -- la leccion mas repetida de
 
 from __future__ import annotations
 
+import numpy as np
+
 from jsa.domain.hashing import hash_value
 from jsa.domain.models import SEVEN_PILLARS, CalibrationInfo, GameSnapshot, JSAReport, PillarWeights
 from jsa.engine import confidence_gate, decision_engine
@@ -24,11 +26,35 @@ from jsa.engine.evidence_engine import (
 )
 from jsa.engine.pillars import evaluate_all_pillars
 from jsa.engine.pillars.base import PILLAR_CONTRACT_VERSIONS
-from jsa.engine.projected_runs import compute_consistency_flag, compute_projected_runs, skellam_win_prob
+from jsa.engine.projected_runs import compute_consistency_flag, compute_projected_runs
 from jsa.engine.rule_engine import accumulate_deltas, evaluate_rules, human_readable_summary, rules_applied_per_pillar
 from jsa.engine.weight_engine import apply_weights
 from jsa.governance.manifest import InvalidationContext, build_manifest, evaluate_invalidation
 from jsa.reporting.report_builder import build_report
+
+
+def _build_calibration_info(evidence_score_raw: float, calibration_registry_rows: dict[str, dict]) -> CalibrationInfo:
+    """Seccion 8.4.1 -- unica fuente permitida de "calibrado": una curva
+    isotonica ya ajustada y validada leave-one-season-out
+    (`historical/calibration.py`), persistida en `calibration_registry`
+    con `status="validated"` bajo `config.PRODUCTION_CALIBRATION_ID`.
+    `raw_probability` se deriva de `evidence_score_raw` -- reemplaza el
+    valor Skellam-derivado que se usaba antes de que el Evidence Engine
+    tuviera su propia curva de calibracion (ver ROADMAP.md)."""
+    from jsa.config import PRODUCTION_CALIBRATION_ID
+
+    entry = calibration_registry_rows.get(PRODUCTION_CALIBRATION_ID)
+    if entry is None or entry.get("status") != "validated":
+        return CalibrationInfo(calibration_status="uncalibrated", raw_probability=evidence_score_raw, calibrated_probability=None)
+
+    x_knots, y_knots = entry.get("x_knots") or [], entry.get("y_knots") or []
+    if not x_knots or not y_knots:
+        return CalibrationInfo(calibration_status="uncalibrated", raw_probability=evidence_score_raw, calibrated_probability=None)
+
+    calibrated_probability = float(np.interp(evidence_score_raw, x_knots, y_knots))
+    return CalibrationInfo(
+        calibration_status="calibrated", raw_probability=evidence_score_raw, calibrated_probability=calibrated_probability,
+    )
 
 
 def compute_config_hash(base_weights: dict[str, float]) -> str:
@@ -68,6 +94,8 @@ def evaluate_game(
     rule_registry_rows: dict[str, dict],
     feature_registry_rows: dict[str, dict],
     pillar_registry_rows: dict[str, dict],
+    calibration_registry_rows: dict[str, dict],
+    gate_registry_rows: dict[str, dict],
     registry_version_tag: str,
     experiment_ids: set[str],
     is_production: bool,
@@ -103,8 +131,7 @@ def evaluate_game(
     projected = projected.model_copy(update={"consistency_flag": consistency_flag})
     cri = apply_consistency_penalty(cri, consistency_flag)
 
-    raw_probability = skellam_win_prob(projected.mu_home, projected.mu_away)
-    calibration = CalibrationInfo(calibration_status="uncalibrated", raw_probability=raw_probability, calibrated_probability=None)
+    calibration = _build_calibration_info(evidence_score, calibration_registry_rows)
 
     final_category = decision_engine.compute_final_category(evidence_score, cri, uncertainty, calibration)
     dominant = max(feature_contribution, key=lambda f: f.percentage_contribution, default=None)
@@ -120,7 +147,10 @@ def evaluate_game(
         market_registry_version=registry_version_tag, input_snapshot_hash=snapshot.snapshot_hash, config_hash=config_hash,
     )
 
-    gates = confidence_gate.evaluate_all_markets(calibration, cri, uncertainty, consistency_flag, feature_contribution, manifest_valid=True)
+    gates = confidence_gate.evaluate_all_markets(
+        calibration, cri, uncertainty, consistency_flag, feature_contribution, manifest_valid=True,
+        gate_registry_rows=gate_registry_rows,
+    )
 
     active_features_without_validation = any(
         row["status"] == "active" and not row.get("validation_experiment") for row in feature_registry_rows.values()
