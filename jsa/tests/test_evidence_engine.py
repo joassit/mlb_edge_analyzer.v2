@@ -1,5 +1,6 @@
 import datetime
 
+from jsa import config
 from jsa.config import BASE_PILLAR_WEIGHTS
 from jsa.domain.models import PillarAdvantage, PillarWeights, build_game_snapshot
 from jsa.engine.evidence_engine import (
@@ -75,6 +76,26 @@ def test_cri_clips_to_zero_and_hundred():
     snap = _snap()  # todo False/None -> raw = -10 (missing_projected_ip)
     cri, _, _ = compute_cri(snap)
     assert cri == 0
+
+
+def test_cri_max_possible_score_is_75_not_100():
+    """compute_cri() clippea a [0,100], pero la suma de componentes
+    positivos de CRI_COMPONENTS nunca pasa de 75 -- ningun juego, ni
+    real ni sintetico, puede superar ese techo. Cualquier umbral que
+    dependa de cri_score (GATE_CRI_MIN, CRI_THRESHOLD_CLEAR_FAVORITE)
+    tiene que quedar por debajo de este numero o queda estructuralmente
+    inalcanzable (bug real encontrado 2026-07-20: GATE_CRI_MIN=85 hacia
+    que el Confidence Gate nunca pudiera pasar por CRI, en produccion
+    en vivo tambien)."""
+    snap = _snap(
+        starters_confirmed=True, lineups_official=True, bullpen_usage_known=True, no_last_minute_changes=True,
+        home_starter_xera=3.5, away_starter_xera=4.0, home_starter_xfip=3.6, away_starter_xfip=3.9,
+        home_starter_projected_ip=6.0, away_starter_projected_ip=5.5,
+    )
+    cri, _, _ = compute_cri(snap)
+    assert cri == 75
+    assert config.GATE_CRI_MIN <= 75
+    assert config.CRI_THRESHOLD_CLEAR_FAVORITE <= 75
 
 
 def test_uncertainty_index_base_and_additions():

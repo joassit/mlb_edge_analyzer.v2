@@ -2070,6 +2070,48 @@ distribucion real y decidir, con esos numeros en mano, si el grid de
 `gate_threshold_sweep.py` necesita ampliarse o si el gap esta en la
 fidelidad de la reconstruccion historica frente a produccion en vivo.
 
+**Resultado real del diagnostico (2026-07-20, corrida 29786153380)**:
+```
+cri_score_percentiles:         p0=0.0  p10=8.0  p25=16.0  p50=26.0  p75=26.0  p90=26.0  p100=26.0
+uncertainty_index_percentiles: p0=40.0 p10=40.0 p25=44.0  p50=52.0  p75=60.0  p90=60.0  p100=72.0
+market_probability (moneyline_home): p0=0.28 p50=0.53 p90=0.61 p100=0.75
+```
+`cri_score` nunca supero 26 en los 13,101 juegos -- eso, no el grid, es
+la causa completa del rechazo (`cri_min` mas laxo del grid era 70). La
+probabilidad calibrada no es el problema (centrada razonablemente cerca
+de 0.5, como se espera de una curva bien calibrada).
+
+**Hallazgo critico, mas alla del alcance de Fase 6 -- bug real en
+produccion en vivo, corregido 2026-07-20**: `compute_cri()`
+(`jsa/engine/evidence_engine.py`) suma como maximo
+`18+18+12+12+8+7=75` puntos (`CRI_COMPONENTS` en `jsa/config.py`) --
+nunca puede llegar a 100 pese a que el score se clippea a `[0,100]`.
+`GATE_CRI_MIN` estaba en **85**, diez puntos POR ENCIMA del techo
+matematico -- `cri_above_min` en `confidence_gate.py` era
+estructuralmente `False` siempre, en produccion en vivo tambien, no
+solo en el backtest historico. Corregido a `GATE_CRI_MIN=70` (mismo
+valor que `CRI_THRESHOLD_CLEAR_FAVORITE`, ya usado en
+`decision_engine.py`, y alcanzable solo cuando los 6 componentes
+positivos estan presentes -- exige dato completo, que es la intencion
+original). Test de regresion agregado:
+`test_evidence_engine.py::test_cri_max_possible_score_is_75_not_100`
+-- verifica el techo real Y que ningun umbral de CRI en `config.py` lo
+supere, para que este tipo de bug no pueda reaparecer en silencio.
+
+Aparte, y sin tocar (todavia) el gap de fidelidad historica: el techo
+REAL de `cri_score` dentro del backtest (26, no 75) es un limite
+legitimo y esperado -- `historical/snapshot_reconstruction.py` fija
+`lineups_official=False`, `bullpen_usage_known=False`,
+`no_last_minute_changes=False` a proposito, porque esas 3 senales
+(confirmacion oficial de lineup, bullpen ya usado, cambios de ultimo
+momento) describen informacion del dia del partido que reconstruir
+retroactivamente desde box scores no puede replicar de forma fiel. No
+es un bug -- es la razon de fondo por la que `CRI_MIN_GRID` de
+`gate_threshold_sweep.py` (70-90) nunca tuvo chance de encontrar un
+combo valido, y queda pendiente de discusion (rescalar el grid a lo
+realmente observable en backtest, vs. otra alternativa) antes de volver
+a correr el sweep.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un
