@@ -152,6 +152,54 @@ def test_migrate_fills_not_null_columns_with_null_in_source_using_declared_defau
         dest_session.close()
 
 
+class _FakeDialect:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeConnection:
+    """Stub minimo -- _reset_autoincrement_sequence() solo lee conn.dialect.name
+    y llama conn.execute(text(...)), nunca hace falta un motor real (ni
+    SQLite ni Postgres) para probar el branching por dialecto."""
+    def __init__(self, dialect_name):
+        self.dialect = _FakeDialect(dialect_name)
+        self.executed = []
+
+    def execute(self, stmt):
+        self.executed.append(str(stmt))
+
+
+def test_reset_autoincrement_sequence_noop_for_non_postgres_dialect():
+    # Escenario real: los tests de este archivo migran contra SQLite (nunca
+    # un Postgres real) -- setval() no existe en SQLite, así que la función
+    # debe ser un no-op silencioso ahí, nunca intentar ejecutar SQL de Postgres.
+    conn = _FakeConnection("sqlite")
+    migrate_script._reset_autoincrement_sequence(conn, database.GameAnalysis.__table__)
+    assert conn.executed == []
+
+
+def test_reset_autoincrement_sequence_noop_for_table_without_autoincrement_id():
+    # ActualResult usa game_pk como PK (sin columna `id` autoincremental)
+    # -- no hay ninguna secuencia que resincronizar, incluso contra Postgres.
+    conn = _FakeConnection("postgresql")
+    migrate_script._reset_autoincrement_sequence(conn, database.ActualResult.__table__)
+    assert conn.executed == []
+
+
+def test_reset_autoincrement_sequence_calls_setval_for_postgres_table_with_id():
+    # Caso real que rompió la corrida del 2026-07-20: game_analysis SI tiene
+    # `id` autoincremental -- contra Postgres, debe resincronizar la
+    # secuencia con setval()/pg_get_serial_sequence() para que el próximo
+    # INSERT sin id explícito (el próximo GameAnalysis del pipeline diario)
+    # no choque con un id que la migración ya usó.
+    conn = _FakeConnection("postgresql")
+    migrate_script._reset_autoincrement_sequence(conn, database.GameAnalysis.__table__)
+    assert len(conn.executed) == 1
+    assert "setval" in conn.executed[0]
+    assert "pg_get_serial_sequence" in conn.executed[0]
+    assert "game_analysis" in conn.executed[0]
+
+
 def test_migrate_is_a_noop_on_empty_source(tmp_path, monkeypatch):
     source_path = tmp_path / "empty_source.db"
     source_engine = create_engine(f"sqlite:///{source_path}")

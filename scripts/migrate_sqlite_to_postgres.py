@@ -20,10 +20,34 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, create_engine, func, select
+from sqlalchemy import DateTime, create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 import db.database as database
+
+
+def _reset_autoincrement_sequence(conn, table) -> None:
+    """Tras un INSERT masivo con `id` explícito (esta migración copia los
+    ids reales de SQLite), la secuencia interna de Postgres para la PK
+    autoincremental queda desincronizada -- sigue apuntando a 1, así que el
+    primer INSERT real sin id explícito (ej. el próximo GameAnalysis/Pick
+    que guarde el pipeline diario) choca con "duplicate key value violates
+    unique constraint ...pkey" contra un id que la migración ya usó.
+    Confirmado con la corrida real del 2026-07-20: los 14 juegos del día
+    fallaron los 14 al persistir con exactamente ese error (Key (id)=(28)
+    already exists). SQLite no tiene este problema (su AUTOINCREMENT
+    interno ya conoce el máximo real tras el insert) -- por eso es un no-op
+    si el destino no es Postgres, o si la tabla no tiene columna `id`
+    autoincremental (ej. ActualResult, cuya PK es game_pk)."""
+    if conn.dialect.name != "postgresql":
+        return
+    id_col = table.c.get("id")
+    if id_col is None or not id_col.autoincrement:
+        return
+    conn.execute(text(
+        f"SELECT setval(pg_get_serial_sequence('{table.name}', 'id'), "
+        f"COALESCE((SELECT MAX(id) FROM {table.name}), 1))"
+    ))
 
 
 def migrate(sqlite_path: str = "mlb_edge.db") -> dict[str, int]:
@@ -69,6 +93,7 @@ def migrate(sqlite_path: str = "mlb_edge.db") -> dict[str, int]:
                             row[col_name] = default_value
 
                 conn.execute(table.insert(), rows)
+                _reset_autoincrement_sequence(conn, table)
                 migrated[table.name] = len(rows)
                 print(f"{table.name}: {len(rows)} filas migradas.")
     finally:
