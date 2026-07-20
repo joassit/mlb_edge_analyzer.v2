@@ -13,6 +13,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+import numpy as np
 from sqlalchemy import (
     create_engine, event, inspect, text,
     Column, Integer, String, Float, Boolean, DateTime, Text, UniqueConstraint, Index
@@ -388,9 +389,26 @@ def get_feature_snapshot(game_pk: int, game_date: str) -> dict | None:
         session.close()
 
 
+def _sanitize_numpy_scalars(row: dict) -> dict:
+    """Convierte escalares numpy (np.float64, np.int64, np.bool_, etc.) a su
+    tipo nativo de Python antes de pasarlos a la ORM.
+
+    SQLite tolera np.float64 en un parámetro (hereda de float, y el driver
+    sqlite3 lo adapta sin quejarse), pero psycopg2 no lo adapta -- termina
+    incrustando el repr crudo ("np.float64(0.49...)") en el SQL en vez de
+    bindearlo, y Postgres interpreta el prefijo "np" como un schema
+    inexistente (psycopg2.errors.InvalidSchemaName). Bug invisible mientras
+    el pipeline usó SQLite; confirmado con la corrida real del 2026-07-20
+    contra el Postgres migrado -- los 14 juegos del día fallaron los 14 al
+    persistir (away_skellam_prob/home_covers_rl_prob, etc. vienen de
+    scipy/skellam_win_prob() como np.float64)."""
+    return {k: (v.item() if isinstance(v, np.generic) else v) for k, v in row.items()}
+
+
 def _upsert_analysis(session, row: dict) -> None:
     """Lógica de upsert de GameAnalysis contra una sesión YA ABIERTA por el
     caller -- ver _upsert_feature_snapshot() para el porqué de este split."""
+    row = _sanitize_numpy_scalars(row)
     model_version = row.get("model_version") or MODEL_VERSION
     row = {**row, "model_version": model_version}
     existing = (
@@ -461,6 +479,7 @@ def _upsert_picks(session, game_pk: int, game_date: str, picks: list[dict], mode
             "calibration_phase": p.get("calibration_phase", False),
             "model_version": model_version,
         }
+        fields = _sanitize_numpy_scalars(fields)
         if existing:
             for key, value in fields.items():
                 setattr(existing, key, value)

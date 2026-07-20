@@ -7,6 +7,7 @@ mlb_edge.db ni se deja estado que contamine otros tests.
 
 from datetime import datetime, timezone
 
+import numpy as np
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
@@ -75,6 +76,29 @@ def test_save_analysis_upserts_instead_of_duplicating(isolated_db):
     finally:
         session.close()
     assert count == 1
+
+
+def test_save_analysis_sanitizes_numpy_scalars(isolated_db):
+    # Encontrado auditando la corrida real del 2026-07-20 contra el Postgres
+    # recién migrado: away_skellam_prob/home_covers_rl_prob (calculados con
+    # scipy) llegan como np.float64, no float -- psycopg2 no los adapta y
+    # el insert falla con psycopg2.errors.InvalidSchemaName ("np" no existe
+    # como schema), aunque SQLite lo toleraba en silencio (np.float64 hereda
+    # de float). Los 14 juegos del día fallaron los 14 al persistir.
+    row = {
+        "game_pk": 2, "game_date": "2026-07-20", "away_team": "A", "home_team": "B",
+        "away_model_prob": np.float64(0.51), "home_model_prob": np.float64(0.49),
+        "flag_review": np.bool_(False),
+    }
+    isolated_db.save_analysis(row)  # no debe lanzar psycopg2.errors.InvalidSchemaName / TypeError
+
+    session = isolated_db.SessionLocal()
+    try:
+        saved = session.query(isolated_db.GameAnalysis).filter_by(game_pk=2).one()
+        assert saved.away_model_prob == pytest.approx(0.51)
+        assert isinstance(saved.away_model_prob, float) and not isinstance(saved.away_model_prob, np.generic)
+    finally:
+        session.close()
 
 
 def test_save_analysis_retries_once_and_succeeds_after_integrity_error(isolated_db, monkeypatch):
@@ -305,6 +329,21 @@ def test_save_picks_upserts_instead_of_duplicating(isolated_db):
         rows = session.query(isolated_db.Pick).filter_by(game_pk=1, game_date="2026-07-05").all()
         assert len(rows) == 1
         assert rows[0].model_version == "v2"
+    finally:
+        session.close()
+
+
+def test_save_picks_sanitizes_numpy_scalars(isolated_db):
+    # Mismo bug que test_save_analysis_sanitizes_numpy_scalars, pero del
+    # lado de Pick -- model_prob/edge/ev también pueden llegar como
+    # np.float64 (vienen del mismo cálculo de predictor.py).
+    pick = _make_pick("moneyline", "away", model_prob=np.float64(0.6), edge=np.float64(0.05), ev=np.float64(0.06))
+    isolated_db.save_picks(1, "2026-07-05", [pick], model_version="v1")
+
+    session = isolated_db.SessionLocal()
+    try:
+        saved = session.query(isolated_db.Pick).filter_by(game_pk=1, game_date="2026-07-05").one()
+        assert isinstance(saved.model_prob, float) and not isinstance(saved.model_prob, np.generic)
     finally:
         session.close()
 
