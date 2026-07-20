@@ -1,16 +1,14 @@
 name: tmp-historical-validation
 
 # Uso temporal de un path ya registrado en GitHub Actions -- en ESTE uso:
-# corre scratchpad_extract_report_data.py contra el Postgres real de
-# producción (secrets.DATABASE_URL, migrado el 2026-07-19 desde el
-# mlb_edge.db legacy -- ver scripts/migrate_sqlite_to_postgres.py en main),
-# usando las funciones oficiales de tracking/results_tracker.py, y deja el
-# JSON gzip+base64 en el log. Se restaura a modo season-ingest al terminar.
+# corre scratchpad_fix_pg_sequences.py (reparación de un solo uso, ver ese
+# archivo) contra el Postgres real de producción (secrets.DATABASE_URL).
+# Se restaura a modo season-ingest al terminar.
 on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'Ignorado en este modo (extract-report-data)'
+        description: 'Ignorado en este modo (fix-pg-sequences)'
         required: false
         type: string
 
@@ -18,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  extract-report-data:
+  fix-pg-sequences:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -32,4 +30,4 @@ jobs:
 
       - env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python scratchpad_extract_report_data.py
+        run: python scratchpad_fix_pg_sequences.py
