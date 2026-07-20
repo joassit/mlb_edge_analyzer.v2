@@ -28,7 +28,7 @@ from jsa.historical.game_flow_candidate_audit import run_full_game_flow_candidat
 from jsa.historical.rule_candidate_audit import TESTABLE_RULE_IDS, run_full_rule_candidate_audit
 from jsa.historical.experiment_backfill import backfill_closed_experiments
 from jsa.historical import gate_threshold_sweep
-from jsa.historical.gate_threshold_sweep import run_gate_threshold_sweep
+from jsa.historical.gate_threshold_sweep import run_gate_threshold_sweep, run_gate_threshold_diagnostic
 from jsa.engine.rule_definitions import RULE_SPECS_BY_ID
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
@@ -200,6 +200,20 @@ def main() -> None:
     gate_sweep_parser.add_argument("--sync-to-registries", action="store_true", help="Ademas de reportar, escribe una fila nueva en gate_registry por mercado")
     gate_sweep_parser.add_argument("--registries-db", help="URL SQLAlchemy de la base de registries -- cae a config.DATABASE_URL si no se pasa (igual que calibrate)")
     gate_sweep_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    gate_diagnostic_parser = subparsers.add_parser(
+        "gate-threshold-diagnostic",
+        help=(
+            "Diagnostico report-only (nunca toca ningun registry): percentiles reales de "
+            "cri_score/uncertainty_index/probabilidad calibrada (moneyline_home/away) sobre los juegos "
+            "ya ingeridos. Motivado por gate-threshold-sweep rechazando ambos mercados con "
+            "production_thresholds=null -- describe la distribucion real antes de decidir si el grid "
+            "esta mal calibrado o si la ingesta historica produce CRI/incertidumbre distintos a produccion."
+        ),
+    )
+    gate_diagnostic_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    gate_diagnostic_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    gate_diagnostic_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -457,6 +471,19 @@ def main() -> None:
                     market_id, market_result["status"], thresholds, nested["accuracy_wilson_ci_low"], nested["n_games_passing_gate"],
                 )
 
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "gate-threshold-diagnostic":
+        setup_plain_logging()
+        result = run_gate_threshold_diagnostic(sorted(args.seasons), args.db)
+        logger.info(
+            "gate-threshold-diagnostic completo -- n_games=%s cri_score_p50=%s uncertainty_index_p50=%s",
+            result.get("n_games"), result.get("cri_score_percentiles", {}).get("p50"), result.get("uncertainty_index_percentiles", {}).get("p50"),
+        )
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:

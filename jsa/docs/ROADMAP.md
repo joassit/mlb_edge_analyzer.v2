@@ -2034,11 +2034,41 @@ check anti-fuga -- coinflip puro nunca alcanza `validated_70` -- y
 recuperacion de señal real fuerte -- SI alcanza `validated_70` en ambos
 mercados moneyline).
 
-**Pendiente antes de correr contra Postgres real**: disparar
-`jsa_gate_threshold_sweep.yml` con `sync_to_registries=false` primero
-para revisar el resultado real, y solo con confirmacion explicita
-re-disparar con `sync_to_registries=true` si el resultado justifica
-escribir en `gate_registry`.
+**Resultado real (2026-07-20, corrida 29784136297, `sync_to_registries=false`,
+13,101 juegos, 5 temporadas contra Postgres real)**: AMBOS mercados
+`rejected_insufficient_data`. No es solo el nested walk-forward el que
+rechaza -- el ajuste de PRODUCCION sobre TODA la muestra combinada (sin
+ningun split, el caso mas favorable posible) tampoco encontro un solo
+combo de los 100 del grid con >=30 juegos pasando
+`(probability > p_min AND cri_score >= cri_min AND uncertainty_index <=
+uncertainty_max)`, ni en el extremo mas laxo
+(`p_min=0.55, cri_min=70, uncertainty_max=50`). `production_thresholds=null`
+en ambos casos -- no se escribio nada en `gate_registry` (correcto: no
+hay nada que sincronizar).
+
+Los defaults de produccion en vivo (`GATE_P_MIN=0.65, GATE_CRI_MIN=85,
+GATE_UNCERTAINTY_MAX=40`, `jsa/config.py`) caen dentro del rango del grid
+barrido, asi que el grid en si no es irrazonablemente angosto. La
+hipotesis de trabajo es que `cri_score`/`uncertainty_index` calculados
+por la reconstruccion historica (`historical/pipeline.py`) resultan
+sistematicamente distintos (CRI mas bajo y/o incertidumbre mas alta) que
+los que ve produccion en vivo -- point-in-time, sin ciertas fuentes que
+si tiene el pipeline diario -- pero esto todavia no esta confirmado con
+datos reales, solo es la explicacion mas plausible.
+
+**Diagnostico agregado antes de decidir nada mas** (mismo principio de
+"nunca fabricar, siempre medir"): `gate_threshold_sweep.py::
+diagnose_gate_inputs()` + CLI `gate-threshold-diagnostic --db ... --season
+...` + workflow `jsa_gate_threshold_diagnostic.yml` -- reporta percentiles
+reales (p0/p10/p25/p50/p75/p90/p100) de `cri_score`, `uncertainty_index`
+y probabilidad calibrada por mercado sobre los juegos ya ingeridos. Nunca
+acepta ningun parametro de registries (verificado con un test de firma
+dedicado) -- es estructuralmente imposible que este comando escriba en
+`gate_registry` por accidente. **Pendiente**: disparar
+`jsa_gate_threshold_diagnostic.yml` contra Postgres real para ver la
+distribucion real y decidir, con esos numeros en mano, si el grid de
+`gate_threshold_sweep.py` necesita ampliarse o si el gap esta en la
+fidelidad de la reconstruccion historica frente a produccion en vivo.
 
 ## Regla dura para todo lo anterior
 

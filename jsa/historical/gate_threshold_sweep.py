@@ -230,3 +230,65 @@ def run_gate_threshold_sweep(seasons: list[int], historical_database_url: str) -
     if not records:
         return {"n_games": 0, "seasons_used": seasons, "error": "no_games_with_full_data"}
     return {"n_games": len(records), "seasons_used": seasons, **evaluate_gate_threshold_sweep(records)}
+
+
+_DIAGNOSTIC_PERCENTILES: tuple[int, ...] = (0, 10, 25, 50, 75, 90, 100)
+
+
+def _percentiles(values: list[float], percentiles: tuple[int, ...] = _DIAGNOSTIC_PERCENTILES) -> dict[str, float]:
+    """Percentiles simples (nearest-rank), sin dependencia de numpy/pandas
+    para esto -- alcanza para un diagnostico de forma de distribucion."""
+    if not values:
+        return {}
+    ordered = sorted(values)
+    n = len(ordered)
+    return {f"p{p}": ordered[min(n - 1, max(0, round(p / 100 * (n - 1))))] for p in percentiles}
+
+
+def diagnose_gate_inputs(records: list[dict]) -> dict:
+    """Diagnostico report-only -- nunca escribe en ningun registry.
+
+    Motivado por el resultado real de `evaluate_gate_threshold_sweep()` sobre
+    las 5 temporadas de produccion (2026-07-20): AMBOS mercados moneyline
+    quedaron `rejected_insufficient_data` con `production_thresholds=null`
+    -- es decir, ni siquiera el ajuste sobre TODA la muestra combinada
+    (sin ningun split) encontro un combo de `(p_min, cri_min,
+    uncertainty_max)` con >=30 juegos, ni en el extremo mas laxo del grid
+    (`p_min=0.55, cri_min=70, uncertainty_max=50`). Antes de decidir si el
+    grid esta mal calibrado o si la ingesta historica produce
+    `cri_score`/`uncertainty_index` sistematicamente distintos a los que
+    ve produccion en vivo, este modulo describe la distribucion real
+    (percentiles) en vez de asumir una causa."""
+    cri_values = [r["cri_score"] for r in records]
+    uncertainty_values = [r["uncertainty_index"] for r in records]
+
+    all_pairs = [(r["evidence_score_raw"], r["home_win"]) for r in records]
+    production_model = calibration._fit_isotonic(all_pairs)
+    calibrated_home = production_model.predict([r["evidence_score_raw"] for r in records]).tolist()
+
+    market_probability_percentiles: dict[str, dict[str, float]] = {}
+    for market_id in MARKETS_WITH_MODEL:
+        probabilities = [
+            _market_probability_and_correctness(market_id, calibrated, r["home_win"])[0]
+            for r, calibrated in zip(records, calibrated_home)
+        ]
+        market_probability_percentiles[market_id] = _percentiles(probabilities)
+
+    return {
+        "n_games": len(records),
+        "cri_score_percentiles": _percentiles(cri_values),
+        "uncertainty_index_percentiles": _percentiles(uncertainty_values),
+        "market_probability_percentiles": market_probability_percentiles,
+        "grid_reference": {
+            "p_min_grid": list(P_MIN_GRID), "cri_min_grid": list(CRI_MIN_GRID), "uncertainty_max_grid": list(UNCERTAINTY_MAX_GRID),
+        },
+    }
+
+
+def run_gate_threshold_diagnostic(seasons: list[int], historical_database_url: str) -> dict:
+    engine = historical_db.get_engine(historical_database_url)
+    historical_db.init_historical_storage(engine)
+    records = load_game_gate_data(engine, seasons)
+    if not records:
+        return {"n_games": 0, "seasons_used": seasons, "error": "no_games_with_full_data"}
+    return {"n_games": len(records), "seasons_used": seasons, **diagnose_gate_inputs(records)}
