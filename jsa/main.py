@@ -49,6 +49,8 @@ def run_daily(target_date: date | None = None, is_production: bool = True) -> di
     rule_registry_rows = registries_db.latest_by_id(engine, registries_db.rule_registry, "rule_id")
     feature_registry_rows = registries_db.latest_by_id(engine, registries_db.feature_registry, "feature_id")
     pillar_registry_rows = registries_db.latest_by_id(engine, registries_db.pillar_registry, "pillar_id")
+    calibration_registry_rows = registries_db.latest_by_id(engine, registries_db.calibration_registry, "calibration_id")
+    gate_registry_rows = registries_db.latest_by_id(engine, registries_db.gate_registry, "gate_id")
     experiment_ids = set(registries_db.latest_by_id(engine, registries_db.experiment_registry, "experiment_id").keys())
 
     games = mlb_api.get_schedule(target_date)
@@ -68,7 +70,8 @@ def run_daily(target_date: date | None = None, is_production: bool = True) -> di
             report = evaluate_game(
                 snapshot, run_id=run_id, model_version=config.MODEL_VERSION,
                 rule_registry_rows=rule_registry_rows, feature_registry_rows=feature_registry_rows,
-                pillar_registry_rows=pillar_registry_rows, registry_version_tag=REGISTRY_VERSION,
+                pillar_registry_rows=pillar_registry_rows, calibration_registry_rows=calibration_registry_rows,
+                gate_registry_rows=gate_registry_rows, registry_version_tag=REGISTRY_VERSION,
                 experiment_ids=experiment_ids, is_production=is_production,
             )
 

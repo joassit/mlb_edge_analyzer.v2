@@ -181,6 +181,63 @@ def test_report_is_honestly_uncalibrated(sqlite_url):
         assert gate_result["reason"] == "uncalibrated"
 
 
+def _seed_validated_calibration(engine) -> None:
+    registries_db.init_registries(engine)
+    registries_db.append(
+        engine, registries_db.calibration_registry,
+        calibration_id=config.PRODUCTION_CALIBRATION_ID, market="moneyline_home", source_field="evidence_score_raw",
+        method="isotonic_regression", x_knots=[-2.0, -1.0, 0.0, 1.0, 2.0], y_knots=[0.1, 0.3, 0.5, 0.8, 0.95],
+        x_min=-2.0, x_max=2.0, n_games_fitted=1000, seasons_used=[2022, 2023, 2024],
+        loso_seasons_validated=[2022, 2023, 2024], loso_n_games=1000, loso_brier=0.22, loso_log_loss=0.65,
+        loso_accuracy=0.56, loso_ece=0.01, loso_mce=0.03, status="validated", date="2026-07-20",
+    )
+
+
+def test_report_shows_real_category_once_calibration_registry_has_a_validated_curve(sqlite_url):
+    """Fase 4: la curva isotonica ya ajustada+validada (LOSO) se aplica de
+    verdad -- calibration_status pasa a "calibrated" y la categoria de
+    decision deja de estar bloqueada. Pero el Confidence Gate sigue
+    bloqueado (Seccion 10.4, segunda condicion independiente): ningun
+    gate_registry esta validated_70 todavia."""
+    engine = registries_db.get_engine(sqlite_url)
+    _seed_validated_calibration(engine)
+
+    _run_with_mocks(sqlite_url)
+    report = _load_report(sqlite_url)
+
+    assert report["calibration"]["calibration_status"] == "calibrated"
+    assert report["calibration"]["calibrated_probability"] is not None
+    assert 0.0 <= report["calibration"]["calibrated_probability"] <= 1.0
+    assert report["final_category"] != "NO_DISPONIBLE_SIN_CALIBRAR"
+
+    assert len(report["confidence_gate"]) == 4
+    for gate_result in report["confidence_gate"]:
+        assert gate_result["passed"] is False
+        assert gate_result["reason"] == "gate_not_validated"
+
+
+def test_report_gate_no_longer_blocked_by_infrastructure_when_both_registries_validated(sqlite_url):
+    """Con calibracion Y gate_registry validados, el Gate ya puede evaluar
+    sus criterios reales -- si falla, tiene que ser por un criterio real
+    (probabilidad/CRI/incertidumbre/etc.), nunca por falta de
+    infraestructura ("uncalibrated"/"gate_not_validated")."""
+    engine = registries_db.get_engine(sqlite_url)
+    _seed_validated_calibration(engine)
+    for market_id in config.MARKET_IDS:
+        registries_db.append(
+            engine, registries_db.gate_registry,
+            gate_id=f"gate-{market_id}-v1", market=market_id, p_min=config.GATE_P_MIN, cri_min=config.GATE_CRI_MIN,
+            uncertainty_max=config.GATE_UNCERTAINTY_MAX, accuracy_wilson_ci_low=0.6, accuracy_wilson_ci_high=0.75,
+            coverage_pct=80.0, coverage_n=1000, status="validated_70", validation_seasons=[2022, 2023, 2024], manifest_hash=None,
+        )
+
+    _run_with_mocks(sqlite_url)
+    report = _load_report(sqlite_url)
+
+    for gate_result in report["confidence_gate"]:
+        assert gate_result["reason"] not in {"uncalibrated", "gate_not_validated"}
+
+
 def test_reconstruction_token_is_stable_and_derived_from_hashes(sqlite_url):
     _run_with_mocks(sqlite_url)
     report = _load_report(sqlite_url)
