@@ -25,6 +25,9 @@ from jsa.historical.historical_candidate_audit import run_full_historical_candid
 from jsa.historical.statcast_ingestion import ingest_statcast_season_minimal
 from jsa.historical.statcast_candidate_audit import run_full_statcast_candidate_audit
 from jsa.historical.game_flow_candidate_audit import run_full_game_flow_candidate_audit
+from jsa.historical.rule_candidate_audit import TESTABLE_RULE_IDS, run_full_rule_candidate_audit
+from jsa.historical.experiment_backfill import backfill_closed_experiments
+from jsa.engine.rule_definitions import RULE_SPECS_BY_ID
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
@@ -154,6 +157,29 @@ def main() -> None:
     game_flow_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
     game_flow_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
     game_flow_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    rule_candidate_parser = subparsers.add_parser(
+        "rule-candidate-audit",
+        help=(
+            "Fase 3 (Seccion 12.8): comparacion LOSO + significancia formal (bootstrap + McNemar + "
+            "permutacion) de las 5 reglas heredadas con dato real wireado (long_outing, "
+            "short_outing_bullpen_game, key_offensive_injuries, double_header, extreme_travel) contra "
+            "evidence_score_raw real. bullpen_fatigue queda excluida (su dato nunca se llena). Si "
+            "--sync-to-registries, escribe un experiment_registry por regla y promueve a status=active "
+            "en rule_registry (con supporting_experiment_id real) las que pasen las 3 pruebas."
+        ),
+    )
+    rule_candidate_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    rule_candidate_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    rule_candidate_parser.add_argument("--sync-to-registries", action="store_true", help="Ademas de reportar, escribe experiment_registry y promueve rule_registry segun el resultado")
+    rule_candidate_parser.add_argument("--registries-db", help="URL SQLAlchemy de la base de registries -- cae a config.DATABASE_URL si no se pasa (igual que calibrate)")
+    rule_candidate_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    backfill_parser = subparsers.add_parser(
+        "backfill-closed-experiments",
+        help="Puebla experiment_registry con las 5 lineas ya cerradas (Trend, Historical, Statcast, Elo/Pythagorean, Game Flow) usando los numeros reales ya obtenidos (ver jsa/docs/ROADMAP.md) -- idempotente, no recalcula nada.",
+    )
+    backfill_parser.add_argument("--registries-db", help="URL SQLAlchemy de la base de registries -- cae a config.DATABASE_URL si no se pasa")
 
     args = parser.parse_args()
 
@@ -319,6 +345,68 @@ def main() -> None:
         if args.out:
             with open(args.out, "w") as f:
                 f.write(output)
+
+    elif args.command == "rule-candidate-audit":
+        setup_plain_logging()
+        result = run_full_rule_candidate_audit(sorted(args.seasons), args.db)
+        logger.info("rule-candidate-audit completo -- n_games=%s", result.get("n_games"))
+
+        if args.sync_to_registries and "rule_results" in result:
+            registries_database_url = args.registries_db or production_config.DATABASE_URL
+            engine = registries_db.get_engine(registries_database_url)
+            registries_db.init_registries(engine)
+            existing_rules = registries_db.latest_by_id(engine, registries_db.rule_registry, "rule_id")
+
+            for rule_id in TESTABLE_RULE_IDS:
+                rule_result = result["rule_results"][rule_id]
+                significance = rule_result["significance"]
+                experiment_id = f"exp-rule-{rule_id}-v1"
+                passes = significance["passes_all_three"]
+
+                registries_db.append(
+                    engine, registries_db.experiment_registry,
+                    experiment_id=experiment_id,
+                    description=f"Regla heredada '{rule_id}' evaluada contra evidence_score_raw real (Seccion 6.6/12.8).",
+                    base_model_version=production_config.MODEL_VERSION,
+                    feature_set=[], weights=rule_result["weight_adjustments"], rules=[rule_id],
+                    date_range={"seasons": sorted(args.seasons)},
+                    metrics_requested=["brier", "log_loss", "accuracy"],
+                    baseline_comparison=["evidence_score_raw (produccion actual, regla nunca aplicada)"],
+                    benchmarking_result=rule_result, decision="promoted_active" if passes else "rejected",
+                )
+                logger.info(
+                    "rule-candidate-audit: %s -- decision=%s (bootstrap_significant=%s mcnemar_significant=%s permutation_significant=%s)",
+                    rule_id, "promoted_active" if passes else "rejected",
+                    significance["bootstrap"]["significant"] if significance["bootstrap"] else None,
+                    significance["mcnemar"]["significant"] if significance["mcnemar"] else None,
+                    significance["permutation"]["significant"] if significance["permutation"] else None,
+                )
+
+                if passes:
+                    spec = RULE_SPECS_BY_ID[rule_id]
+                    prior = existing_rules.get(rule_id, {})
+                    registries_db.append(
+                        engine, registries_db.rule_registry,
+                        rule_id=rule_id, trigger=spec.trigger_signal, condition=spec.condition,
+                        weight_adjustments=spec.weight_adjustments, scientific_justification=spec.scientific_justification,
+                        version=prior.get("version", "3.4"), status="active",
+                        experiments_supporting_rule=[experiment_id], trace_link=None,
+                    )
+                    logger.info("rule-candidate-audit: %s PROMOVIDA a status=active (supporting_experiment_id=%s)", rule_id, experiment_id)
+
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "backfill-closed-experiments":
+        setup_plain_logging()
+        registries_database_url = args.registries_db or production_config.DATABASE_URL
+        engine = registries_db.get_engine(registries_database_url)
+        inserted = backfill_closed_experiments(engine)
+        logger.info("backfill-closed-experiments completo -- insertados=%s", inserted)
+        print(json.dumps({"inserted": inserted}, indent=2))
 
 
 if __name__ == "__main__":

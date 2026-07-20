@@ -1,0 +1,83 @@
+name: jsa-rule-candidate-audit
+
+# One-off: Fase 3 (Seccion 6.6 + 12.8) -- comparacion LOSO + significancia
+# formal (bootstrap + McNemar + permutacion) de las 5 reglas heredadas con
+# dato real wireado (long_outing, short_outing_bullpen_game,
+# key_offensive_injuries, double_header, extreme_travel) contra
+# evidence_score_raw real. bullpen_fatigue queda excluida (su dato nunca
+# se llena, ver jsa/historical/rule_candidate_audit.py). No requiere
+# ninguna ingesta nueva -- corre 100% sobre JSA_HISTORICAL_DATABASE_URL ya
+# poblado. `sync_to_registries=false` por default: solo reporta. En
+# `true`, ADEMAS escribe un experiment_registry por regla en
+# JSA_DATABASE_URL y promueve a status=active (con supporting_experiment_id
+# real) las que pasen las 3 pruebas -- cambio de comportamiento real,
+# nunca automatico sin decidirlo explicitamente en el dispatch.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a incluir, separadas por coma (ej. 2022,2023,2024,2025,2026)'
+        required: true
+        type: string
+        default: '2022,2023,2024,2025,2026'
+      sync_to_registries:
+        description: 'Ademas de reportar, escribir experiment_registry y promover rule_registry (experimental -> active) segun el resultado'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  rule-candidate-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run rule-candidate-audit
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          SYNC_FLAGS=()
+          if [ "${{ inputs.sync_to_registries }}" = "true" ]; then
+            if [ -z "$JSA_DATABASE_URL_SECRET" ]; then
+              echo "JSA_DATABASE_URL no esta configurado -- experiment_registry/rule_registry viven ahi, no en la base historica." >&2
+              exit 1
+            fi
+            SYNC_FLAGS=(--sync-to-registries --registries-db "$JSA_DATABASE_URL_SECRET")
+          fi
+          python -m jsa.historical.cli rule-candidate-audit \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            "${SYNC_FLAGS[@]}" \
+            --out jsa_rule_candidate_audit_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-rule-candidate-audit-${{ github.run_id }}
+          path: jsa_rule_candidate_audit_result.json
+          if-no-files-found: warn
+          retention-days: 30

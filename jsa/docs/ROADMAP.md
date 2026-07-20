@@ -1770,6 +1770,101 @@ validacion que el propio spec prohibe declarar sin evidencia (Seccion
   sobre JSA, es una extension natural via Market Registry (Seccion
   10.5bis), no un cambio al nucleo.
 
+## Fase 3 -- Significancia estadistica formal + Experiment Registry poblado (2026-07-20)
+
+Primera pieza de infraestructura (no de "agregar informacion nueva", ya
+agotada en las 5 lineas cerradas de arriba) construida desde el
+diagnostico del techo del modelo: Seccion 12.8 exigia bootstrap/McNemar/
+permutacion antes de graduar nada de `experimental` a `active` -- hasta
+ahora solo existia el bootstrap pareado (duplicado en 5 modulos
+distintos), y `experiment_registry` seguia vacio pese a que 5
+investigaciones reales ya habian corrido bajo el mismo protocolo.
+
+**`jsa/historical/significance.py`** (nuevo, unico lugar de esta logica
+de ahora en adelante): `paired_bootstrap_ci()` (el mismo bootstrap
+pareado de siempre, extraido de `discriminative_audit.py` -- los 5
+modulos que lo usaban ahora importan de aca, cero cambio de
+comportamiento, 53 tests de candidate audits pre-existentes reverificados
+sin modificar). Se agregan las 2 pruebas que faltaban:
+- `mcnemar_test()`: pareado sobre aciertos/errores binarios (`p>=0.5==y`,
+  mismo criterio que `accuracy()`), correccion de continuidad, chi2 1 gl.
+- `permutation_test_delta_brier()`: sign-flip pareado sobre el delta de
+  Brier -- decide de nuevo con probabilidad 0.5 cual prediccion es
+  "baseline"/"alt" DENTRO de cada juego, preserva la estructura pareada.
+- `full_significance_report()`: combina las 3 (alpha=0.10 consistente en
+  las 3, mismo nivel que el CI de bootstrap al 90% ya usado desde
+  Statcast) + el tamaño de efecto minimo (`|Δ|>=0.001`) -- `passes_all_
+  three=True` unicamente si TODAS coinciden en mejora real. Bar mas
+  estricto que cualquier candidate audit anterior (que solo exigia
+  bootstrap + tamaño de efecto), reservado para decidir promocion real de
+  `experimental` a `active` -- nunca para reportar un resultado cualquiera.
+
+**`jsa/historical/rule_candidate_audit.py`** (nuevo): primera evaluacion
+formal de las 6 reglas heredadas (`engine/rule_definitions.py`) contra el
+historico real -- ninguna tenia todavia un experimento de respaldo
+(`engine/rule_engine.py` las evalua y traza desde el dia 1, pero
+`applied_to_weights` es `False` siempre porque `status="experimental"`
+para las 6). Verificado contra `snapshot_reconstruction.py` cuales
+triggers tienen dato real: 5 de 6 (`long_outing`,
+`short_outing_bullpen_game`, `key_offensive_injuries`, `double_header`,
+`extreme_travel`). `bullpen_fatigue` queda excluida -- su campo
+(`home/away_bullpen_ip_last_3_days`) esta declarado en `domain/models.py`
+pero nunca se llena en ningun lado de la ingesta (siempre `None`);
+testearla ahora seria fingir evidencia sobre un trigger que nunca puede
+disparar.
+
+Mecanismo: para cada regla y cada juego, reconstruye un `GameSnapshot`
+real del payload persistido (`GameSnapshot(**payload)`, mismo patron que
+`validation.py::benchmark_season()`) y llama a `context_detector.py::
+detect_context()` sin modificarlo -- el trigger evaluado es EXACTAMENTE
+el de produccion, nunca una reimplementacion paralela. Donde el trigger
+dispara, recalcula el score con los pesos que resultarian de aplicar la
+regla en solitario (`engine/weight_engine.py::apply_weights()`, reusado
+tal cual); donde no dispara, el score no cambia. Compara via LOSO +
+`full_significance_report()` contra `evidence_score_raw` real (pesos
+base, ninguna regla aplicada -- el estado real de produccion hoy).
+
+**`jsa/historical/experiment_backfill.py`** (nuevo): formaliza las 5
+lineas ya cerradas (Trend, Historical, Statcast, Elo/Pythagorean, Game
+Flow) como filas reales de `experiment_registry`, citando los numeros YA
+obtenidos (documentados arriba en este mismo archivo) y sus run_id de
+GitHub Actions donde aplica -- nunca recalcula nada. Idempotente (mismo
+criterio que `registries/seed.py`).
+
+**CLI** (`jsa/historical/cli.py`): `rule-candidate-audit --db ... --season
+... [--sync-to-registries --registries-db ...]` -- sin el flag, solo
+reporta (igual que cualquier candidate audit anterior); con el flag,
+ADEMAS escribe un `experiment_registry` por regla (`decision=
+"promoted_active"` o `"rejected"`) y, si `passes_all_three=True`, agrega
+una fila nueva a `rule_registry` con `status="active"` y
+`experiments_supporting_rule=[experiment_id]` real -- la primera vez que
+esto pasa en el proyecto (append-only, nunca sobreescribe la fila
+`experimental` anterior). `backfill-closed-experiments
+[--registries-db ...]` para el paso anterior.
+
+**Workflows nuevos**: `jsa_rule_candidate_audit.yml`
+(`workflow_dispatch(seasons, sync_to_registries=false por default)` --
+promover una regla a produccion real requiere decidirlo explicitamente en
+cada dispatch, nunca automatico) y `jsa_backfill_closed_experiments.yml`
+(sin inputs, idempotente).
+
+**Tests**: `test_significance.py` (11, incluyendo predicciones identicas
+-> nada significativo, alternativa claramente mejor/peor -> las 3
+pruebas de acuerdo en la direccion correcta) + `test_rule_candidate_
+audit.py` (10, incluyendo sanity check anti-fuga -- coinflip puro sin
+senal inyectada -> ninguna regla pasa las 3 pruebas -- y recuperacion de
+señal real inyectada especificamente en el subconjunto de juegos
+disparados, usando el `weight_adjustments` real de la regla como
+generador). 21 tests nuevos, mas los 53 de candidate audits
+pre-existentes reverificados tras la extraccion de `paired_bootstrap_ci`.
+
+**Pendiente antes de correr contra Postgres real**: disparar
+`jsa_backfill_closed_experiments.yml` primero (puebla las 5 lineas
+cerradas), despues `jsa_rule_candidate_audit.yml` con
+`sync_to_registries=false` para revisar el resultado real de las 5
+reglas, y solo con confirmacion explicita del usuario re-disparar con
+`sync_to_registries=true` si alguna merece promocion.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un

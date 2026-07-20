@@ -50,7 +50,8 @@ from jsa.domain.models import SEVEN_PILLARS
 from jsa.engine.pillars.base import shrunk_era
 from jsa.historical import calibration
 from jsa.historical import db as historical_db
-from jsa.historical.discriminative_audit import _paired_bootstrap_ci, load_game_pillar_data
+from jsa.historical.discriminative_audit import load_game_pillar_data
+from jsa.historical.significance import paired_bootstrap_ci as _paired_bootstrap_ci
 
 _STARTER_IP_SIGMA_HEURISTIC = 1.2
 _QUALITY_START_IP = 6.0
