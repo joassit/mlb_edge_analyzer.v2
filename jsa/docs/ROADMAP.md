@@ -1966,15 +1966,79 @@ reales). Suite completa de `jsa/` reverificada tras el cambio: sin
 regresiones.
 
 **Explicitamente NO en esta entrega**: ningun calibration_registry ni
-gate_registry real se pobló en Postgres -- `calibration_registry` sigue
-vacio (nadie corrio `historical/cli.py calibrate` contra el Postgres
-real todavia) y los 4 `gate_registry` siguen `"under_validation"`
-(sembrados). El mecanismo esta listo y probado; activar calibracion real
-en produccion requiere primero correr `calibrate` contra el histórico
-real (con confirmacion explicita, mismo patron de siempre), y activar el
-Gate de verdad requiere Fase 6 completa (Gate Threshold Sweep,
-walk-forward >=3 temporadas) -- ninguna de las dos autorizada todavia en
-esta entrega.
+gate_registry real se pobló en Postgres todavia -- eso se resolvio
+despues, ver seccion siguiente.
+
+## Calibracion real activada en produccion (2026-07-20)
+
+Tras mergear Fase 4, se disparo `jsa_historical_calibrate.yml` contra el
+Postgres real (5 temporadas, 13,101 juegos):
+
+| Metrica | Valor |
+|---|---|
+| `loso_seasons_validated` | 2022, 2023, 2024, 2025, 2026 (las 5) |
+| `loso_n_games` | 13,101 |
+| `loso_brier` | 0.2451 |
+| `loso_accuracy` | 55.3% |
+| `loso_ece` | 0.0020 |
+| `status` | **`validated`** |
+
+`calibration_registry` tiene ahora una fila real `status="validated"`
+bajo `calibration-evidence_score_raw-v1` (`config.PRODUCTION_CALIBRATION_ID`).
+A partir de la proxima corrida de `daily_pipeline.yml`, `calibration_
+status` pasa a `"calibrated"` y `final_category` deja de mostrar siempre
+`"NO_DISPONIBLE_SIN_CALIBRAR"` -- categorias reales en produccion por
+primera vez. El Confidence Gate sigue bloqueado (`reason=
+"gate_not_validated"`) hasta Fase 6.
+
+## Fase 6 -- Gate Threshold Sweep con nested walk-forward (2026-07-20)
+
+**Dos hallazgos antes de escribir codigo, que definieron el alcance
+real**: (1) solo `moneyline_home`/`moneyline_away` tienen una
+probabilidad calibrada propia -- `evidence_score_raw`/la curva isotonica
+solo predicen P(home gana), nunca margen ni total de carreras, asi que
+`run_line`/`totals` quedan fuera (gap real, no se les inventa un gate).
+(2) Barrer un grid de `(p_min, cri_min, uncertainty_max)` y quedarse con
+el mejor combo tiene el mismo riesgo de sesgo de seleccion que
+`discriminative_audit.py::optimize_weights()` vs
+`optimize_weights_nested()` -- se resolvio con el mismo criterio: nested
+walk-forward real, nunca LOSO simple.
+
+**`jsa/historical/gate_threshold_sweep.py`** (nuevo): por cada temporada
+externa, el threshold se elige usando SOLO las 4 internas (su propia
+curva isotonica, ajustada UNICAMENTE sobre esas 4 -- nunca lee el campo
+`calibration` ya persistido en los reportes historicos, que quedo
+congelado en `"uncalibrated"` de antes de Fase 4), y se evalua en la
+externa. Seleccion del mejor combo por LIMITE INFERIOR de Wilson (nunca
+accuracy cruda, para no favorecer un combo con muestra chica y suerte).
+`status="validated_70"` solo si el CI Wilson agregado (pooled sobre las
+5 corridas externas) tiene limite inferior >=70% Y hay >=3 temporadas
+validadas Y >=30 juegos pasando el gate (heuristico de partida, sin
+calibrar contra el proyecto -- ver docstring). Thresholds de PRODUCCION
+se ajustan sobre TODA la muestra (mismo criterio que `calibration.py`:
+la curva de produccion usa todos los datos; el nested walk-forward valida
+el PROCEDIMIENTO de seleccion, no literalmente esos thresholds).
+
+**CLI**: `gate-threshold-sweep --db ... --season ... [--sync-to-registries
+--registries-db ...]` -- sin el flag, solo reporta; con el flag, escribe
+una fila NUEVA por mercado en `gate_registry` (append-only, nunca
+sobreescribe la fila `"under_validation"` sembrada) con los thresholds
+de produccion y el status real.
+
+**Workflow nuevo**: `jsa_gate_threshold_sweep.yml`
+(`workflow_dispatch(seasons, sync_to_registries=false por default)`).
+
+**Tests**: `test_gate_threshold_sweep.py` (10: Wilson CI, inversion de
+probabilidad para `moneyline_away`, `MIN_COVERAGE_N` respetado, sanity
+check anti-fuga -- coinflip puro nunca alcanza `validated_70` -- y
+recuperacion de señal real fuerte -- SI alcanza `validated_70` en ambos
+mercados moneyline).
+
+**Pendiente antes de correr contra Postgres real**: disparar
+`jsa_gate_threshold_sweep.yml` con `sync_to_registries=false` primero
+para revisar el resultado real, y solo con confirmacion explicita
+re-disparar con `sync_to_registries=true` si el resultado justifica
+escribir en `gate_registry`.
 
 ## Regla dura para todo lo anterior
 

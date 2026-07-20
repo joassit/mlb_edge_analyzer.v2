@@ -27,6 +27,8 @@ from jsa.historical.statcast_candidate_audit import run_full_statcast_candidate_
 from jsa.historical.game_flow_candidate_audit import run_full_game_flow_candidate_audit
 from jsa.historical.rule_candidate_audit import TESTABLE_RULE_IDS, run_full_rule_candidate_audit
 from jsa.historical.experiment_backfill import backfill_closed_experiments
+from jsa.historical import gate_threshold_sweep
+from jsa.historical.gate_threshold_sweep import run_gate_threshold_sweep
 from jsa.engine.rule_definitions import RULE_SPECS_BY_ID
 from jsa.historical.merge import merge_databases
 from jsa.historical.monte_carlo import run_monte_carlo_audit
@@ -180,6 +182,24 @@ def main() -> None:
         help="Puebla experiment_registry con las 5 lineas ya cerradas (Trend, Historical, Statcast, Elo/Pythagorean, Game Flow) usando los numeros reales ya obtenidos (ver jsa/docs/ROADMAP.md) -- idempotente, no recalcula nada.",
     )
     backfill_parser.add_argument("--registries-db", help="URL SQLAlchemy de la base de registries -- cae a config.DATABASE_URL si no se pasa")
+
+    gate_sweep_parser = subparsers.add_parser(
+        "gate-threshold-sweep",
+        help=(
+            "Fase 6 (Seccion 10.3/10.4): Gate Threshold Sweep con nested walk-forward real sobre "
+            "moneyline_home/moneyline_away (los unicos 2 mercados con probabilidad calibrada propia -- "
+            "run_line/totals quedan documentados como gap, sin modelo). Encuentra (p_min, cri_min, "
+            "uncertainty_max) con >=70% de accuracy (limite inferior de Wilson) validado sin sesgo de "
+            "seleccion. Si --sync-to-registries, escribe una fila nueva en gate_registry por mercado "
+            "con los thresholds de produccion y el status real (validated_70/validated_below_70/"
+            "rejected_insufficient_data)."
+        ),
+    )
+    gate_sweep_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    gate_sweep_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
+    gate_sweep_parser.add_argument("--sync-to-registries", action="store_true", help="Ademas de reportar, escribe una fila nueva en gate_registry por mercado")
+    gate_sweep_parser.add_argument("--registries-db", help="URL SQLAlchemy de la base de registries -- cae a config.DATABASE_URL si no se pasa (igual que calibrate)")
+    gate_sweep_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -407,6 +427,41 @@ def main() -> None:
         inserted = backfill_closed_experiments(engine)
         logger.info("backfill-closed-experiments completo -- insertados=%s", inserted)
         print(json.dumps({"inserted": inserted}, indent=2))
+
+    elif args.command == "gate-threshold-sweep":
+        setup_plain_logging()
+        result = run_gate_threshold_sweep(sorted(args.seasons), args.db)
+        logger.info("gate-threshold-sweep completo -- n_games=%s", result.get("n_games"))
+
+        if args.sync_to_registries and "market_results" in result:
+            registries_database_url = args.registries_db or production_config.DATABASE_URL
+            engine = registries_db.get_engine(registries_database_url)
+            registries_db.init_registries(engine)
+
+            for market_id in gate_threshold_sweep.MARKETS_WITH_MODEL:
+                market_result = result["market_results"][market_id]
+                nested = market_result["nested_walk_forward"]
+                thresholds = market_result["production_thresholds"]
+                registries_db.append(
+                    engine, registries_db.gate_registry,
+                    gate_id=f"gate-{market_id}-v1", market=market_id,
+                    p_min=thresholds["p_min"] if thresholds else production_config.GATE_P_MIN,
+                    cri_min=thresholds["cri_min"] if thresholds else production_config.GATE_CRI_MIN,
+                    uncertainty_max=thresholds["uncertainty_max"] if thresholds else production_config.GATE_UNCERTAINTY_MAX,
+                    accuracy_wilson_ci_low=nested["accuracy_wilson_ci_low"], accuracy_wilson_ci_high=nested["accuracy_wilson_ci_high"],
+                    coverage_pct=nested["coverage_pct"], coverage_n=nested["n_games_passing_gate"],
+                    status=market_result["status"], validation_seasons=market_result["seasons_validated"], manifest_hash=None,
+                )
+                logger.info(
+                    "gate-threshold-sweep: %s -- status=%s thresholds=%s wilson_ci_low=%s coverage_n=%s",
+                    market_id, market_result["status"], thresholds, nested["accuracy_wilson_ci_low"], nested["n_games_passing_gate"],
+                )
+
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
 
 
 if __name__ == "__main__":
