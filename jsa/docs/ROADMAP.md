@@ -1632,17 +1632,57 @@ secret que ya usa `daily_pipeline.yml` para el legado en produccion) y
 como destino de `unified_model_predictions` -- misma instancia de
 Postgres ya verificada real en corridas anteriores de esta sesion), mas
 un paso final que imprime `accuracy_by_system_and_model()` como artifact.
-No se disparo todavia -- requiere que el workflow exista en `main`
-primero (mismo requisito que todos los `workflow_dispatch` de esta
-sesion), pendiente de merge y confirmacion explicita antes de correr
-contra la base de produccion real del legado.
 
-**Que falta para produccion real**: mergear y disparar
-`cross_model_sync.yml` contra el secret real; si se quiere una sola
-instancia fisica para TODO (no solo el destino unificado), apuntar
-tambien `HISTORICAL_DATABASE_URL`/`JSA_DATABASE_URL` al mismo servidor
-Postgres -- decision de infraestructura, no de codigo (el sync ya
-funciona hoy sin eso).
+**Resuelto (2026-07-19, misma sesion): `secrets.DATABASE_URL` paso de no
+existir a apuntar a un Neon Postgres real.** El legado nunca habia tenido
+un Postgres externo configurado -- `daily_pipeline.yml` corria contra el
+fallback de `actions/cache` (best-effort, `mlb_edge.db` SQLite entre
+corridas). El usuario decidio migrar a Neon para no arriesgar perder el
+historico. Bug real encontrado y corregido en el camino: la migracion
+(`scripts/migrate_sqlite_to_postgres.py`) fallo primero por falta de
+`psycopg2-binary` en `requirements.txt` (PR #42), y despues con
+`IntegrityError: NotNullViolation` en `picks.calibration_phase`/`forced`
+-- causa real: `db/database.py::_auto_add_missing_columns()` agrega
+columnas nuevas via `ALTER TABLE ADD COLUMN` crudo sin `NOT NULL`, asi
+que filas viejas de SQLite tienen `NULL` real ahi aunque el modelo
+declare `nullable=False`; Postgres si lo exige. Arreglado rellenando esas
+columnas con su default declarado antes de insertar (PR #43, con test
+que reproduce el historial real de `ALTER TABLE` en vez de
+`create_all()`, que si habria impedido sembrar el NULL en el test).
+
+**Migracion real completada** (`migrate_legacy_to_postgres.yml`, run
+[29702267751](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29702267751),
+tras el merge de PR #43): `game_analysis`: 144 filas, `actual_results`:
+127, `feature_snapshots`: 144, `picks`: 134, `bets`: 0 -- sin errores.
+
+**`cross_model_sync.yml` corrido contra el Neon real** (run
+[29702495152](https://github.com/joassit/mlb_edge_analyzer.v2/actions/runs/29702495152),
+`sync_legacy=true` usando ya `secrets.DATABASE_URL` real -- no el
+fallback de cache -- `sync_jsa_gameflow=false` para evitar el
+re-sync lento ya documentado arriba): `sync_legacy_moneyline_picks`
+sincronizo `n_picks=134`. `accuracy_by_system_and_model()` final con los
+3 sistemas:
+
+| Sistema | Modelo | Version | Juegos | Aciertos | Accuracy |
+|---|---|---|---|---|---|
+| jsa | evidence_score_raw | jsa-v3.0-historical-backtest | 11,277 | 6,192 | 54.91% |
+| game_flow | gf1_starter_durability | game_flow_v1_etapa1 | 10,778 | 5,583 | 51.80% |
+| game_flow | gf2_bullpen_dependency | game_flow_v1_etapa1 | 11,280 | 6,140 | 54.43% |
+| mlb_legacy | legacy_skellam | 0.5.0-reconectado | 75 | 40 | 53.33% |
+| mlb_legacy | legacy_skellam | 0.6.0-skellam-calibrado | 39 | 16 | 41.03% |
+| mlb_legacy | legacy_unknown | 0.5.0-reconectado | 2 | 1 | 50.00% |
+
+La muestra del legado (116 picks) es chica frente a JSA/Game Flow
+(~11k juegos cada uno) porque solo cubre lo que el pipeline diario de
+produccion alcanzo a generar hasta ahora -- no es una limitacion del
+sync, es cuantos picks reales existen todavia.
+
+**Objetivo original cumplido**: los 3 sistemas (JSA, Game Flow, legado)
+coexisten en el mismo Postgres real (`unified_model_predictions`) y se
+pueden cruzar con SQL directo, sin instrumentar ningun pipeline de
+produccion existente. `daily_pipeline.yml` ya esta preparado para usar
+`secrets.DATABASE_URL` automaticamente en su proxima corrida (via
+`HAS_EXTERNAL_DB`) sin cambio de codigo adicional.
 
 ## Explicitamente NO construido todavia (y por que)
 
