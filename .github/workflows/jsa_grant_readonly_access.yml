@@ -1,0 +1,64 @@
+name: jsa-grant-readonly-access
+
+# Otorga SELECT sobre una tabla de jsa/historical/ a un rol de Postgres YA
+# EXISTENTE en el Neon compartido -- nunca crea el rol, nunca toca datos.
+# Pensado especificamente para extender el acceso de solo lectura de
+# `jsa_v2` (el rol que usa JSA_V2_PROJECT, ver docs/scope_handoff.md de
+# ese repo) a una tabla nueva -- por default, `historical_model_prediction`
+# (2026-07-21), que expone el DATO de las predicciones de jsa_evidence_
+# engine + los 3 modelos legado sin compartir ningun codigo con ese
+# proyecto (ver jsa/docs/ROADMAP.md, seccion "Comparacion real entre los
+# 3 sistemas").
+#
+# ACCION DE INFRAESTRUCTURA COMPARTIDA -- modifica permisos en la misma
+# base de Postgres que usan en produccion tanto `jsa/` como
+# `JSA_V2_PROJECT`. Requiere que JSA_HISTORICAL_DATABASE_URL tenga
+# privilegio de GRANT sobre la tabla (dueno o miembro de un rol con GRANT
+# OPTION) -- si no lo tiene, Postgres devuelve InsufficientPrivilege y el
+# job falla sin haber cambiado nada. Disparar SOLO con confirmacion
+# explicita del usuario en cada corrida, nunca de forma automatica.
+on:
+  workflow_dispatch:
+    inputs:
+      table:
+        description: 'Tabla existente sobre la que se otorga SELECT'
+        required: true
+        type: string
+        default: 'historical_model_prediction'
+      role:
+        description: 'Rol de Postgres ya existente al que se le otorga SELECT'
+        required: true
+        type: string
+        default: 'jsa_v2'
+
+permissions:
+  contents: read
+
+jobs:
+  grant-readonly-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run GRANT SELECT
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere la base historica compartida real." >&2
+            exit 1
+          fi
+          python -m jsa.historical.grant_readonly_access \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            --table "${{ inputs.table }}" \
+            --role "${{ inputs.role }}"

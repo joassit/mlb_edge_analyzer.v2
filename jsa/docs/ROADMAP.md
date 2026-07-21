@@ -2239,6 +2239,86 @@ false` para ver si la hipotesis mejora el baseline, y solo con
 confirmacion explicita adicional `sync_to_lab_registry=true` para
 documentarlo en `experiment_registry`.
 
+## Comparacion real entre los 3 sistemas (JSA / JSA_V2_PROJECT / legado) -- 2026-07-21
+
+Pedido explicito del usuario: "Compara el rendimiento de ambos, para
+saber cual se elimina" (intencion declarada a mas largo plazo: fusionar
+JSA, JSA_V2_PROJECT y el analizador MLB legado en uno solo). Se corrio
+`jsa_historical_validate_direct.yml` (run 29868062315, 5 temporadas,
+13,101 juegos) para obtener el numero real, apples-to-apples, de
+`benchmark_season()` -- JSA Evidence Engine vs. los 3 modelos legado
+(`legacy_heuristic`/`legacy_skellam_calibrated`/`legacy_negbin`) vs.
+baselines ingenuos, sobre EXACTAMENTE los mismos juegos:
+
+| Modelo | Brier (pooled, n=13,101) | Accuracy (pooled) |
+|---|---|---|
+| jsa_evidence_engine | 0.2770 | 54.06% |
+| legacy_heuristic | 0.2464 | 54.74% |
+| legacy_skellam_calibrated | 0.2515 | 54.06% |
+| legacy_negbin | 0.2598 | 54.06% |
+| naive_constant | 0.2491 | 52.81% |
+
+**Hallazgo real, consistente en las 5 de 5 temporadas**: el heuristico
+ERA/OPS del proyecto legado calibra mejor (menor Brier) que JSA Evidence
+Engine en cada una de las 5 temporadas, ademas de exceso de favoritismo
+local (`home_bias_audit.rejected=true` en las 5, +3.7pp a +9.5pp) que el
+legado no muestra. Combinado con los resultados ya publicados de
+`JSA_V2_PROJECT` (F1-Platt Δbrier=-0.02477, T1b Δbrier=-0.00505, ML1b
+brier=0.2476 sin vencer al mercado 0.2431) y la tabla de accuracy en
+produccion de `cross_model` (jsa=54.91%, game_flow=51.80-54.43%, legacy_
+skellam=53.33%/41.03% en muestras chicas), esto se presento al usuario
+como dato crudo, sin que este documento ni la sesion saquen la
+conclusion de que sistema eliminar -- decision reservada al usuario.
+
+### Exponer los modelos legado como DATO (no codigo) a `JSA_V2_PROJECT`
+
+Pedido de seguimiento del usuario: "Quiero incluir los modelos que MLB
+[legado] a JSA v2" -- aclarado via pregunta explicita: NO portar codigo
+al repo `JSA_V2_PROJECT` (rompe el principio de aislamiento acordado el
+2026-07-19, ver `docs/scope_handoff.md` de ese repo), sino dar acceso de
+DATOS reales via el mismo patron de rol de Postgres de solo lectura
+(`jsa_v2`) que ese proyecto ya usa para `historical_game`/`historical_
+snapshot`/`historical_statcast_event`.
+
+**Codigo nuevo (este repo, `jsa/`)**:
+- `jsa/historical/db.py`: tabla nueva `historical_model_prediction`
+  (`game_pk`, `season`, `model_name`, `home_win_prob`, idempotente por
+  upsert en `(game_pk, model_name)` -- a diferencia de `insert_ignore_
+  duplicates`, un re-backfill despues de recalibrar un modelo debe
+  ACTUALIZAR el valor, no ignorarlo).
+- `jsa/historical/model_prediction_backfill.py::backfill_season()`:
+  nunca reimplementa logica de prediccion -- reusa `_legacy_predictions()`
+  y el `raw_probability` ya calculado por el Evidence Engine
+  (`historical_report.payload.calibration.raw_probability`), solo
+  captura el detalle por-juego que `benchmark_season()` descarta al
+  agregar directo a `MetricSummary`.
+- `jsa.historical.cli backfill-model-predictions --db ... --season ...`
+  + `.github/workflows/jsa_backfill_model_predictions.yml` (mismo patron
+  directo-sin-red que `jsa_historical_validate_direct.yml`, escribe
+  idempotente contra `JSA_HISTORICAL_DATABASE_URL`).
+- 4 tests nuevos (`test_model_prediction_backfill.py`).
+
+**Pendiente, fuera del alcance de este repo -- accion de infraestructura
+compartida, requiere confirmacion explicita del usuario antes de
+ejecutarse**: el rol `jsa_v2` necesita un GRANT SELECT adicional sobre
+`historical_model_prediction` en el mismo Neon compartido (la
+configuracion original de ese rol para las otras 3 tablas se hizo a mano
+en el 2026-07-19, fuera de version control en ambos repos -- no existe
+un script `GRANT` commiteado para replicar). SQL exacto a correr contra
+el Neon compartido, con la misma conexion/privilegio que se uso para las
+3 tablas originales:
+
+```sql
+GRANT SELECT ON historical_model_prediction TO jsa_v2;
+```
+
+Una vez otorgado, es responsabilidad de una sesion futura sobre
+`JSA_V2_PROJECT` (nunca de este repo) extender su propio `data_sources/
+historical_readonly.py` con un accessor `get_model_predictions_for_
+season()` y su propio script de comparacion -- respetando el mismo
+aislamiento que ya rige ese proyecto, sin que este repo le copie ningun
+codigo.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un
