@@ -13,7 +13,7 @@ from sqlalchemy import JSON, Column, Date, DateTime, Float, Integer, MetaData, S
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from jsa.storage.dialect_utils import insert_ignore_duplicates
+from jsa.storage.dialect_utils import insert_ignore_duplicates, upsert
 
 metadata = MetaData()
 
@@ -147,6 +147,32 @@ historical_closer_leverage = Table(
     Column("closer_recent_ip", Float, nullable=True),
     Column("lookback_days", Integer, nullable=False),
     UniqueConstraint("game_pk", "team_id", name="uq_historical_closer_leverage"),
+)
+
+
+# Comparacion entre sistemas (2026-07-21): probabilidad de que gane el
+# LOCAL, por juego y por modelo (jsa_evidence_engine + los 3 modelos
+# legado ya benchmarkeados en `validation.py::_legacy_predictions()`).
+# Se persiste aca -- en vez de quedar solo calculada en memoria dentro de
+# `benchmark_season()` -- porque el proyecto hermano `JSA_V2_PROJECT`
+# mantiene un principio explicito de aislamiento (nunca importar codigo
+# de `jsa/`, solo lectura de datos vía su propio rol de Postgres
+# `jsa_v2`, ver docs/scope_handoff.md de ese repo). Esta tabla es el
+# equivalente, para predicciones de modelo, de lo que ya son
+# `historical_game`/`historical_snapshot` para resultados/insumos: un
+# dato real que ese proyecto puede leer y comparar por su cuenta, sin que
+# se le copie ninguna logica. Requiere un GRANT SELECT adicional sobre
+# esta tabla para el rol `jsa_v2` -- administracion de Postgres fuera del
+# alcance de este repo, ver jsa/docs/ROADMAP.md.
+historical_model_prediction = Table(
+    "historical_model_prediction", metadata,
+    Column("row_id", Integer, primary_key=True, autoincrement=True),
+    Column("recorded_at", DateTime, nullable=False),
+    Column("season", Integer, nullable=False),
+    Column("game_pk", Integer, nullable=False),
+    Column("model_name", String, nullable=False),
+    Column("home_win_prob", Float, nullable=False),
+    UniqueConstraint("game_pk", "model_name", name="uq_historical_model_prediction"),
 )
 
 
@@ -298,6 +324,25 @@ def upsert_closer_leverage(engine: Engine, **fields) -> None:
 def closer_leverage_for_season(engine: Engine, season: int) -> list[dict]:
     with engine.connect() as conn:
         rows = conn.execute(select(historical_closer_leverage).where(historical_closer_leverage.c.season == season)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def upsert_model_prediction(engine: Engine, *, season: int, game_pk: int, model_name: str, home_win_prob: float) -> None:
+    """Sobreescribe si ya existe (a diferencia de `upsert_closer_leverage`)
+    -- re-correr el backfill tras un cambio de logica en un modelo (ej.
+    recalibracion) debe reflejar el valor mas reciente, nunca quedarse con
+    el primero que se escribio."""
+    with engine.begin() as conn:
+        upsert(
+            conn, historical_model_prediction, index_elements=["game_pk", "model_name"],
+            recorded_at=datetime.now(timezone.utc), season=season, game_pk=game_pk,
+            model_name=model_name, home_win_prob=home_win_prob,
+        )
+
+
+def model_predictions_for_season(engine: Engine, season: int) -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(select(historical_model_prediction).where(historical_model_prediction.c.season == season)).mappings().all()
     return [dict(r) for r in rows]
 
 

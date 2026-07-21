@@ -31,6 +31,7 @@ from jsa.historical import gate_threshold_sweep
 from jsa.historical.gate_threshold_sweep import run_gate_threshold_sweep, run_gate_threshold_diagnostic
 from jsa.engine.rule_definitions import RULE_SPECS_BY_ID
 from jsa.historical.merge import merge_databases
+from jsa.historical.model_prediction_backfill import backfill_season as backfill_model_predictions_season
 from jsa.historical.monte_carlo import run_monte_carlo_audit
 from jsa.historical.pillar_contribution import analyze_season_pillar_contribution
 from jsa.historical.pipeline import run_season_ingestion
@@ -214,6 +215,20 @@ def main() -> None:
     gate_diagnostic_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
     gate_diagnostic_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a incluir (repetible)")
     gate_diagnostic_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
+
+    backfill_model_predictions_parser = subparsers.add_parser(
+        "backfill-model-predictions",
+        help=(
+            "Persiste, por juego, la probabilidad de que gane el local segun jsa_evidence_engine + los 3 "
+            "modelos legado ya benchmarkeados en 'validate' (historical_model_prediction) -- nunca "
+            "reimplementa logica, reusa exactamente lo que ya usa benchmark_season(). Idempotente "
+            "(upsert), sin llamadas de red. Pensado para exponer el dato (no el codigo) a proyectos "
+            "hermanos con su propio rol de Postgres de solo lectura."
+        ),
+    )
+    backfill_model_predictions_parser.add_argument("--db", required=True, help="URL SQLAlchemy de la base historica ya ingerida")
+    backfill_model_predictions_parser.add_argument("--season", action="append", type=int, dest="seasons", required=True, help="Temporada a backfillear (repetible)")
+    backfill_model_predictions_parser.add_argument("--out", help="Si se indica, tambien escribe el resultado como JSON en esta ruta")
 
     args = parser.parse_args()
 
@@ -471,6 +486,22 @@ def main() -> None:
                     market_id, market_result["status"], thresholds, nested["accuracy_wilson_ci_low"], nested["n_games_passing_gate"],
                 )
 
+        output = json.dumps(result, indent=2, default=str)
+        print(output)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(output)
+
+    elif args.command == "backfill-model-predictions":
+        setup_plain_logging()
+        result = {"seasons": {}}
+        for season in sorted(args.seasons):
+            summary = backfill_model_predictions_season(season, args.db)
+            result["seasons"][season] = summary
+            logger.info(
+                "backfill-model-predictions(%s) completo -- n_games_scored=%s n_predictions_written=%s",
+                season, summary.get("n_games_scored"), summary.get("n_predictions_written"),
+            )
         output = json.dumps(result, indent=2, default=str)
         print(output)
         if args.out:
