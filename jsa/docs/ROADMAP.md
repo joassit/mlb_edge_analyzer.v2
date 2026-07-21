@@ -2196,6 +2196,49 @@ ingerido (mismo principio que `rule_candidate_audit.py` en Fase 3).
 **Pendiente**: investigar viabilidad de datos reales para el primer
 modulo (Closer Leverage Engine) antes de construirlo.
 
+## Closer Leverage Engine -- Modulo 1 del laboratorio (2026-07-21)
+
+**Investigacion de datos real, antes de escribir codigo**: `closer_
+pitcher_id` (relevista con mas saves point-in-time del roster) y `home/
+away_closer_available` (binario, disponible/lesionado) ya existen y estan
+wireados en produccion (`engine/pillars/bullpen.py`, penalty fijo de 0.30
+runs-equivalentes). `pitcher_recent_ip_as_of()` -- point-in-time-safe, ya
+real y probado, usado hoy en `historical/injuries.py` -- permite calcular
+IP reciente del cerrador sin ninguna ingesta nueva. Gap real: `closer_
+pitcher_id` no se persistio durante la ingesta original (`GameSnapshot`
+solo guarda el booleano derivado), asi que recalcularlo requiere
+re-pedir roster + stats por pitcher de bullpen -- mismo costo real de red
+que `bullpen_era_as_of()` durante la ingesta original.
+
+**Codigo completo, pendiente de correr contra datos reales**:
+- `jsa/historical/db.py`: nueva tabla `historical_closer_leverage`
+  (idempotente por `game_pk`+`team_id`).
+- `jsa/research_lab/hypotheses/closer_leverage/backfill.py`: re-deriva
+  `closer_pitcher_id` + IP reciente por equipo por juego.
+- `jsa/research_lab/hypotheses/closer_leverage/evaluate.py`: recalcula el
+  advantage de `bullpen` con un penalty de fatiga adicional (grid
+  `(0.05, 0.10, 0.15, 0.20)` runs-equivalentes por IP reciente, acotado al
+  mismo techo que "cerrador lesionado"), LOSO + `full_significance_
+  report()` contra el baseline real -- mismo patron ya aceptado
+  (`discriminative_audit.py::shrinkage_sensitivity()`), nunca llama a
+  `bullpen.evaluate()` con un snapshot sintetico.
+- `jsa/research_lab/cli.py` (nuevo, separado de `historical/cli.py` a
+  proposito): `closer-leverage-backfill` / `closer-leverage-evaluate`.
+- `.github/workflows/jsa_closer_leverage_backfill.yml` (una temporada por
+  corrida, timeout 340 min -- **costo real de red**, volumen comparable a
+  una fraccion significativa de la ingesta historica original de esa
+  temporada) y `jsa_closer_leverage_evaluate.yml` (nunca pide red).
+- 10 tests nuevos (`test_closer_leverage.py`), FakeProvider determinista,
+  nunca red real en CI.
+
+**Pendiente, requiere confirmacion explicita antes de cada dispatch**:
+correr `jsa_closer_leverage_backfill.yml` para UNA temporada primero
+(validar el resultado real antes de comprometerse a las 5 completas),
+despues `jsa_closer_leverage_evaluate.yml` con `sync_to_lab_registry=
+false` para ver si la hipotesis mejora el baseline, y solo con
+confirmacion explicita adicional `sync_to_lab_registry=true` para
+documentarlo en `experiment_registry`.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un
