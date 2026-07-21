@@ -2296,7 +2296,22 @@ snapshot`/`historical_statcast_event`.
   + `.github/workflows/jsa_backfill_model_predictions.yml` (mismo patron
   directo-sin-red que `jsa_historical_validate_direct.yml`, escribe
   idempotente contra `JSA_HISTORICAL_DATABASE_URL`).
-- 4 tests nuevos (`test_model_prediction_backfill.py`).
+- 6 tests nuevos (`test_model_prediction_backfill.py`).
+
+**Correccion real de performance (2026-07-21, antes de terminar el
+primer backfill)**: la primera version de `backfill_season()` llamaba
+`upsert_model_prediction()` fila por fila (una transaccion de red a
+Postgres por juego por modelo). Dispatch real contra las 5 temporadas
+(run 29871278748) nunca termino en 7+ minutos solo en el paso de
+escritura (deberia haber tardado segundos, mismo orden que
+`jsa_historical_validate_direct.yml`) -- con ~13,101 juegos x ~4 modelos
+son decenas de miles de round-trips individuales, riesgo real de pegar
+en el timeout de 60 min. Se cancelo el run y se reemplazo por
+`historical_db.bulk_upsert_model_predictions()` (una sola transaccion
+`executemany` por temporada, `on_conflict_do_UPDATE`, mismo patron que
+`bulk_insert_statcast_events()` pero con upsert en vez de ignore) --
+`backfill_season()` ahora acumula las filas en memoria y hace un unico
+bulk upsert al final. 2 tests nuevos para el helper en lote.
 
 **Pendiente, fuera del alcance de este repo -- accion de infraestructura
 compartida, requiere confirmacion explicita del usuario antes de
