@@ -126,6 +126,30 @@ historical_statcast_event = Table(
 )
 
 
+# Game Flow Research Lab -- Closer Leverage Engine (2026-07-21): un
+# registro por equipo por juego con el `closer_pitcher_id` real y su IP
+# reciente (`days` dias, point-in-time-safe via `pitcher_recent_ip_as_of`)
+# -- nunca en `GameSnapshot`/`historical_snapshot` (candidato bajo
+# evaluacion en `jsa/research_lab/`, no un pilar confirmado, mismo
+# criterio que `historical_statcast_event`). Requiere re-derivar
+# `closer_pitcher_id` con una llamada de red real (no se persistio en la
+# ingesta original) -- ver `research_lab/hypotheses/closer_leverage/
+# backfill.py`.
+historical_closer_leverage = Table(
+    "historical_closer_leverage", metadata,
+    Column("row_id", Integer, primary_key=True, autoincrement=True),
+    Column("recorded_at", DateTime, nullable=False),
+    Column("season", Integer, nullable=False),
+    Column("game_pk", Integer, nullable=False),
+    Column("team_id", Integer, nullable=False),
+    Column("side", String, nullable=False),  # "home" | "away"
+    Column("closer_pitcher_id", Integer, nullable=True),
+    Column("closer_recent_ip", Float, nullable=True),
+    Column("lookback_days", Integer, nullable=False),
+    UniqueConstraint("game_pk", "team_id", name="uq_historical_closer_leverage"),
+)
+
+
 def get_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)
 
@@ -261,6 +285,20 @@ def count_statcast_events_for_season(engine: Engine, season: int) -> int:
     with engine.connect() as conn:
         rows = conn.execute(select(historical_statcast_event.c.row_id).where(historical_statcast_event.c.season == season)).all()
     return len(rows)
+
+
+def upsert_closer_leverage(engine: Engine, **fields) -> None:
+    """Idempotente por `(game_pk, team_id)` -- re-correr el backfill de una
+    temporada nunca duplica ni pisa una fila ya calculada (misma disciplina
+    de `upsert_game`)."""
+    with engine.begin() as conn:
+        insert_ignore_duplicates(conn, historical_closer_leverage, recorded_at=datetime.now(timezone.utc), **fields)
+
+
+def closer_leverage_for_season(engine: Engine, season: int) -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(select(historical_closer_leverage).where(historical_closer_leverage.c.season == season)).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def statcast_events_for_seasons(engine: Engine, seasons: list[int]) -> list[dict]:

@@ -1,0 +1,70 @@
+name: jsa-closer-leverage-backfill
+
+# Game Flow Research Lab -- Modulo 1 (Closer Leverage Engine). Re-deriva
+# closer_pitcher_id + IP reciente del cerrador para UNA temporada ya
+# ingerida -- requiere red real a statsapi.mlb.com (roster + stats por
+# pitcher de bullpen por equipo por juego, mismo costo que
+# bullpen_era_as_of() durante la ingesta original, mas una llamada extra
+# por cerrador identificado). Idempotente (ON CONFLICT DO NOTHING por
+# game_pk+team_id) -- correrlo de nuevo sobre la misma temporada nunca
+# duplica ni repite llamadas de red para juegos ya backfilleados.
+#
+# COSTO REAL: para una temporada de ~2,600 juegos (13 equipos-juego x 2
+# lados) esto es un volumen de llamadas comparable a una fraccion
+# significativa de la ingesta historica original de esa temporada.
+# Correr UNA temporada primero para validar el resultado antes de
+# disparar las 5 completas.
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Temporada a backfillear (una por corrida, ej. 2022)'
+        required: true
+        type: string
+      days:
+        description: 'Ventana de dias para la IP reciente del cerrador'
+        required: false
+        type: string
+        default: '2'
+
+permissions:
+  contents: read
+
+jobs:
+  closer-leverage-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run closer-leverage-backfill
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          python -m jsa.research_lab.cli closer-leverage-backfill \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            --season "${{ inputs.season }}" \
+            --days "${{ inputs.days }}" \
+            --out jsa_closer_leverage_backfill_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-closer-leverage-backfill-${{ inputs.season }}-${{ github.run_id }}
+          path: jsa_closer_leverage_backfill_result.json
+          if-no-files-found: warn
+          retention-days: 30

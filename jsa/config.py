@@ -104,12 +104,16 @@ CRI_THRESHOLD_CLEAR_FAVORITE = 70
 # --- Consistency Flag (Seccion 9.3) ---
 CONSISTENCY_CRI_PENALTY = 10
 
-# --- Confidence Gate (Seccion 10.2) -- valores de partida, sin Gate
-# Threshold Sweep (10.3) todavia. El Gate nunca pasa mientras el modelo
-# este sin calibrar (ver engine/confidence_gate.py), sin importar estos
-# numeros -- se dejan aqui porque el mecanismo debe existir desde el dia 1.
+# --- Confidence Gate (Seccion 10.2) -- valores de partida, pendientes de
+# reemplazo por Gate Threshold Sweep (10.3) real. GATE_CRI_MIN debe ser
+# <=75 -- ese es el maximo matematico de compute_cri() (suma de
+# CRI_COMPONENTS positivos: 18+18+12+12+8+7), nunca 100 pese a que el
+# score se clippea a [0,100]. Un valor de partida de 85 (corregido
+# 2026-07-20) hacia que cri_above_min fuera SIEMPRE False, en produccion
+# en vivo tambien -- no solo en el backtest historico. Se usa el mismo
+# umbral que CRI_THRESHOLD_CLEAR_FAVORITE (70) por consistencia.
 GATE_P_MIN = 0.65
-GATE_CRI_MIN = 85
+GATE_CRI_MIN = 70
 GATE_UNCERTAINTY_MAX = 40
 GATE_DOMINANCE_THRESHOLD = 0.40
 

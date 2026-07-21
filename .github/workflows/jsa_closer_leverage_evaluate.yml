@@ -1,0 +1,79 @@
+name: jsa-closer-leverage-evaluate
+
+# Game Flow Research Lab -- Modulo 1 (Closer Leverage Engine). Evalua la
+# hipotesis contra el baseline real (evidence_score_raw de produccion)
+# usando SOLO datos ya backfilleados por jsa_closer_leverage_backfill.yml
+# -- nunca pide red, corre 100% sobre JSA_HISTORICAL_DATABASE_URL.
+# `sync_to_lab_registry=false` por default: solo reporta. En `true`,
+# ADEMAS escribe el HypothesisReport en experiment_registry
+# (decision=retained_in_lab/rejected_no_improvement) -- nunca en
+# gate_registry/calibration_registry/rule_registry, nunca promueve nada a
+# produccion.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Temporadas a incluir, separadas por coma (solo las ya backfilleadas)'
+        required: true
+        type: string
+      sync_to_lab_registry:
+        description: 'Ademas de reportar, escribir el HypothesisReport en experiment_registry'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  closer-leverage-evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r jsa/requirements.txt
+
+      - name: Run closer-leverage-evaluate
+        env:
+          JSA_HISTORICAL_DATABASE_URL_SECRET: ${{ secrets.JSA_HISTORICAL_DATABASE_URL }}
+          JSA_DATABASE_URL_SECRET: ${{ secrets.JSA_DATABASE_URL }}
+        run: |
+          if [ -z "$JSA_HISTORICAL_DATABASE_URL_SECRET" ]; then
+            echo "JSA_HISTORICAL_DATABASE_URL no esta configurado -- este workflow requiere una base historica ya unificada." >&2
+            exit 1
+          fi
+          IFS=',' read -ra SEASON_ARGS <<< "${{ inputs.seasons }}"
+          SEASON_FLAGS=()
+          for season in "${SEASON_ARGS[@]}"; do
+            SEASON_FLAGS+=(--season "$season")
+          done
+          SYNC_FLAGS=()
+          if [ "${{ inputs.sync_to_lab_registry }}" = "true" ]; then
+            if [ -z "$JSA_DATABASE_URL_SECRET" ]; then
+              echo "JSA_DATABASE_URL no esta configurado -- experiment_registry vive ahi, no en la base historica." >&2
+              exit 1
+            fi
+            SYNC_FLAGS=(--sync-to-lab-registry --registries-db "$JSA_DATABASE_URL_SECRET")
+          fi
+          python -m jsa.research_lab.cli closer-leverage-evaluate \
+            --db "$JSA_HISTORICAL_DATABASE_URL_SECRET" \
+            "${SEASON_FLAGS[@]}" \
+            "${SYNC_FLAGS[@]}" \
+            --out jsa_closer_leverage_evaluate_result.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jsa-closer-leverage-evaluate-${{ github.run_id }}
+          path: jsa_closer_leverage_evaluate_result.json
+          if-no-files-found: warn
+          retention-days: 30

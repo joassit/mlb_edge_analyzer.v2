@@ -31,7 +31,28 @@ validacion externa) es un umbral de partida sin calibrar contra el
 proyecto -- no existe todavia un criterio propio de "cuantos juegos hacen
 falta para confiar en un CI de Wilson" mas alla de la practica
 estadistica general (regla informal de n*p>=5 y n*(1-p)>=5 para Wilson,
-aca aplicada de forma conservadora)."""
+aca aplicada de forma conservadora).
+
+`CRI_MIN_GRID` reescalado (2026-07-20) a partir de `diagnose_gate_inputs()`
+real sobre los 13,101 juegos -- el rango anterior (70-90) asumia el techo
+de `cri_score` en produccion en vivo (75, ver `GATE_CRI_MIN` en
+`jsa/config.py`), pero el backtest historico tiene un techo mucho mas
+bajo (26) porque `historical/snapshot_reconstruction.py` fija a proposito
+`lineups_official`/`bullpen_usage_known`/`no_last_minute_changes` en
+`False` (esas 3 senales de dia-de-partido no se pueden reconstruir de
+forma fiel retroactivamente). Los 5 valores nuevos (0, 8, 16, 18, 26)
+corresponden a los niveles REALES y discretos que `compute_cri()` puede
+producir dado ese techo -- no son arbitrarios.
+
+Nota metodologica honesta: un `cri_min` "validado" contra el backtest
+historico (techo 26) puede resultar trivialmente laxo si se aplica tal
+cual en produccion en vivo (techo 75, con lineups/bullpen/last-minute-
+changes disponibles de verdad) -- el PROCEDIMIENTO de seleccion via
+nested walk-forward sigue siendo valido, pero el THRESHOLD numerico en si
+hereda el mismo techo bajo del dato historico. Pendiente de una
+comparacion directa cri_score historico vs. en vivo antes de confiar en
+el thresold de produccion resultante como definitivo para produccion en
+vivo."""
 
 from __future__ import annotations
 
@@ -44,7 +65,7 @@ MARKETS_WITH_MODEL: tuple[str, ...] = ("moneyline_home", "moneyline_away")
 MARKETS_WITHOUT_MODEL: tuple[str, ...] = ("run_line", "totals")
 
 P_MIN_GRID: tuple[float, ...] = (0.55, 0.60, 0.65, 0.70, 0.75)
-CRI_MIN_GRID: tuple[int, ...] = (70, 75, 80, 85, 90)
+CRI_MIN_GRID: tuple[int, ...] = (0, 8, 16, 18, 26)  # ver "reescalado" en el docstring del modulo
 UNCERTAINTY_MAX_GRID: tuple[int, ...] = (20, 30, 40, 50)
 MIN_COVERAGE_N = 30
 MIN_SEASONS_FOR_WALK_FORWARD = 3  # Seccion 10.4, mismo minimo que calibration.py

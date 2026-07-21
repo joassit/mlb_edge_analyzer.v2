@@ -2070,6 +2070,175 @@ distribucion real y decidir, con esos numeros en mano, si el grid de
 `gate_threshold_sweep.py` necesita ampliarse o si el gap esta en la
 fidelidad de la reconstruccion historica frente a produccion en vivo.
 
+**Resultado real del diagnostico (2026-07-20, corrida 29786153380)**:
+```
+cri_score_percentiles:         p0=0.0  p10=8.0  p25=16.0  p50=26.0  p75=26.0  p90=26.0  p100=26.0
+uncertainty_index_percentiles: p0=40.0 p10=40.0 p25=44.0  p50=52.0  p75=60.0  p90=60.0  p100=72.0
+market_probability (moneyline_home): p0=0.28 p50=0.53 p90=0.61 p100=0.75
+```
+`cri_score` nunca supero 26 en los 13,101 juegos -- eso, no el grid, es
+la causa completa del rechazo (`cri_min` mas laxo del grid era 70). La
+probabilidad calibrada no es el problema (centrada razonablemente cerca
+de 0.5, como se espera de una curva bien calibrada).
+
+**Hallazgo critico, mas alla del alcance de Fase 6 -- bug real en
+produccion en vivo, corregido 2026-07-20**: `compute_cri()`
+(`jsa/engine/evidence_engine.py`) suma como maximo
+`18+18+12+12+8+7=75` puntos (`CRI_COMPONENTS` en `jsa/config.py`) --
+nunca puede llegar a 100 pese a que el score se clippea a `[0,100]`.
+`GATE_CRI_MIN` estaba en **85**, diez puntos POR ENCIMA del techo
+matematico -- `cri_above_min` en `confidence_gate.py` era
+estructuralmente `False` siempre, en produccion en vivo tambien, no
+solo en el backtest historico. Corregido a `GATE_CRI_MIN=70` (mismo
+valor que `CRI_THRESHOLD_CLEAR_FAVORITE`, ya usado en
+`decision_engine.py`, y alcanzable solo cuando los 6 componentes
+positivos estan presentes -- exige dato completo, que es la intencion
+original). Test de regresion agregado:
+`test_evidence_engine.py::test_cri_max_possible_score_is_75_not_100`
+-- verifica el techo real Y que ningun umbral de CRI en `config.py` lo
+supere, para que este tipo de bug no pueda reaparecer en silencio.
+
+Aparte, y sin tocar (todavia) el gap de fidelidad historica: el techo
+REAL de `cri_score` dentro del backtest (26, no 75) es un limite
+legitimo y esperado -- `historical/snapshot_reconstruction.py` fija
+`lineups_official=False`, `bullpen_usage_known=False`,
+`no_last_minute_changes=False` a proposito, porque esas 3 senales
+(confirmacion oficial de lineup, bullpen ya usado, cambios de ultimo
+momento) describen informacion del dia del partido que reconstruir
+retroactivamente desde box scores no puede replicar de forma fiel. No
+es un bug -- es la razon de fondo por la que `CRI_MIN_GRID` de
+`gate_threshold_sweep.py` (70-90) nunca tuvo chance de encontrar un
+combo valido.
+
+**`CRI_MIN_GRID` reescalado (2026-07-20)**: de `(70, 75, 80, 85, 90)` a
+`(0, 8, 16, 18, 26)` -- los 5 niveles nuevos son los valores REALES y
+discretos que `compute_cri()` puede producir dado el techo de 26 del
+backtest (`starters_confirmed` + combinaciones de `xera_available`/
+`missing_projected_ip`, ver docstring de `gate_threshold_sweep.py`), no
+numeros arbitrarios. `UNCERTAINTY_MAX_GRID` (20-50) se deja igual --
+el rango observado (40-72) SI se solapa con el grid actual (40 y 50 son
+utiles), a diferencia del caso de CRI donde el solapamiento era cero.
+
+**Nota metodologica pendiente, no resuelta por el rescalado**: un
+`cri_min` que "valida" contra el techo bajo del backtest (26) puede
+resultar trivialmente laxo si se usa tal cual en produccion en vivo
+(techo 75, con lineups/bullpen/last-minute-changes reales disponibles
+ese mismo dia) -- el PROCEDIMIENTO de nested walk-forward sigue siendo
+valido cientificamente, pero el THRESHOLD numerico resultante hereda el
+techo bajo del dato historico y no deberia asumirse directamente
+aplicable a produccion en vivo sin una comparacion cri_score
+historico-vs-en-vivo aparte.
+
+## Resultado real del re-run tras las 2 correcciones (2026-07-21, corrida 29795822229)
+
+Con `GATE_CRI_MIN=70` y `CRI_MIN_GRID` reescalado, el Gate Threshold
+Sweep encuentra por primera vez datos que pasan el gate en ambos
+mercados -- pero ninguno llega a `validated_70`:
+
+| Mercado | seasons_validated | n_games_passing_gate | accuracy | wilson_ci_low | wilson_ci_high | coverage_pct | thresholds | status |
+|---|---|---|---|---|---|---|---|---|
+| moneyline_home | las 5 | 473 | 63.0% | 0.5856 | 0.6723 | 3.61% | p_min=0.60, cri_min=16, uncertainty_max=50 | validated_below_70 |
+| moneyline_away | las 5 | 66 | 71.2% | 0.5936 | 0.8073 | 0.50% | p_min=0.65, cri_min=0, uncertainty_max=50 | validated_below_70 |
+
+Sincronizado a `gate_registry` con `sync_to_registries=true` (corrida
+29796873325) -- documentacion tecnica real, nunca promocion: `confidence_
+gate.py` solo desbloquea un mercado con `status=="validated_70"` exacto,
+asi que `validated_below_70` queda registrado sin afectar produccion en
+vivo.
+
+## Game Flow Research Lab (2026-07-21)
+
+Con el resultado real de arriba como piso, el usuario decidio perseguir
+el 70% subiendo la capacidad predictiva real del modelo (nuevas hipotesis
+validadas) en vez de seguir moviendo thresholds -- `jsa/research_lab/`
+(ver su propio `README.md` para la metodologia completa) es el entorno
+de investigacion incremental para eso.
+
+**Principios acordados**: JSA de produccion queda completamente estable
+(el laboratorio nunca cambia comportamiento en vivo por si solo --
+`test_production_isolation.py` extendido para exigirlo en CI); el
+resultado de arriba (`validated_below_70`) es el BASELINE del
+laboratorio, nunca el objetivo final; cada hipotesis nueva responde una
+unica pregunta -- *¿aporta informacion adicional al baseline?* -- con un
+reporte obligatorio de 9 metricas minimas (`HypothesisReport` en
+`research_lab/hypothesis_report.py`: delta accuracy/ROC-AUC/Brier/Log
+Loss/ECE/ROI/Lift por Edge/Cobertura del Gate + feature importance); una
+hipotesis se queda en el laboratorio aunque no llegue a 70% si demuestra
+mejora ESTADISTICAMENTE CONSISTENTE (bootstrap pareado de
+`significance.py`, CI que no cruza 0, misma alpha=0.10 de siempre) sobre
+el baseline en 1+ metrica; ninguna hipotesis se integra a produccion sin
+pasar el Scientific Validation Pipeline completo (misma regla dura de
+siempre, ver abajo).
+
+**Estado real de cada metrica del reporte obligatorio** (nunca fabricado
+-- ver tabla completa en `research_lab/README.md`): accuracy/brier/log
+loss/ECE ya tienen fuente real (`historical/calibration.py`); ROC-AUC y
+lift por decil (proxy de "lift por edge") ya tienen fuente real
+(`historical/discriminative_audit.py::performance_curves()`, construida
+en una fase anterior); feature importance ya tiene fuente real
+(`evidence_engine.py::compute_feature_contribution()` -- matematicamente
+identica a SHAP para el Evidence Score actual, que es lineal). **`delta_
+roi` es un gap real**: JSA no tiene ninguna cuota de mercado (moneyline
+odds/vig) ingerida en su base historica todavia. El proyecto legado
+(`model/edge.py`: `implied_prob`/`fair_odds`/`expected_value`/`no_vig_
+probs`) ya tiene una convencion real y validada para esto -- se porta a
+`jsa/legacy/` (mismo patron que el heuristico ERA/OPS) el dia que se
+ingieran cuotas historicas reales, nunca antes con datos inventados.
+
+**Modulos priorizados** (orden sugerido por el usuario, cada uno
+activable/desactivable de forma independiente para medir contribucion
+marginal real): Closer Leverage Engine, Team Strength Engine, Offensive
+Flow Engine, Starter Projection avanzado, Bullpen Projection avanzado,
+Win State Projection, First 5 Research Model. Antes de construir cada
+uno: confirmar que existe dato real que soporte la hipotesis en lo ya
+ingerido (mismo principio que `rule_candidate_audit.py` en Fase 3).
+
+**Pendiente**: investigar viabilidad de datos reales para el primer
+modulo (Closer Leverage Engine) antes de construirlo.
+
+## Closer Leverage Engine -- Modulo 1 del laboratorio (2026-07-21)
+
+**Investigacion de datos real, antes de escribir codigo**: `closer_
+pitcher_id` (relevista con mas saves point-in-time del roster) y `home/
+away_closer_available` (binario, disponible/lesionado) ya existen y estan
+wireados en produccion (`engine/pillars/bullpen.py`, penalty fijo de 0.30
+runs-equivalentes). `pitcher_recent_ip_as_of()` -- point-in-time-safe, ya
+real y probado, usado hoy en `historical/injuries.py` -- permite calcular
+IP reciente del cerrador sin ninguna ingesta nueva. Gap real: `closer_
+pitcher_id` no se persistio durante la ingesta original (`GameSnapshot`
+solo guarda el booleano derivado), asi que recalcularlo requiere
+re-pedir roster + stats por pitcher de bullpen -- mismo costo real de red
+que `bullpen_era_as_of()` durante la ingesta original.
+
+**Codigo completo, pendiente de correr contra datos reales**:
+- `jsa/historical/db.py`: nueva tabla `historical_closer_leverage`
+  (idempotente por `game_pk`+`team_id`).
+- `jsa/research_lab/hypotheses/closer_leverage/backfill.py`: re-deriva
+  `closer_pitcher_id` + IP reciente por equipo por juego.
+- `jsa/research_lab/hypotheses/closer_leverage/evaluate.py`: recalcula el
+  advantage de `bullpen` con un penalty de fatiga adicional (grid
+  `(0.05, 0.10, 0.15, 0.20)` runs-equivalentes por IP reciente, acotado al
+  mismo techo que "cerrador lesionado"), LOSO + `full_significance_
+  report()` contra el baseline real -- mismo patron ya aceptado
+  (`discriminative_audit.py::shrinkage_sensitivity()`), nunca llama a
+  `bullpen.evaluate()` con un snapshot sintetico.
+- `jsa/research_lab/cli.py` (nuevo, separado de `historical/cli.py` a
+  proposito): `closer-leverage-backfill` / `closer-leverage-evaluate`.
+- `.github/workflows/jsa_closer_leverage_backfill.yml` (una temporada por
+  corrida, timeout 340 min -- **costo real de red**, volumen comparable a
+  una fraccion significativa de la ingesta historica original de esa
+  temporada) y `jsa_closer_leverage_evaluate.yml` (nunca pide red).
+- 10 tests nuevos (`test_closer_leverage.py`), FakeProvider determinista,
+  nunca red real en CI.
+
+**Pendiente, requiere confirmacion explicita antes de cada dispatch**:
+correr `jsa_closer_leverage_backfill.yml` para UNA temporada primero
+(validar el resultado real antes de comprometerse a las 5 completas),
+despues `jsa_closer_leverage_evaluate.yml` con `sync_to_lab_registry=
+false` para ver si la hipotesis mejora el baseline, y solo con
+confirmacion explicita adicional `sync_to_lab_registry=true` para
+documentarlo en `experiment_registry`.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un
