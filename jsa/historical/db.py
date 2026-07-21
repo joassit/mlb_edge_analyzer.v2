@@ -340,6 +340,45 @@ def upsert_model_prediction(engine: Engine, *, season: int, game_pk: int, model_
         )
 
 
+def bulk_upsert_model_predictions(engine: Engine, season: int, rows: list[dict]) -> int:
+    """Version en lote de `upsert_model_prediction()` -- UNA sola
+    transaccion (`executemany` real, no N conexiones separadas) para toda
+    la temporada. `upsert_model_prediction()` (fila por fila) abre su
+    propia transaccion de red por cada llamada -- viable para un ajuste
+    puntual, pero con ~13,101 juegos x ~4 modelos por temporada eso son
+    decenas de miles de round-trips individuales a Postgres (medido en
+    vivo: un backfill real de las 5 temporadas nunca termino en el
+    timeout de 60 min con la version fila-por-fila, cancelado 2026-07-21).
+    `rows` es una lista de dicts con `game_pk`/`model_name`/`home_win_prob`
+    -- mismo patron `executemany` que `bulk_insert_statcast_events()`, pero
+    con `on_conflict_do_UPDATE` (no `do_nothing`) para que re-correr tras
+    recalibrar un modelo refleje el valor nuevo."""
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc)
+    payload = [{**r, "season": season, "recorded_at": now} for r in rows]
+    with engine.begin() as conn:
+        dialect_name = conn.engine.dialect.name
+        if dialect_name == "postgresql":
+            from sqlalchemy.dialects import postgresql
+            stmt = postgresql.insert(historical_model_prediction)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["game_pk", "model_name"],
+                set_={"home_win_prob": stmt.excluded.home_win_prob, "recorded_at": stmt.excluded.recorded_at},
+            )
+        elif dialect_name == "sqlite":
+            from sqlalchemy.dialects import sqlite
+            stmt = sqlite.insert(historical_model_prediction)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["game_pk", "model_name"],
+                set_={"home_win_prob": stmt.excluded.home_win_prob, "recorded_at": stmt.excluded.recorded_at},
+            )
+        else:
+            stmt = historical_model_prediction.insert()
+        conn.execute(stmt, payload)
+    return len(payload)
+
+
 def model_predictions_for_season(engine: Engine, season: int) -> list[dict]:
     with engine.connect() as conn:
         rows = conn.execute(select(historical_model_prediction).where(historical_model_prediction.c.season == season)).mappings().all()

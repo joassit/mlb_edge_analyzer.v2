@@ -92,6 +92,42 @@ def test_backfill_season_is_idempotent_upsert_overwrites(hist_url):
     assert jsa_row["home_win_prob"] == pytest.approx(0.55)  # vuelve a reflejar el valor real, no el manual
 
 
+def test_bulk_upsert_model_predictions_single_transaction_overwrites(hist_url):
+    """`bulk_upsert_model_predictions()` es lo que reemplazo a `upsert_
+    model_prediction()` fila-por-fila en el backfill real -- una sola
+    llamada para toda la temporada, y sigue siendo upsert (no ignore)."""
+    engine = historical_db.get_engine(hist_url)
+    historical_db.init_historical_storage(engine)
+
+    n = historical_db.bulk_upsert_model_predictions(
+        engine, 2022,
+        [
+            {"game_pk": 1, "model_name": "legacy_heuristic", "home_win_prob": 0.55},
+            {"game_pk": 1, "model_name": "legacy_negbin", "home_win_prob": 0.60},
+            {"game_pk": 2, "model_name": "legacy_heuristic", "home_win_prob": 0.45},
+        ],
+    )
+    assert n == 3
+    rows = historical_db.model_predictions_for_season(engine, 2022)
+    assert len(rows) == 3
+
+    # Re-correr con un valor distinto para (game_pk=1, legacy_heuristic) debe
+    # actualizar esa fila, nunca duplicarla ni tocar las otras 2.
+    historical_db.bulk_upsert_model_predictions(
+        engine, 2022, [{"game_pk": 1, "model_name": "legacy_heuristic", "home_win_prob": 0.90}],
+    )
+    rows = historical_db.model_predictions_for_season(engine, 2022)
+    assert len(rows) == 3
+    updated = [r for r in rows if r["game_pk"] == 1 and r["model_name"] == "legacy_heuristic"][0]
+    assert updated["home_win_prob"] == pytest.approx(0.90)
+
+
+def test_bulk_upsert_model_predictions_empty_rows_is_noop(hist_url):
+    engine = historical_db.get_engine(hist_url)
+    historical_db.init_historical_storage(engine)
+    assert historical_db.bulk_upsert_model_predictions(engine, 2022, []) == 0
+
+
 def test_backfill_season_skips_games_without_winner(hist_url):
     engine = historical_db.get_engine(hist_url)
     historical_db.init_historical_storage(engine)
