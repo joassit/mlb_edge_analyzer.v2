@@ -72,8 +72,8 @@ WEATHER_CORRECTION = 0.0
 # 2023 y 2025; marginal pero misma dirección en 2022/2024):
 #   2022: -0.00065 [-0.0018, +0.0004]   2023: -0.00198 [-0.0033, -0.0007]
 #   2024: -0.00054 [-0.0016, +0.0006]   2025: -0.00248 [-0.0037, -0.0012]
-# No afecta los picks en vivo (PICK_PROBABILITY_SOURCE="heuristic" es el
-# modelo activo desde el 2026-07-21) -- este valor solo alimenta el tracking/comparación de
+# No afecta los picks en vivo (PICK_PROBABILITY_SOURCE="skellam" es el
+# modelo activo) -- este valor solo alimenta el tracking/comparación de
 # NegBin (columnas away_negbin_prob/home_negbin_prob, usadas en
 # compute_metrics()/compute_calibration() para comparar los 3 motores).
 # Recalibrar de nuevo con scripts/calibrate_dispersion.py conforme se
@@ -110,17 +110,15 @@ SKELLAM_SHRINKAGE_ALPHA = float(os.getenv("SKELLAM_SHRINKAGE_ALPHA", "0.5"))
 # las carreras proyectadas (Skellam/NB2), nunca del heurístico, así que no
 # tienen una fuente configurable que cambiar.
 #
-# Cambiado de "skellam" a "heuristic" el 2026-07-21 (decisión del usuario).
-# Contexto de evidencia disponible al momento del cambio (informe técnico
-# del 2026-07-21): el heurístico sigue siendo el modelo con mejor accuracy
-# (58.7%, n=155) y mejor ECE (6.9%) de los 3 -- Skellam (el que estaba
-# activo) tiene accuracy 54.2% y ECE 7.9% sobre la misma ventana. Ninguno
-# le gana al mercado en Brier todavía, y el hallazgo de la Parte II.5/II.6
-# de ese mismo informe (el lift por edge/probabilidad no es monótono en
-# ningún modelo) sigue aplicando -- este cambio no está validado contra un
-# barrido histórico dedicado como sí lo estuvo SKELLAM_SHRINKAGE_ALPHA o
-# NEGBIN_DISPERSION arriba, es una decisión operativa directa.
-PICK_PROBABILITY_SOURCE = os.getenv("PICK_PROBABILITY_SOURCE", "heuristic")
+# Por qué "skellam" y no "heuristic": el heurístico calcula una probabilidad
+# de victoria a partir de ERA/OPS de forma independiente de las carreras
+# proyectadas: es una segunda opinión, útil para el chequeo de acuerdo entre
+# modelos, pero Skellam es el que efectivamente modela el marcador (de ahí
+# sale el total y el run line también) -- generar el pick de moneyline desde
+# un modelo distinto al que ya se usa para los otros dos mercados dejaba al
+# heurístico corriendo la mesa de decisión de apuesta sin ninguna razón
+# consistente frente a los otros dos picks del mismo partido.
+PICK_PROBABILITY_SOURCE = os.getenv("PICK_PROBABILITY_SOURCE", "skellam")
 
 # --- The Odds API: protección de presupuesto ---
 # El free tier de The Odds API es ~500 requests/mes — el más limitado de
