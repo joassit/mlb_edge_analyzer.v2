@@ -2129,6 +2129,73 @@ techo bajo del dato historico y no deberia asumirse directamente
 aplicable a produccion en vivo sin una comparacion cri_score
 historico-vs-en-vivo aparte.
 
+## Resultado real del re-run tras las 2 correcciones (2026-07-21, corrida 29795822229)
+
+Con `GATE_CRI_MIN=70` y `CRI_MIN_GRID` reescalado, el Gate Threshold
+Sweep encuentra por primera vez datos que pasan el gate en ambos
+mercados -- pero ninguno llega a `validated_70`:
+
+| Mercado | seasons_validated | n_games_passing_gate | accuracy | wilson_ci_low | wilson_ci_high | coverage_pct | thresholds | status |
+|---|---|---|---|---|---|---|---|---|
+| moneyline_home | las 5 | 473 | 63.0% | 0.5856 | 0.6723 | 3.61% | p_min=0.60, cri_min=16, uncertainty_max=50 | validated_below_70 |
+| moneyline_away | las 5 | 66 | 71.2% | 0.5936 | 0.8073 | 0.50% | p_min=0.65, cri_min=0, uncertainty_max=50 | validated_below_70 |
+
+Sincronizado a `gate_registry` con `sync_to_registries=true` (corrida
+29796873325) -- documentacion tecnica real, nunca promocion: `confidence_
+gate.py` solo desbloquea un mercado con `status=="validated_70"` exacto,
+asi que `validated_below_70` queda registrado sin afectar produccion en
+vivo.
+
+## Game Flow Research Lab (2026-07-21)
+
+Con el resultado real de arriba como piso, el usuario decidio perseguir
+el 70% subiendo la capacidad predictiva real del modelo (nuevas hipotesis
+validadas) en vez de seguir moviendo thresholds -- `jsa/research_lab/`
+(ver su propio `README.md` para la metodologia completa) es el entorno
+de investigacion incremental para eso.
+
+**Principios acordados**: JSA de produccion queda completamente estable
+(el laboratorio nunca cambia comportamiento en vivo por si solo --
+`test_production_isolation.py` extendido para exigirlo en CI); el
+resultado de arriba (`validated_below_70`) es el BASELINE del
+laboratorio, nunca el objetivo final; cada hipotesis nueva responde una
+unica pregunta -- *¿aporta informacion adicional al baseline?* -- con un
+reporte obligatorio de 9 metricas minimas (`HypothesisReport` en
+`research_lab/hypothesis_report.py`: delta accuracy/ROC-AUC/Brier/Log
+Loss/ECE/ROI/Lift por Edge/Cobertura del Gate + feature importance); una
+hipotesis se queda en el laboratorio aunque no llegue a 70% si demuestra
+mejora ESTADISTICAMENTE CONSISTENTE (bootstrap pareado de
+`significance.py`, CI que no cruza 0, misma alpha=0.10 de siempre) sobre
+el baseline en 1+ metrica; ninguna hipotesis se integra a produccion sin
+pasar el Scientific Validation Pipeline completo (misma regla dura de
+siempre, ver abajo).
+
+**Estado real de cada metrica del reporte obligatorio** (nunca fabricado
+-- ver tabla completa en `research_lab/README.md`): accuracy/brier/log
+loss/ECE ya tienen fuente real (`historical/calibration.py`); ROC-AUC y
+lift por decil (proxy de "lift por edge") ya tienen fuente real
+(`historical/discriminative_audit.py::performance_curves()`, construida
+en una fase anterior); feature importance ya tiene fuente real
+(`evidence_engine.py::compute_feature_contribution()` -- matematicamente
+identica a SHAP para el Evidence Score actual, que es lineal). **`delta_
+roi` es un gap real**: JSA no tiene ninguna cuota de mercado (moneyline
+odds/vig) ingerida en su base historica todavia. El proyecto legado
+(`model/edge.py`: `implied_prob`/`fair_odds`/`expected_value`/`no_vig_
+probs`) ya tiene una convencion real y validada para esto -- se porta a
+`jsa/legacy/` (mismo patron que el heuristico ERA/OPS) el dia que se
+ingieran cuotas historicas reales, nunca antes con datos inventados.
+
+**Modulos priorizados** (orden sugerido por el usuario, cada uno
+activable/desactivable de forma independiente para medir contribucion
+marginal real): Closer Leverage Engine, Team Strength Engine, Offensive
+Flow Engine, Starter Projection avanzado, Bullpen Projection avanzado,
+Win State Projection, First 5 Research Model. Antes de construir cada
+uno: confirmar que existe dato real que soporte la hipotesis en lo ya
+ingerido (mismo principio que `rule_candidate_audit.py` en Fase 3).
+
+**Pendiente**: investigar viabilidad de datos reales para el primer
+modulo (Closer Leverage Engine) antes de construirlo.
+
 ## Regla dura para todo lo anterior
 
 Ninguna de estas piezas se agrega editando directamente un registry o un
