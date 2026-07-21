@@ -89,7 +89,7 @@ aplica esta regla.
 
 ## Modulos (orden sugerido, cada uno activable/desactivable independiente)
 
-1. Closer Leverage Engine
+1. **Closer Leverage Engine** -- codigo completo (2026-07-21), pendiente de backfill real contra Postgres/MLB API
 2. Team Strength Engine
 3. Offensive Flow Engine
 4. Starter Projection avanzado
@@ -104,3 +104,46 @@ medir contribucion marginal real de forma aislada. Antes de construir
 cada uno: confirmar que existe dato real que soporte la hipotesis en lo
 ya ingerido (mismo principio que `rule_candidate_audit.py` en Fase 3 --
 nunca fabricar una senal que no esta en los datos).
+
+### Modulo 1 -- Closer Leverage Engine
+
+**Hipotesis**: el estado de fatiga/descanso reciente del cerrador (IP en
+los ultimos `days` dias, point-in-time-safe) aporta informacion adicional
+al baseline mas alla de la señal binaria actual `home/away_closer_
+available` (disponible/lesionado, ya wireada en `engine/pillars/
+bullpen.py`).
+
+**Investigacion de datos (2026-07-21)**: `closer_pitcher_id` (el
+relevista con mas saves point-in-time del roster) y `home/away_closer_
+available` ya existen y estan wireados en produccion. `pitcher_recent_ip_
+as_of()` (point-in-time-safe, ya real y probado -- lo usa `historical/
+injuries.py`) permite calcular la IP reciente del cerrador SIN ninguna
+ingesta nueva de datos. `closer_pitcher_id` en si NO se persistio durante
+la ingesta original (`GameSnapshot` solo guarda el booleano derivado) --
+recalcularlo requiere re-pedir roster + stats por pitcher de bullpen,
+mismo costo real que `bullpen_era_as_of()` durante la ingesta original.
+
+**Codigo** (`hypotheses/closer_leverage/`):
+- `backfill.py`: re-deriva `closer_pitcher_id` + IP reciente por equipo
+  por juego, persiste en `historical_closer_leverage` (nueva tabla en
+  `historical/db.py`, idempotente por `(game_pk, team_id)`).
+- `evaluate.py`: recalcula el advantage de `bullpen` con un penalty de
+  fatiga adicional (grid `FATIGUE_PENALTY_PER_IP_GRID=(0.05, 0.10, 0.15,
+  0.20)`, acotado al mismo techo que "cerrador lesionado" -- fatiga nunca
+  penaliza mas que ausencia total), mismo patron ya aceptado en el
+  proyecto que `discriminative_audit.py::shrinkage_sensitivity()`. LOSO +
+  `full_significance_report()` contra el baseline real por cada valor del
+  grid, reporta el mejor.
+- CLI: `python -m jsa.research_lab.cli closer-leverage-backfill --db ...
+  --season ...` y `closer-leverage-evaluate --db ... --season ...
+  [--sync-to-lab-registry --registries-db ...]`.
+- Workflows: `jsa_closer_leverage_backfill.yml` (una temporada por
+  corrida, **costo real de red** -- volumen comparable a una fraccion
+  significativa de la ingesta historica original de esa temporada) y
+  `jsa_closer_leverage_evaluate.yml` (nunca pide red, corre sobre lo ya
+  backfilleado).
+
+**Pendiente**: correr el backfill real contra Postgres/MLB API -- se
+recomienda UNA temporada primero para validar el resultado antes de
+disparar las 5 completas, con confirmacion explicita antes de cada
+dispatch (mismo principio de todo el proyecto).
