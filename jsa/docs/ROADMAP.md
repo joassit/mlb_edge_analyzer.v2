@@ -2108,9 +2108,26 @@ momento) describen informacion del dia del partido que reconstruir
 retroactivamente desde box scores no puede replicar de forma fiel. No
 es un bug -- es la razon de fondo por la que `CRI_MIN_GRID` de
 `gate_threshold_sweep.py` (70-90) nunca tuvo chance de encontrar un
-combo valido, y queda pendiente de discusion (rescalar el grid a lo
-realmente observable en backtest, vs. otra alternativa) antes de volver
-a correr el sweep.
+combo valido.
+
+**`CRI_MIN_GRID` reescalado (2026-07-20)**: de `(70, 75, 80, 85, 90)` a
+`(0, 8, 16, 18, 26)` -- los 5 niveles nuevos son los valores REALES y
+discretos que `compute_cri()` puede producir dado el techo de 26 del
+backtest (`starters_confirmed` + combinaciones de `xera_available`/
+`missing_projected_ip`, ver docstring de `gate_threshold_sweep.py`), no
+numeros arbitrarios. `UNCERTAINTY_MAX_GRID` (20-50) se deja igual --
+el rango observado (40-72) SI se solapa con el grid actual (40 y 50 son
+utiles), a diferencia del caso de CRI donde el solapamiento era cero.
+
+**Nota metodologica pendiente, no resuelta por el rescalado**: un
+`cri_min` que "valida" contra el techo bajo del backtest (26) puede
+resultar trivialmente laxo si se usa tal cual en produccion en vivo
+(techo 75, con lineups/bullpen/last-minute-changes reales disponibles
+ese mismo dia) -- el PROCEDIMIENTO de nested walk-forward sigue siendo
+valido cientificamente, pero el THRESHOLD numerico resultante hereda el
+techo bajo del dato historico y no deberia asumirse directamente
+aplicable a produccion en vivo sin una comparacion cri_score
+historico-vs-en-vivo aparte.
 
 ## Regla dura para todo lo anterior
 
