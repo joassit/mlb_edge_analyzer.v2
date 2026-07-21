@@ -210,7 +210,17 @@ jobs:
             echo "::warning::$ERRORS juego(s) tuvieron un error aislado durante el procesamiento (ver 'Error inesperado procesando' en $LOG_FILE) -- no hizo fallar el job a propósito, pero requiere revisión."
           fi
 
-          if [ ! -f mlb_edge.db ]; then
+          # Con HAS_EXTERNAL_DB=true (secrets.DATABASE_URL configurado,
+          # Postgres real desde el 2026-07-19) este archivo YA NUNCA se
+          # crea -- init_db()/save_analysis() escriben directo a Postgres,
+          # nunca a un mlb_edge.db local. Antes de este chequeo, cada
+          # corrida real contra Postgres se marcaba "failure" en la UI de
+          # Actions aunque hubiera persistido todo correctamente (confirmado
+          # con las corridas 29764717801/29768932113/29769380682/
+          # 29778143944/29854505837 -- "Run pipeline" en success, solo
+          # este paso fallaba) -- un falso positivo que además puede
+          # esconder una falla real futura entre el ruido.
+          if [ "$HAS_EXTERNAL_DB" != "true" ] && [ ! -f mlb_edge.db ]; then
             echo "::error::mlb_edge.db no existe después de la corrida -- init_db() no se ejecutó o la ruta de DATABASE_URL es inválida."
             exit 1
           fi
