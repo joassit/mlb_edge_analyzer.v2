@@ -69,7 +69,7 @@ jobs:
       # cada una a su propia carpeta, para no pisar el mismo nombre de
       # archivo (jsa_historical.db) entre descargas.
       - name: Download 2022 artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: jsa-historical-db-2022-${{ inputs.run_id_2022 }}
           path: downloads/2022
@@ -77,7 +77,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download 2023 artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: jsa-historical-db-2023-${{ inputs.run_id_2023 }}
           path: downloads/2023
@@ -85,7 +85,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download 2024 artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: jsa-historical-db-2024-${{ inputs.run_id_2024 }}
           path: downloads/2024
@@ -93,7 +93,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download 2025 artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: jsa-historical-db-2025-${{ inputs.run_id_2025 }}
           path: downloads/2025
@@ -101,7 +101,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download 2026 artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: jsa-historical-db-2026-${{ inputs.run_id_2026 }}
           path: downloads/2026
