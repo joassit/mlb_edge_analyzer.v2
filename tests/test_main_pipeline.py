@@ -392,14 +392,13 @@ def test_analyze_today_no_moneyline_required_only_totals_loaded(monkeypatch):
 def test_analyze_today_forces_a_pick_when_no_market_has_edge(monkeypatch):
     _patch_pipeline(monkeypatch)
     _clear_manual_markets(monkeypatch)
-    # Cuota casi exactamente igual a la que implica la probabilidad Skellam
-    # CALIBRADA de este fixture (~0.635 cruda -> ~0.5675 tras la contracción
-    # alpha=0.5 de SKELLAM_SHRINKAGE_ALPHA; PICK_PROBABILITY_SOURCE default
-    # desde model/picks.py) -> ni home ni away superan los umbrales de
-    # edge/EV. Antes de la calibración esta cuota era -174/+174 (la
-    # probabilidad cruda); si SKELLAM_SHRINKAGE_ALPHA cambia, este par de
-    # momios tiene que reajustarse con él.
-    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": -131, "home": 131}})
+    # Cuota casi exactamente igual a la que implica la probabilidad
+    # HEURÍSTICA de este fixture (away≈0.5282/home≈0.4718;
+    # PICK_PROBABILITY_SOURCE="heuristic" default desde 2026-07-21) -> ni
+    # home ni away superan los umbrales de edge/EV. Si el fixture de
+    # _patch_pipeline cambia (ERA/OPS/IP), este par de momios tiene que
+    # recalcularse con él.
+    monkeypatch.setattr(main, "MARKET_ODDS", {999999: {"away": -112, "home": 112}})
 
     results = main.analyze_today()
     picks = results[0]["_picks"]
