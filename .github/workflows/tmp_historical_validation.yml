@@ -1,35 +1,23 @@
 name: tmp-historical-validation
 
-# Uso temporal de un path ya registrado en GitHub Actions (evita el lag de
-# indexado de workflow_dispatch para archivos nuevos) -- corre la ingesta
-# real de una temporada mientras historical_ingest.yml/
-# historical_ingest_simple.yml (los archivos permanentes) terminan de
-# indexarse. Se retira/reemplaza según haga falta en cada uso.
+# Uso temporal de un path ya registrado en GitHub Actions -- en ESTE uso:
+# corre scratchpad_extract_report_data.py contra el Postgres real de
+# producción (secrets.DATABASE_URL) para el reporte del 2026-07-22.
+# Se restaura a modo season-ingest al terminar.
 on:
   workflow_dispatch:
-    inputs:
-      season:
-        description: 'Año de temporada a ingerir (ej. 2025)'
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 jobs:
-  ingest-season:
+  extract-report-data:
     runs-on: ubuntu-latest
-    # 340 min, no 300 -- GitHub Actions tiene un tope DURO de 6h (360 min)
-    # para jobs en runners hosteados que ningún timeout-minutes puede
-    # superar. 300 min cortó la corrida de 2025 a mitad de camino (el fix
-    # de climatología del Paso 4 de la auditoría de look-ahead bias subió
-    # el costo real por juego). Con WEATHER_CLIMATOLOGY_YEARS bajado de 5
-    # a 3 + cache de climatología dentro de la corrida, una temporada
-    # completa debería entrar cómoda en ~4h30m-4h50m -- 340 deja margen
-    # real sin acercarse al tope de la plataforma.
-    timeout-minutes: 340
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: main
 
       - uses: actions/setup-python@v6
         with:
@@ -37,12 +25,11 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: python -m historical_engine.cli season ${{ inputs.season }}
+      - name: Traer script de extracción (vive solo en feature/historical-backtesting)
+        run: |
+          git fetch origin feature/historical-backtesting
+          git show FETCH_HEAD:scratchpad_extract_report_data.py > scratchpad_extract_report_data.py
 
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: historical-backtest-db-${{ inputs.season }}
-          path: historical_backtest.db
-          if-no-files-found: warn
-          retention-days: 30
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scratchpad_extract_report_data.py
