@@ -128,6 +128,25 @@ def test_bulk_upsert_model_predictions_empty_rows_is_noop(hist_url):
     assert historical_db.bulk_upsert_model_predictions(engine, 2022, []) == 0
 
 
+def test_bulk_upsert_model_predictions_writes_across_multiple_chunks(hist_url, monkeypatch):
+    """Simula una temporada mas grande que un lote -- cada lote se escribe
+    en su propia transaccion, pero el resultado final es identico a un
+    solo `executemany` (esto es lo que evita que un corte de conexion a
+    mitad de camino pierda una temporada entera, ver run 29873773600)."""
+    monkeypatch.setattr(historical_db, "MODEL_PREDICTION_UPSERT_CHUNK_SIZE", 2)
+    engine = historical_db.get_engine(hist_url)
+    historical_db.init_historical_storage(engine)
+
+    rows = [{"game_pk": i, "model_name": "legacy_heuristic", "home_win_prob": 0.5 + i * 0.01} for i in range(5)]
+    n = historical_db.bulk_upsert_model_predictions(engine, 2022, rows)
+    assert n == 5
+
+    persisted = historical_db.model_predictions_for_season(engine, 2022)
+    assert len(persisted) == 5
+    by_game = {r["game_pk"]: r["home_win_prob"] for r in persisted}
+    assert by_game[3] == pytest.approx(0.53)
+
+
 def test_backfill_season_skips_games_without_winner(hist_url):
     engine = historical_db.get_engine(hist_url)
     historical_db.init_historical_storage(engine)

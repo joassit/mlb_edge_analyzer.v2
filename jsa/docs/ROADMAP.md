@@ -2313,6 +2313,25 @@ en el timeout de 60 min. Se cancelo el run y se reemplazo por
 `backfill_season()` ahora acumula las filas en memoria y hace un unico
 bulk upsert al final. 2 tests nuevos para el helper en lote.
 
+**Segunda correccion real (2026-07-21, dispatch con el fix de bulk upsert,
+run 29873773600)**: 2022/2023/2024 terminaron OK (10512/10955/10788
+predicciones escritas respectivamente) -- pero cada temporada tardo
+~12-13 min solo en lectura+computo (mucho mas que los ~50s de
+`jsa_historical_validate_direct.yml` para las 5 temporadas juntas,
+diferencia real todavia no explicada, probablemente latencia/cold-start
+del lado de Neon en vez de un bug de este codigo). La temporada 2025
+fallo con `psycopg2.OperationalError: SSL connection has been closed
+unexpectedly` a mitad del UNICO `executemany` de sus ~10,800 filas --
+2026 nunca se intento. Como la funcion es idempotente por upsert, las 3
+temporadas ya escritas NO se perdieron ni hace falta re-correrlas.
+Correccion: `bulk_upsert_model_predictions()` ahora trocea en lotes de
+`MODEL_PREDICTION_UPSERT_CHUNK_SIZE=1000` filas, cada uno en su propia
+transaccion -- un corte de conexion transitorio pierde como maximo un
+lote, no la temporada completa. `jsa_backfill_model_predictions.yml`
+sube su timeout de 60 a 120 min (5 temporadas x ~12-13 min reales deja
+poco margen dentro de 60). 1 test nuevo (chunking con monkeypatch del
+tamaño de lote).
+
 **Pendiente, fuera del alcance de este repo -- accion de infraestructura
 compartida, requiere confirmacion explicita del usuario antes de
 ejecutarse**: el rol `jsa_v2` necesita un GRANT SELECT adicional sobre

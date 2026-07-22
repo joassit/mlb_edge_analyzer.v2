@@ -25,7 +25,12 @@ permissions:
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Medido en vivo (2026-07-21): cada temporada tarda ~12-13 min (lectura
+    # de games/snapshots/reports + computo de _legacy_predictions() por
+    # juego + bulk upsert), no los ~50s de jsa_historical_validate_direct.yml
+    # -- 60 min alcanzaba para 3-4 temporadas pero dejaba poco margen para
+    # las 5 completas mas un reintento ante un corte de conexion transitorio.
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v7
