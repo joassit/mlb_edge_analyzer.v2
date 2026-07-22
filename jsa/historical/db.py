@@ -340,15 +340,30 @@ def upsert_model_prediction(engine: Engine, *, season: int, game_pk: int, model_
         )
 
 
+MODEL_PREDICTION_UPSERT_CHUNK_SIZE = 1000
+
+
 def bulk_upsert_model_predictions(engine: Engine, season: int, rows: list[dict]) -> int:
-    """Version en lote de `upsert_model_prediction()` -- UNA sola
-    transaccion (`executemany` real, no N conexiones separadas) para toda
-    la temporada. `upsert_model_prediction()` (fila por fila) abre su
-    propia transaccion de red por cada llamada -- viable para un ajuste
+    """Version en lote de `upsert_model_prediction()` -- lotes de
+    `MODEL_PREDICTION_UPSERT_CHUNK_SIZE` filas, cada uno en su PROPIA
+    transaccion/conexion (`executemany` real dentro del lote, no N
+    conexiones por fila). `upsert_model_prediction()` (fila por fila) abre
+    su propia transaccion de red por cada llamada -- viable para un ajuste
     puntual, pero con ~13,101 juegos x ~4 modelos por temporada eso son
     decenas de miles de round-trips individuales a Postgres (medido en
     vivo: un backfill real de las 5 temporadas nunca termino en el
     timeout de 60 min con la version fila-por-fila, cancelado 2026-07-21).
+
+    Un UNICO `executemany` con las ~10,800 filas de una temporada entera
+    (primera version de este helper) tambien fallo en vivo -- `psycopg2.
+    OperationalError: SSL connection has been closed unexpectedly` a mitad
+    del INSERT (run 29873773600, 2026-07-21, temporadas 2022-2024 SI
+    quedaron escritas antes del corte -- la funcion es idempotente por
+    upsert, asi que re-correr nunca duplica lo ya persistido). Trocear en
+    lotes mas chicos acota el radio de un corte de conexion transitorio a
+    un lote, no a la temporada completa, sin perder el beneficio real de
+    `executemany` sobre la version fila-por-fila.
+
     `rows` es una lista de dicts con `game_pk`/`model_name`/`home_win_prob`
     -- mismo patron `executemany` que `bulk_insert_statcast_events()`, pero
     con `on_conflict_do_UPDATE` (no `do_nothing`) para que re-correr tras
@@ -357,26 +372,31 @@ def bulk_upsert_model_predictions(engine: Engine, season: int, rows: list[dict])
         return 0
     now = datetime.now(timezone.utc)
     payload = [{**r, "season": season, "recorded_at": now} for r in rows]
-    with engine.begin() as conn:
-        dialect_name = conn.engine.dialect.name
-        if dialect_name == "postgresql":
-            from sqlalchemy.dialects import postgresql
-            stmt = postgresql.insert(historical_model_prediction)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["game_pk", "model_name"],
-                set_={"home_win_prob": stmt.excluded.home_win_prob, "recorded_at": stmt.excluded.recorded_at},
-            )
-        elif dialect_name == "sqlite":
-            from sqlalchemy.dialects import sqlite
-            stmt = sqlite.insert(historical_model_prediction)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["game_pk", "model_name"],
-                set_={"home_win_prob": stmt.excluded.home_win_prob, "recorded_at": stmt.excluded.recorded_at},
-            )
-        else:
-            stmt = historical_model_prediction.insert()
-        conn.execute(stmt, payload)
-    return len(payload)
+    dialect_name = engine.dialect.name
+
+    n_written = 0
+    for start in range(0, len(payload), MODEL_PREDICTION_UPSERT_CHUNK_SIZE):
+        chunk = payload[start:start + MODEL_PREDICTION_UPSERT_CHUNK_SIZE]
+        with engine.begin() as conn:
+            if dialect_name == "postgresql":
+                from sqlalchemy.dialects import postgresql
+                stmt = postgresql.insert(historical_model_prediction)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["game_pk", "model_name"],
+                    set_={"home_win_prob": stmt.excluded.home_win_prob, "recorded_at": stmt.excluded.recorded_at},
+                )
+            elif dialect_name == "sqlite":
+                from sqlalchemy.dialects import sqlite
+                stmt = sqlite.insert(historical_model_prediction)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["game_pk", "model_name"],
+                    set_={"home_win_prob": stmt.excluded.home_win_prob, "recorded_at": stmt.excluded.recorded_at},
+                )
+            else:
+                stmt = historical_model_prediction.insert()
+            conn.execute(stmt, chunk)
+        n_written += len(chunk)
+    return n_written
 
 
 def model_predictions_for_season(engine: Engine, season: int) -> list[dict]:
